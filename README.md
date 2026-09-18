@@ -8,12 +8,13 @@ graph and the same observed traffic state.
 
 ## Status
 
-`core/`, `instances/`, and the `ExperimentConfig`/`RunMetrics` config
-models are implemented and tested (41 unit tests, two `examples/`
-scripts). `storage/`, `resolution/`, `controllers/`, `environment/`,
-`models/`, `training/` are still docstring-only stubs — they depend on
-method-level parameters the thesis hasn't fixed yet. See
-`docs/implementation_phases.md` for the build order.
+`core/`, `instances/`, the `ExperimentConfig`/`RunMetrics` config models,
+and `viz/` (matplotlib + pygame) are implemented and tested (47 unit
+tests, three `examples/` scripts). `storage/`, `resolution/`,
+`controllers/`, `environment/`, `models/`, `training/` are still
+docstring-only stubs — they depend on method-level parameters the thesis
+hasn't fixed yet. See `docs/implementation_phases.md` for the build
+order and `bugs.md` for real bugs found and fixed along the way.
 
 ## Layout
 
