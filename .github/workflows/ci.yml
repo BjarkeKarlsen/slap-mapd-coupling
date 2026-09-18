@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install package (dev + viz extras)
+        run: pip install -e ".[dev,viz]"
+
+      - name: Run tests
+        env:
+          # pygame needs a display; the "dummy" SDL driver lets the
+          # pygame_renderer tests run headless in CI (no real window).
+          SDL_VIDEODRIVER: dummy
+        run: pytest
+
+      - name: Compile-check every source and example file
+        run: python -m py_compile $(find src examples -name "*.py")
