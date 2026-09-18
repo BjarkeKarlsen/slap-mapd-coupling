@@ -17,7 +17,8 @@ tests, three `examples/` scripts). `storage/`, `resolution/`,
 `controllers/`, `environment/`, `models/`, `training/` are still
 docstring-only stubs — they depend on method-level parameters the thesis
 hasn't fixed yet. See `docs/implementation_phases.md` for the build
-order and `bugs.md` for real bugs found and fixed along the way.
+order and the repo's [closed issues](../../issues?q=is%3Aissue+is%3Aclosed)
+for real bugs found and fixed along the way.
 
 ## Layout
 

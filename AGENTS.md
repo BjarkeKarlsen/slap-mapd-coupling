@@ -69,3 +69,11 @@ Everything else (`core/`, `instances/`, `resolution/`, `environment/`,
 - CLI verbs are `simulate` / `train` / `sweep` (see `main.py`), not
   `train`/`evaluate`/`generate-config`: only the decentralised controller
   trains, so `--checkpoint` never applies to the other two.
+- When a bug, limitation, or feature idea needs documenting, open a
+  GitHub issue (`gh issue create`) — don't write it into a standalone
+  markdown file (a `bugs.md`, a `TODO.md`, etc.). A prior `bugs.md` was
+  removed for exactly this reason: it duplicated content that was also
+  filed as issues, and the two would only drift apart over time. If a
+  bug is already fixed by the time it's documented, still file the
+  issue and close it immediately with a note — that keeps a searchable
+  record without the duplication.

@@ -71,6 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `docs/model_integration.md`'s references to files deleted in this
   restructuring.
 
+### Removed
+- `bugs.md`. Its content was already duplicated as closed GitHub issues
+  #1-6 (see the repo's issue tracker); keeping both was exactly the
+  same "two copies drift apart" problem the wiki's Home page was
+  deliberately kept free of. Bugs/documentation-worthy findings go
+  straight to an issue from now on — see `AGENTS.md`.
+
 ## [0.1.0] - 2026-08-14
 
 ### Added
