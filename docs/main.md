@@ -1,15 +1,15 @@
-# src/hierarchical_robot_rl/main.py
+# src/slap_mapd_coupling/main.py
 ```python
 import click
 from pathlib import Path
 import yaml
-from hierarchical_robot_rl.training.trainer import YourTrainer
-from hierarchical_robot_rl.evaluation.evaluator import Evaluator
+from slap_mapd_coupling.training.trainer import YourTrainer
+from slap_mapd_coupling.evaluation.evaluator import Evaluator
 
 @click.group()
 @click.version_option()
 def cli():
-    """Hierarchical Robot RL CLI"""
+    """SLAP-MAPD Coupling CLI"""
     pass
 
 @cli.command()
@@ -62,7 +62,7 @@ def evaluate(checkpoint, num_episodes, render):
               help='Output config file')
 def generate_config(config, output):
     """Generate a config file from defaults"""
-    from hierarchical_robot_rl.training.config import get_default_config
+    from slap_mapd_coupling.training.config import get_default_config
     cfg = get_default_config()
     with open(output, 'w') as f:
         yaml.dump(cfg, f)
@@ -73,7 +73,7 @@ def generate_config(config, output):
               help='Checkpoint to inspect')
 def inspect(checkpoint):
     """Inspect checkpoint details"""
-    from hierarchical_robot_rl.training.utils import load_checkpoint
+    from slap_mapd_coupling.training.utils import load_checkpoint
     ckpt = load_checkpoint(checkpoint)
     click.echo(f"Checkpoint info: {ckpt.keys()}")
 

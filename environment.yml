@@ -1,23 +1,24 @@
-name: robot-rl
+# NOTE: the actual dev workflow uses a shared uv-managed virtualenv at
+# ~/.venvs/rl, not this conda env -- see docs/GETTING_STARTED.md. Kept
+# here as an alternative for anyone who prefers conda / doesn't have
+# ~/.venvs/rl.
+name: slap-mapd-coupling
 channels:
   - conda-forge
   - pytorch
 dependencies:
   - python=3.10
   - pytorch::pytorch::cpuonly  # or pytorch::pytorch::pytorch-cuda=11.8
-  - pytorch::pytorch-cuda=11.8
   - pip
   - pip-tools
   - pip:
-    - ray[rllib]==2.x.x
-    - gymnasium==0.27.x
-    - numpy>=1.21.0
-    - pygame>=2.1.0
+    - ray[rllib]>=2.9.0
+    - gymnasium>=0.29.0
+    - numpy>=1.24.0
+    - networkx>=3.0
+    - matplotlib>=3.7.0
     - tensorboard>=2.10.0
     - click>=8.0.0        # For CLI argument parsing
     - pyyaml>=6.0         # For config files
     - pytest>=7.0.0       # Testing
     - pytest-cov>=4.0.0   # Coverage
-    - black>=23.0.0       # Code formatting
-    - flake8>=5.0.0       # Linting
-    - mypy>=0.990         # Type checking

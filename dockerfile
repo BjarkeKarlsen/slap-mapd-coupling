@@ -22,4 +22,4 @@ RUN pip install -e .
 EXPOSE 6006
 
 # Default command: run training
-CMD ["python", "-m", "hierarchical_robot_rl.main", "train", "--help"]
+CMD ["python", "-m", "slap_mapd_coupling.main", "train", "--help"]

@@ -3,21 +3,24 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hierarchical-robot-rl"
+name = "slap-mapd-coupling"
 version = "0.1.0"
 authors = [
-    { name = "Bjarke Karlsen", email = "bjarke@example.com" }
+    { name = "Bjarke Karlsen" }
 ]
-description = "Hierarchical multi-agent RL for robot task learning"
-requires-python = ">=3.8"
+description = "Coupled storage-assignment (SLAP) / multi-agent pickup-and-delivery (MAPD) simulation and RL controllers for a warehouse graph."
+requires-python = ">=3.10"
 dependencies = [
-    "ray[rllib]>=2.0.0",
-    "torch>=1.12.0",
-    "gymnasium>=0.27.0",
-    "numpy>=1.21.0",
-    "pygame>=2.1.0",
+    "pydantic>=2.6",
+    "ray[rllib]>=2.9.0",
+    "torch>=2.0.0",
+    "gymnasium>=0.29.0",
+    "numpy>=1.24.0",
+    "networkx>=3.0",
+    "matplotlib>=3.7.0",
+    "pyyaml>=6.0",
+    "click>=8.0.0",
 ]
-dynamic = ["scripts"]
 
 [project.optional-dependencies]
 dev = [
@@ -26,6 +29,9 @@ dev = [
     "black>=23.0.0",
     "flake8>=5.0.0",
     "mypy>=0.990",
+]
+viz = [
+    "pygame>=2.5.0",
 ]
 
 [tool.pytest.ini_options]
@@ -42,4 +48,4 @@ warn_return_any = true
 warn_unused_configs = true
 
 [project.scripts]
-robot-rl = "hierarchical_robot_rl.main:cli"
+slap-mapd = "slap_mapd_coupling.main:cli"

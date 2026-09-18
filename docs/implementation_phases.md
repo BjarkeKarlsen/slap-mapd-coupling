@@ -9,7 +9,7 @@
 - [ ] Create basic tests/conftest.py
 
 ### Phase 2: Core Design 
-- [ ] Move code to src/hierarchical_robot_rl/
+- [ ] Move code to src/slap_mapd_coupling/
 - [ ] Organize into submodules (core, environment, models, training, etc.)
 - [ ] Create __init__.py files with proper exports
 - [ ] Update all imports to new structure
