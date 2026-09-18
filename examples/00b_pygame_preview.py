@@ -37,9 +37,14 @@ def _random_step(graph: WarehouseGraph, fleet: FleetState, rng: random.Random) -
             target = state.location if action.kind == "wait" else action.target
             proposal[agent_id] = AgentState(agent_id=agent_id, location=target)
         candidate = FleetState(agents=proposal)
-        if has_vertex_conflict(fleet, candidate) is None and has_swap_conflict(fleet, candidate) is None:
+        if (
+            has_vertex_conflict(fleet, candidate) is None
+            and has_swap_conflict(fleet, candidate) is None
+        ):
             return candidate
-    return fleet  # no collision-free draw found this frame; stand still rather than force one through
+    return (
+        fleet  # no collision-free draw found this frame; stand still rather than force one through
+    )
 
 
 def main() -> None:
@@ -60,7 +65,9 @@ def main() -> None:
     instance = generate_instance(params)
     graph = instance.graph
 
-    start_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.endpoint][:num_agents]
+    start_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.endpoint][
+        :num_agents
+    ]
     fleet = FleetState(
         agents={i: AgentState(agent_id=i, location=v) for i, v in enumerate(start_vertices)}
     )

@@ -28,7 +28,9 @@ def show_experiment_configs() -> None:
     )
 
     fixed = ExperimentConfig(storage_mode="fixed", **common)
-    demand = ExperimentConfig(storage_mode="demand", storage_epoch_length=50, reassignment_cap=20, **common)
+    demand = ExperimentConfig(
+        storage_mode="demand", storage_epoch_length=50, reassignment_cap=20, **common
+    )
     congestion = ExperimentConfig(
         storage_mode="congestion",
         storage_epoch_length=50,
@@ -41,7 +43,9 @@ def show_experiment_configs() -> None:
 
     print("\n=== Deliberately invalid config: congestion storage without congestion_weight ===")
     try:
-        ExperimentConfig(storage_mode="congestion", storage_epoch_length=50, reassignment_cap=20, **common)
+        ExperimentConfig(
+            storage_mode="congestion", storage_epoch_length=50, reassignment_cap=20, **common
+        )
     except ValidationError as exc:
         print(f"Rejected, as expected:\n{exc}")
 
@@ -63,8 +67,8 @@ def show_storage_state() -> None:
             "mugs": {2: 6, 3: 2},
         },
     )
-    for vertex in capacities:
-        print(f"  used_capacity({vertex}) = {state.used_capacity(vertex)}  (cap = {capacities[vertex]})")
+    for vertex, cap in capacities.items():
+        print(f"  used_capacity({vertex}) = {state.used_capacity(vertex)}  (cap = {cap})")
 
     print("\n=== Attempting an infeasible relocation (coffee at vertex 1 over capacity) ===")
     try:

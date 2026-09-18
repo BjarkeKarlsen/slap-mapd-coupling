@@ -1,4 +1,5 @@
-"""Parametric warehouse-graph generator (aisle count, aisle length, cross-aisles, one-way fraction)."""
+"""Parametric warehouse-graph generator (aisle count, aisle length,
+cross-aisles, one-way fraction)."""
 
 from __future__ import annotations
 
@@ -126,7 +127,10 @@ def _build(params: GeneratorParams) -> tuple[WarehouseGraph, dict[VertexId, tupl
     # vertex's attachment back to a column far from its own index.
     endpoint_ids = [
         add_vertex(
-            "endpoint", -1 - i // params.num_aisles, i % params.num_aisles, VertexRole(movable=True, endpoint=True)
+            "endpoint",
+            -1 - i // params.num_aisles,
+            i % params.num_aisles,
+            VertexRole(movable=True, endpoint=True),
         )
         for i in range(params.num_endpoints)
     ]
@@ -160,14 +164,20 @@ def _build(params: GeneratorParams) -> tuple[WarehouseGraph, dict[VertexId, tupl
 
     for col in range(params.num_aisles):
         for row in range(1, params.aisle_length):
-            interior_edges.append((pos_to_id[("aisle", row, col)], pos_to_id[("aisle", row + 1, col)]))
+            interior_edges.append(
+                (pos_to_id[("aisle", row, col)], pos_to_id[("aisle", row + 1, col)])
+            )
 
     for col in range(params.num_aisles - 1):
-        interior_edges.append((pos_to_id[("corridor", 0, col)], pos_to_id[("corridor", 0, col + 1)]))
+        interior_edges.append(
+            (pos_to_id[("corridor", 0, col)], pos_to_id[("corridor", 0, col + 1)])
+        )
 
     for row in cross_rows:
         for col in range(params.num_aisles - 1):
-            interior_edges.append((pos_to_id[("aisle", row, col)], pos_to_id[("aisle", row, col + 1)]))
+            interior_edges.append(
+                (pos_to_id[("aisle", row, col)], pos_to_id[("aisle", row, col + 1)])
+            )
 
     # Iterate over the delivery/endpoint vertices themselves (not over
     # aisle columns) and cycle the column each one attaches to: if there

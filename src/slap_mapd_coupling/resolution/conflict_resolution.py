@@ -1,1 +1,2 @@
-"""Deterministic conflict-resolution operator: fixed priority permutation, sequential accept-or-wait."""
+"""Deterministic conflict-resolution operator: fixed priority permutation,
+sequential accept-or-wait."""

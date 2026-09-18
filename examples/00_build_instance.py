@@ -2,7 +2,11 @@
 
 import os
 
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate, generate_instance
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    generate_and_validate,
+    generate_instance,
+)
 from slap_mapd_coupling.instances.validation import check_well_formedness
 from slap_mapd_coupling.viz.warehouse_plot import plot_graph
 
@@ -33,7 +37,8 @@ def main() -> None:
     graph, report = generate_and_validate(params, fleet_size=fleet_size, require_well_formed=False)
     print("\nInstanceGenerationReport (seed=1, connectivity only):")
     print(f"  accepted: {report.accepted}")
-    print(f"  connectivity.ok: {report.connectivity.ok} (failure_rate={report.connectivity.failure_rate:.3f})")
+    conn = report.connectivity
+    print(f"  connectivity.ok: {conn.ok} (failure_rate={conn.failure_rate:.3f})")
 
     if not report.accepted:
         print("\nRejected -- retrying across 5 more seeds to report a batch failure rate:")

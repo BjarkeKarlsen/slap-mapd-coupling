@@ -75,15 +75,21 @@ class WarehouseRenderer:
                 continue
             p1 = self._pixel_positions[edge.source]
             p2 = self._pixel_positions[edge.target]
-            reverse_exists = any(e.source == edge.target and e.target == edge.source for e in graph.edges)
+            reverse_exists = any(
+                e.source == edge.target and e.target == edge.source for e in graph.edges
+            )
             colour = self._hex_to_rgb(theme.PALETTE["edge" if reverse_exists else "one_way_edge"])
             pygame.draw.line(surface, colour, p1, p2, width=2 if reverse_exists else 3)
             drawn.add(pair)
 
         for vertex_id, vertex in graph.vertices.items():
             style, _secondary = theme.style_for_role(vertex.role)
-            pygame.draw.circle(surface, self._hex_to_rgb(style.fill), self._pixel_positions[vertex_id], 10)
-            pygame.draw.circle(surface, self._hex_to_rgb(style.edge), self._pixel_positions[vertex_id], 10, width=2)
+            pygame.draw.circle(
+                surface, self._hex_to_rgb(style.fill), self._pixel_positions[vertex_id], 10
+            )
+            pygame.draw.circle(
+                surface, self._hex_to_rgb(style.edge), self._pixel_positions[vertex_id], 10, width=2
+            )
 
         return surface
 

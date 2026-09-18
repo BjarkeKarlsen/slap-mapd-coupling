@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, NonNegativeFloat, PositiveFloat, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    NonNegativeFloat,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 
 StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
 ControllerArchitecture = Literal["centralised", "section", "decentralised"]
@@ -44,7 +51,8 @@ class ExperimentConfig(BaseModel):
         if self.storage_mode == "fixed":
             if self.storage_epoch_length is not None:
                 raise ValueError(
-                    "storage_mode='fixed' means Delta=infinity (F_fix); do not set storage_epoch_length."
+                    "storage_mode='fixed' means Delta=infinity (F_fix); "
+                    "do not set storage_epoch_length."
                 )
         else:
             for name in ("storage_epoch_length", "reassignment_cap"):

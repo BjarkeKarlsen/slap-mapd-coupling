@@ -50,7 +50,9 @@ class Task(BaseModel):
                     f"d_j={self.completion_time} < y_j={self.assignment_time}; requires y_j <= d_j."
                 )
         if (self.assigned_agent is None) != (self.assignment_time is None):
-            raise ValueError("assigned_agent and assignment_time must be set together (sigma(j) and y_j).")
+            raise ValueError(
+                "assigned_agent and assignment_time must be set together (sigma(j) and y_j)."
+            )
         return self
 
     def status(self, t: int) -> Literal["waiting", "active", "completed"]:
@@ -77,13 +79,17 @@ class Task(BaseModel):
         """
         if self.assignment_time is not None:
             raise ValueError(f"Task {self.task_id} already assigned at y_j={self.assignment_time}.")
-        return Task.model_validate({**self.model_dump(), "assigned_agent": agent_id, "assignment_time": t})
+        return Task.model_validate(
+            {**self.model_dump(), "assigned_agent": agent_id, "assignment_time": t}
+        )
 
     def complete(self, t: int) -> "Task":
         if self.assignment_time is None:
             raise ValueError(f"Task {self.task_id} cannot complete before assignment.")
         if self.completion_time is not None:
-            raise ValueError(f"Task {self.task_id} already completed at d_j={self.completion_time}.")
+            raise ValueError(
+                f"Task {self.task_id} already completed at d_j={self.completion_time}."
+            )
         return Task.model_validate({**self.model_dump(), "completion_time": t})
 
     def is_pickup_feasible(self, storage: StorageState) -> bool:

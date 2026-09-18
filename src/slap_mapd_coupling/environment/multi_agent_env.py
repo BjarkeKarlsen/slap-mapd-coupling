@@ -1,1 +1,2 @@
-"""WarehouseMAPDEnv: the six-stage step loop (tasks, assignment, routing, resolution, transition, storage update)."""
+"""WarehouseMAPDEnv: the six-stage step loop (tasks, assignment, routing,
+resolution, transition, storage update)."""

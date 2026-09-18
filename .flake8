@@ -1,0 +1,11 @@
+[flake8]
+max-line-length = 100
+# E203/W503 are black-formatting artifacts (whitespace before ':', line break
+# before a binary operator) that flake8 flags and black intentionally
+# produces -- standard black/flake8 compatibility ignores.
+extend-ignore = E203, W503
+per-file-ignores =
+    # matplotlib.use("Agg") must run before importing pyplot -- the module
+    # docstring/backend-selection lines are deliberately before the rest of
+    # the imports, not an oversight.
+    src/slap_mapd_coupling/viz/warehouse_plot.py:E402

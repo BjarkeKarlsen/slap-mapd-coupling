@@ -5,7 +5,15 @@ from __future__ import annotations
 import heapq
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, PositiveFloat, PrivateAttr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    PositiveFloat,
+    PrivateAttr,
+    model_validator,
+)
 
 VertexId = int
 

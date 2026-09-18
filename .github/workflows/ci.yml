@@ -28,3 +28,26 @@ jobs:
 
       - name: Compile-check every source and example file
         run: python -m py_compile $(find src examples -name "*.py")
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install package (dev + viz extras -- mypy needs pygame installed
+          to check viz/pygame_renderer.py's import, same as the test job)
+        run: pip install -e ".[dev,viz]"
+
+      - name: black --check
+        run: black --check --diff src examples tests
+
+      - name: flake8
+        run: flake8 src examples tests
+
+      - name: mypy
+        run: mypy src

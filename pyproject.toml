@@ -36,7 +36,10 @@ viz = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=src --cov-report=html"
+# 85% is a floor with headroom, not a target -- current coverage is ~93%.
+# Raise it as controllers/environment/training grow real tests, don't
+# lower it to make a red build pass.
+addopts = "-v --cov=src --cov-report=html --cov-report=term-missing --cov-fail-under=85"
 
 [tool.black]
 line-length = 100
@@ -46,6 +49,14 @@ target-version = ['py310']
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+# networkx ships no inline types and there's no maintained third-party
+# stub package pinned for this networkx version; ignoring missing imports
+# for it specifically (not project-wide) is the standard mypy pattern for
+# an untyped dependency.
+module = "networkx.*"
+ignore_missing_imports = true
 
 [project.scripts]
 slap-mapd = "slap_mapd_coupling.main:cli"

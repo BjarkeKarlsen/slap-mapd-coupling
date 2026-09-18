@@ -32,7 +32,9 @@ def _patch_for_shape(shape: str, xy: tuple[float, float], size: float, **kwargs)
         s = size
         return Rectangle((xy[0] - s / 2, xy[1] - s / 2), s, s, **kwargs)
     if shape == "diamond":
-        return RegularPolygon(xy, numVertices=4, radius=size / 1.5, orientation=math.pi / 4, **kwargs)
+        return RegularPolygon(
+            xy, numVertices=4, radius=size / 1.5, orientation=math.pi / 4, **kwargs
+        )
     return Circle(xy, size / 2, **kwargs)
 
 
@@ -56,7 +58,9 @@ def plot_graph(
             continue
         x1, y1 = positions[edge.source]
         x2, y2 = positions[edge.target]
-        reverse_exists = any(e.source == edge.target and e.target == edge.source for e in graph.edges)
+        reverse_exists = any(
+            e.source == edge.target and e.target == edge.source for e in graph.edges
+        )
         if reverse_exists:
             ax.plot([x1, x2], [y1, y2], color=theme.PALETTE["edge"], linewidth=1.4, zorder=1)
             drawn.add(pair)
@@ -65,7 +69,9 @@ def plot_graph(
                 "",
                 xy=(x2, y2),
                 xytext=(x1, y1),
-                arrowprops=dict(arrowstyle="-|>", color=theme.PALETTE["one_way_edge"], linewidth=1.8),
+                arrowprops=dict(
+                    arrowstyle="-|>", color=theme.PALETTE["one_way_edge"], linewidth=1.8
+                ),
                 zorder=1,
             )
             drawn.add(pair)
@@ -75,30 +81,61 @@ def plot_graph(
         xy = positions[vertex_id]
         marker_size = 0.34
         patch = _patch_for_shape(
-            style.shape, xy, marker_size, facecolor=style.fill, edgecolor=style.edge, linewidth=1.4, zorder=2
+            style.shape,
+            xy,
+            marker_size,
+            facecolor=style.fill,
+            edgecolor=style.edge,
+            linewidth=1.4,
+            zorder=2,
         )
         ax.add_patch(patch)
         if secondary_roles:
-            ring = Circle(xy, marker_size * 0.85, facecolor="none", edgecolor=theme.ROLE_STYLES[secondary_roles[0]].edge, linewidth=1.6, linestyle="--", zorder=3)
+            ring = Circle(
+                xy,
+                marker_size * 0.85,
+                facecolor="none",
+                edgecolor=theme.ROLE_STYLES[secondary_roles[0]].edge,
+                linewidth=1.6,
+                linestyle="--",
+                zorder=3,
+            )
             ax.add_patch(ring)
 
     handles = [
         Line2D([], [], marker=_MARKERS[s.shape], ls="", mfc=s.fill, mec=s.edge, ms=11, label=name)
         for name, s in theme.ROLE_STYLES.items()
     ]
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=len(handles), frameon=False)
+    ax.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=len(handles),
+        frameon=False,
+    )
     ax.set_aspect("equal")
     ax.set_axis_off()
     ax.autoscale_view()
     return ax
 
 
-def plot_agents(ax: Axes, fleet: FleetState, positions: dict[VertexId, tuple[float, float]]) -> Axes:
+def plot_agents(
+    ax: Axes, fleet: FleetState, positions: dict[VertexId, tuple[float, float]]
+) -> Axes:
     """Overlay: one marker + label per agent."""
     for agent_id, vertex_id in fleet.locations().items():
         x, y = positions[vertex_id]
-        ax.scatter([x], [y], s=180, c=theme.PALETTE["agent"], zorder=5, edgecolors="white", linewidths=1.2)
-        ax.annotate(str(agent_id), (x, y), textcoords="offset points", xytext=(0, 12), ha="center", color=theme.PALETTE["agent"])
+        ax.scatter(
+            [x], [y], s=180, c=theme.PALETTE["agent"], zorder=5, edgecolors="white", linewidths=1.2
+        )
+        ax.annotate(
+            str(agent_id),
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, 12),
+            ha="center",
+            color=theme.PALETTE["agent"],
+        )
     return ax
 
 
@@ -110,7 +147,9 @@ def plot_storage_heatmap(
     sku: SkuId,
 ) -> Axes:
     """Overlay: per-vertex unit count for one SKU, sized by count."""
-    max_units = max((storage.units(sku, v) for v in graph.vertices if graph.vertices[v].role.storage), default=0)
+    max_units = max(
+        (storage.units(sku, v) for v in graph.vertices if graph.vertices[v].role.storage), default=0
+    )
     if max_units == 0:
         return ax
     for vertex_id, vertex in graph.vertices.items():
@@ -120,8 +159,23 @@ def plot_storage_heatmap(
         if units == 0:
             continue
         x, y = positions[vertex_id]
-        ax.scatter([x], [y], s=200 * (units / max_units), c="none", edgecolors="#c0392b", linewidths=2.0, zorder=4)
-        ax.annotate(str(units), (x, y), textcoords="offset points", xytext=(10, -10), fontsize=8, color="#c0392b")
+        ax.scatter(
+            [x],
+            [y],
+            s=200 * (units / max_units),
+            c="none",
+            edgecolors="#c0392b",
+            linewidths=2.0,
+            zorder=4,
+        )
+        ax.annotate(
+            str(units),
+            (x, y),
+            textcoords="offset points",
+            xytext=(10, -10),
+            fontsize=8,
+            color="#c0392b",
+        )
     return ax
 
 

@@ -1,4 +1,5 @@
-"""Run metrics: service time, throughput, movement cost, waiting/backlog, traffic entropy and concentration."""
+"""Run metrics: service time, throughput, movement cost, waiting/backlog,
+traffic entropy and concentration."""
 
 from __future__ import annotations
 
@@ -85,5 +86,7 @@ class RunMetrics(BaseModel):
     @model_validator(mode="after")
     def _backlog_is_sum(self) -> "RunMetrics":
         if self.backlog != self.num_waiting_tasks + self.num_active_tasks:
-            raise ValueError("backlog must equal num_waiting_tasks + num_active_tasks (eq:functional's B_T).")
+            raise ValueError(
+                "backlog must equal num_waiting_tasks + num_active_tasks (eq:functional's B_T)."
+            )
         return self
