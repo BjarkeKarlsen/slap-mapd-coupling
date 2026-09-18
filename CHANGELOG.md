@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correct).
 
 ### Changed
+- Rewrote `docs/implementation_phases.md`: it was still the generic
+  template checklist (and actively wrong in one place — it listed the
+  old `train`/`evaluate`/`inspect`/`generate-config` CLI). Replaced with
+  the real milestone-by-milestone build order (M0-M7), marking what's
+  actually done vs. still stubbed.
 - Renamed the generic `hierarchical_robot_rl` template to
   `slap_mapd_coupling` and replaced its placeholder modules with the
   module layout for the SLAP-MAPD coupling thesis: `core`, `instances`,
