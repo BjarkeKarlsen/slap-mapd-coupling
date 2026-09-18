@@ -6,6 +6,9 @@ warehouse graph where a periodic storage rule `F` and a routing controller
 `pi` (centralised, section-based, or decentralised-learned) act on the same
 graph and the same observed traffic state.
 
+**Thesis document (read-only, live compiled PDF via Overleaf):**
+https://overleaf.trit.au.dk/read/gjzcpzsxbnpr#67ffc6
+
 ## Status
 
 `core/`, `instances/`, the `ExperimentConfig`/`RunMetrics` config models,
@@ -34,11 +37,17 @@ order and `bugs.md` for real bugs found and fixed along the way.
 
 ### Installation
 
-Uses the shared `~/.venvs/rl` virtualenv, not a per-project one — see
-`docs/GETTING_STARTED.md` for the full setup/editor guide. Short version:
+The project has no dependency on any particular virtualenv location or
+name — `pyproject.toml`/`requirements.txt` are the actual dependency
+declarations, and CI (`.github/workflows/ci.yml`) installs into a fresh
+one per run. On the primary dev machine there's a `~/.venvs/rl`
+virtualenv already set up and shared across RL projects (see
+`docs/GETTING_STARTED.md`), but that's a machine-local convenience, not
+a project requirement — any virtualenv works:
 
 ```bash
-uv pip install --python ~/.venvs/rl/bin/python -e ".[dev]"
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
 ### CLI

@@ -2,6 +2,14 @@
 
 ### Local Development
 
+**`~/.venvs/rl` below is a machine-local convenience, not a project
+dependency.** `pyproject.toml`/`requirements.txt` are the actual
+dependency declarations, and they don't reference any particular
+virtualenv path or name — any venv works (`python -m venv .venv && pip
+install -e ".[dev]"` is enough on a machine without this one already
+set up). What follows describes the primary dev machine's actual setup,
+which anyone working from that machine should follow to match it.
+
 This project uses a **shared** virtualenv at `~/.venvs/rl` (Python 3.10,
 managed with [`uv`](https://docs.astral.sh/uv/)) rather than a
 per-project one — it already has the heavy RL dependencies (`ray`,
