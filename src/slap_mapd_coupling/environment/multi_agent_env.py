@@ -77,7 +77,7 @@ from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, StorageState
-from slap_mapd_coupling.core.tasks import Task, TaskId
+from slap_mapd_coupling.core.tasks import Task, TaskId, active_tasks_by_agent
 from slap_mapd_coupling.environment.reward_function import reward as compute_agent_reward
 from slap_mapd_coupling.environment.spaces import action_for_slot
 from slap_mapd_coupling.resolution.conflict_resolution import (
@@ -115,15 +115,6 @@ class EpisodeLog:
 
     def record_blocked_tick(self, task_id: TaskId) -> None:
         self.blocked_ticks_by_task[task_id] = self.blocked_ticks_by_task.get(task_id, 0) + 1
-
-
-def _active_tasks_by_agent(tasks: list[Task], t: int) -> dict[AgentId, Task]:
-    active: dict[AgentId, Task] = {}
-    for task in tasks:
-        if task.status(t) == "active":
-            assert task.assigned_agent is not None
-            active[task.assigned_agent] = task
-    return active
 
 
 class WarehouseMAPDEnv:
@@ -255,7 +246,7 @@ class WarehouseMAPDEnv:
         # self._t, so this has to be taken after stage 2, not before --
         # the freshly assigned agent's action this same tick still counts
         # towards omega_j(t) and this timestep's reward.
-        active_tasks_by_agent = _active_tasks_by_agent(self.tasks, self._t)
+        active_by_agent = active_tasks_by_agent(self.tasks, self._t)
 
         # Stage 3: routing (pi_route) -- the one stage a controller swap
         # touches, and the one stage `actions` (if given) overrides the
@@ -300,7 +291,7 @@ class WarehouseMAPDEnv:
         next_t = self._t + 1
         self.tasks = self._advance_task_lifecycle(next_t)
 
-        for agent_id, task in active_tasks_by_agent.items():
+        for agent_id, task in active_by_agent.items():
             if before_locations[agent_id] == realised_locations[agent_id]:
                 self.log.record_blocked_tick(task.task_id)  # omega_j(t): realised wait
 
@@ -330,7 +321,7 @@ class WarehouseMAPDEnv:
             )
 
         rewards = self._compute_rewards(
-            before_locations, active_tasks_by_agent, result.overridden, next_t
+            before_locations, active_by_agent, result.overridden, next_t
         )
 
         self._t = next_t
@@ -417,7 +408,7 @@ class WarehouseMAPDEnv:
     def _compute_rewards(
         self,
         before_locations: Mapping[AgentId, VertexId],
-        active_tasks_by_agent: Mapping[AgentId, Task],
+        active_by_agent: Mapping[AgentId, Task],
         overridden: frozenset[AgentId],
         next_t: int,
     ) -> dict[AgentId, float]:
@@ -441,10 +432,10 @@ class WarehouseMAPDEnv:
         assert self.config.congestion_reward_weight is not None
 
         after_locations = self.fleet.locations()
-        after_tasks_by_agent = _active_tasks_by_agent(self.tasks, next_t)
+        after_tasks_by_agent = active_tasks_by_agent(self.tasks, next_t)
         rewards: dict[AgentId, float] = {}
         for agent_id in self.fleet.agents:
-            task_now = active_tasks_by_agent.get(agent_id)
+            task_now = active_by_agent.get(agent_id)
             task_next = after_tasks_by_agent.get(agent_id)
             completed = (
                 task_now is not None
