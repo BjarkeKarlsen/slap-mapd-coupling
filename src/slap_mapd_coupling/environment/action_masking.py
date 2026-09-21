@@ -151,7 +151,21 @@ class ActionMaskingTorchRLModule(ActionMaskingRLModule, DefaultPPOTorchRLModule)
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: Dict[str, TensorType], embeddings=None):
-        if isinstance(batch[Columns.OBS], dict):
+        # `_forward_train` (same training step, same batch object -- see
+        # _preprocess_batch) may have already stripped "action_mask" off
+        # batch[OBS] by the time this runs; RLlib's own upstream example
+        # (this class's source) instead checks `isinstance(batch[OBS],
+        # dict)` to detect "already preprocessed," which is unsound
+        # whenever "observations" is ITSELF Dict-shaped (#28's node/
+        # message/etc. tensors, not a flat Box like the upstream
+        # example's) -- batch[OBS] is still a dict post-preprocessing
+        # too, so that check can't tell the two states apart and
+        # `_preprocess_batch` gets called a second time, popping an
+        # "action_mask" key that's already gone. Checking for the key
+        # itself, not just dict-ness, is the actual "not yet
+        # preprocessed" condition regardless of what "observations"
+        # looks like.
+        if isinstance(batch[Columns.OBS], dict) and "action_mask" in batch[Columns.OBS]:
             action_mask, batch = self._preprocess_batch(batch)
             batch["action_mask"] = action_mask
         return super().compute_values(batch, embeddings)
