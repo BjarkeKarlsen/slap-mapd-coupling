@@ -40,6 +40,18 @@ two would need two independent round-counts instead of one Q, calling
 that an "open refinement, not yet adopted" -- this encoder does NOT
 implement that split, since doing so would be inventing a decision the
 thesis text explicitly says hasn't been made.
+
+`forward` (below) is the unbatched path: one Observation, in, one z_i
+out -- used directly by anything that isn't RLlib's own tensor-batched
+training loop (e.g. #29's Controller wrapper). `forward_padded` is a
+second, batched entry point over already-padded/masked tensors (see
+models/local_subgraph_encoding.py, #28), needed because G_i^(d)(t) has a
+variable vertex count RLlib's fixed-shape batch pipeline can't carry
+directly -- discussed and agreed before implementing (pad to a fixed
+max_local_nodes cap). Both paths share the exact same phi/psi weights;
+forward_padded is a vectorised (dense, mask-weighted) reformulation of
+the identical eq:msgpass computation, not a second model -- verified
+directly in tests by checking the two agree on the same input.
 """
 
 from __future__ import annotations
@@ -167,3 +179,58 @@ class GNNEncoder(nn.Module):
         congestion_tensor = torch.tensor([congestion], dtype=torch.float32)
 
         return torch.cat([own_embedding, aggregated, congestion_tensor], dim=-1)
+
+    def forward_padded(
+        self,
+        node_features: torch.Tensor,
+        node_mask: torch.Tensor,
+        adjacency: torch.Tensor,
+        own_index: torch.Tensor,
+        message_features: torch.Tensor,
+        message_mask: torch.Tensor,
+        congestion: torch.Tensor,
+    ) -> torch.Tensor:
+        """Batched z_i (eq:readout) over already-padded/masked tensors --
+        see class docstring. Shapes, with B the batch size, N
+        max_local_nodes, M max_messages (models/local_subgraph_encoding.py):
+
+        node_features [B,N,NODE_FEATURE_DIM], node_mask [B,N] (1 valid /
+        0 pad), adjacency [B,N,N] (1 undirected neighbour / 0 otherwise,
+        already 0 on any padded row/col), own_index [B] (long, which row
+        is l_i(t)), message_features [B,M,MESSAGE_FEATURE_DIM],
+        message_mask [B,M], congestion [B].
+
+        Mathematically identical to `forward`'s per-vertex mean
+        aggregation: phi_q is evaluated for every (v,w) pair densely,
+        weighted by `adjacency` (zeroing out non-neighbours and padding
+        in one step) and averaged by each node's own (masked) degree --
+        the same neighbour-set mean `forward` computes sparsely via a
+        Python loop, just vectorised.
+        """
+        h = node_features
+        batch_size, max_nodes, _ = h.shape
+
+        if self.config.num_rounds > 0:
+            for phi_q, psi_q in zip(self.phi, self.psi):
+                own = h.unsqueeze(2).expand(batch_size, max_nodes, max_nodes, -1)
+                other = h.unsqueeze(1).expand(batch_size, max_nodes, max_nodes, -1)
+                pairwise = torch.cat([own, other], dim=-1)
+                pairwise_messages = phi_q(pairwise)  # [B,N,N,hidden]
+
+                weight = adjacency * node_mask.unsqueeze(1) * node_mask.unsqueeze(2)  # [B,N,N]
+                weighted = pairwise_messages * weight.unsqueeze(-1)
+                summed = weighted.sum(dim=2)  # sum over w -> [B,N,hidden]
+                degree = weight.sum(dim=2, keepdim=True).clamp(min=1.0)
+                m = summed / degree
+
+                h = psi_q(torch.cat([h, m], dim=-1))
+
+        own_embedding = h[torch.arange(batch_size), own_index]  # [B, node_dim]
+
+        message_weight = message_mask.unsqueeze(-1)  # [B,M,1]
+        message_count = message_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
+        aggregated = (message_features * message_weight).sum(
+            dim=1
+        ) / message_count  # [B,MESSAGE_FEATURE_DIM]
+
+        return torch.cat([own_embedding, aggregated, congestion.unsqueeze(-1)], dim=-1)
