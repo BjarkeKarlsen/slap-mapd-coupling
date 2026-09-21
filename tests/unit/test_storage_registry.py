@@ -25,7 +25,13 @@ def _graph() -> WarehouseGraph:
 
 
 def _dummy_rule(
-    x_prev, graph, reassignment_cap, demand_estimate, traversal_estimate, waiting_estimate
+    x_prev,
+    graph,
+    reassignment_cap,
+    congestion_weight,
+    demand_estimate,
+    traversal_estimate,
+    waiting_estimate,
 ):
     return x_prev
 
@@ -39,7 +45,7 @@ def test_register_and_get_roundtrip():
     assert "test-dummy" in registered_storage_rules()
     rule = get_storage_rule("test-dummy")
     state = _state()
-    assert rule(state, _graph(), None, {}, {}, {}) is state
+    assert rule(state, _graph(), None, None, {}, {}, {}) is state
 
 
 def test_get_unknown_storage_rule_raises_key_error():
