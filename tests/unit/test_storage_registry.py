@@ -2,6 +2,7 @@
 
 import pytest
 
+from slap_mapd_coupling.core.graph import Vertex, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, StorageState
 from slap_mapd_coupling.storage.base import StorageRule
 from slap_mapd_coupling.storage.registry import (
@@ -19,7 +20,13 @@ def _state() -> StorageState:
     )
 
 
-def _dummy_rule(x_prev, demand_estimate, traversal_estimate, waiting_estimate):
+def _graph() -> WarehouseGraph:
+    return WarehouseGraph(vertices={1: Vertex(id=1)}, edges=(), wait_cost=0.0)
+
+
+def _dummy_rule(
+    x_prev, graph, reassignment_cap, demand_estimate, traversal_estimate, waiting_estimate
+):
     return x_prev
 
 
@@ -32,7 +39,7 @@ def test_register_and_get_roundtrip():
     assert "test-dummy" in registered_storage_rules()
     rule = get_storage_rule("test-dummy")
     state = _state()
-    assert rule(state, {}, {}, {}) is state
+    assert rule(state, _graph(), None, {}, {}, {}) is state
 
 
 def test_get_unknown_storage_rule_raises_key_error():

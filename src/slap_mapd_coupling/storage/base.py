@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from slap_mapd_coupling.core.graph import VertexId
+from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
 
 EdgeKey = tuple[VertexId, VertexId]  # (source, target), keys mu_hat_t/w_hat_t below
@@ -28,11 +28,26 @@ class StorageRule(Protocol):
     eq:feasiblestorage; StorageState's own validator already rejects an
     infeasible result at construction time, so a rule that overfills a
     vertex fails loudly rather than silently.
+
+    `graph` and `reassignment_cap` were added after F_fix (which needs
+    neither): F_dem/F_cng need d_G (via `graph`) to rank storage vertices
+    by access distance, and nu (via `reassignment_cap`) for the shared
+    relocation cap (storage/relocation.py). Every other pure function in
+    this repo (resolution, assignment, the centralised controller) takes
+    graph explicitly as a per-call argument for the same reason: the
+    graph is static per episode but this Protocol has no construction
+    step to bind it at, unlike Controller's registry -- storage's own
+    registry stores the rule itself, not a factory
+    (docs/storage_rule_integration.md). `reassignment_cap` is None for
+    F_fix/rules that ignore it, matching ExperimentConfig's own
+    optionality for storage_mode="fixed".
     """
 
     def __call__(
         self,
         x_prev: StorageState,
+        graph: WarehouseGraph,
+        reassignment_cap: int | None,
         demand_estimate: DemandEstimate,
         traversal_estimate: TrafficEstimate,
         waiting_estimate: TrafficEstimate,
