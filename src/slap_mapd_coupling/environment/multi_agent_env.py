@@ -88,6 +88,7 @@ class EpisodeLog:
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)
+    total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:movementcost
 
     def record_edge(self, edge: EdgeKey) -> None:
         self.edge_traversals[edge] = self.edge_traversals.get(edge, 0) + 1
@@ -123,6 +124,10 @@ class WarehouseMAPDEnv:
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
         self._controller = get_controller(config.controller)
         self._storage_rule = get_storage_rule(config.storage_mode)
+        # eq:onestepcost's c(v,w): graph.out_neighbours only exposes
+        # targets, not per-edge cost, so cache a lookup once rather than
+        # linear-scanning graph.edges every step for eq:movementcost.
+        self._edge_costs: dict[EdgeKey, float] = {(e.source, e.target): e.cost for e in graph.edges}
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -232,6 +237,17 @@ class WarehouseMAPDEnv:
         for agent_id, action in proposed.items():
             if action.kind == "move" and realised_locations[agent_id] == action.target:
                 self.log.record_edge((before_locations[agent_id], action.target))
+
+        # eq:onestepcost's hat_c(l_i(t), l_i(t+1)), summed into
+        # eq:movementcost -- against the REALISED transition for every
+        # agent, not the proposal, so an overridden move is correctly
+        # costed as a wait, not as the move that didn't happen.
+        for agent_id, before_v in before_locations.items():
+            after_v = realised_locations[agent_id]
+            if before_v == after_v:
+                self.log.total_movement_cost += self.graph.wait_cost
+            else:
+                self.log.total_movement_cost += self._edge_costs[(before_v, after_v)]
 
         self.fleet = result.fleet
         next_t = self._t + 1

@@ -175,6 +175,27 @@ def test_edge_traversals_are_logged_for_realised_moves():
         assert any(e.source == source and e.target == target for e in env.graph.edges)
 
 
+def test_total_movement_cost_matches_hand_computed_realised_cost():
+    env = _env(_graph(), _config(horizon=10, num_agents=4))
+    env.reset()
+    before = env.fleet.locations()
+    expected = 0.0
+    for _ in range(10):
+        env.step()
+        after = env.fleet.locations()
+        for agent_id, before_v in before.items():
+            after_v = after[agent_id]
+            if before_v == after_v:
+                expected += env.graph.wait_cost
+            else:
+                edge = next(
+                    e for e in env.graph.edges if e.source == before_v and e.target == after_v
+                )
+                expected += edge.cost
+        before = after
+    assert env.log.total_movement_cost == pytest.approx(expected)
+
+
 def test_backlog_logged_every_timestep_including_reset():
     env = _env(_graph(), _config(horizon=10))
     env.reset()
