@@ -23,15 +23,58 @@ restate that model itself. Do not invent a parameter value that isn't
 pinned down — if a value needed to implement something isn't obviously
 determined by this repo's own docs (`README.md`, `docs/`), leave it a
 named, configurable parameter rather than hard-coding a guess, and flag it
-instead of picking silently.
+instead of picking silently. After leaving it a configurable parameter,
+open a GitHub issue describing precisely what's undetermined and why the
+code can't resolve it on its own (same `gh issue create` convention as
+any other gap — see "Conventions" below) — that issue is what eventually
+turns into the missing definition being written into the thesis document
+itself, not something to leave implicit in the code or a chat reply.
+
+Before implementing or reviewing anything against this model, validate it
+against the actual thesis document, not just this repo's own docs or
+memory of an earlier conversation: the Introduction chapter for scope,
+terminology, and problem framing; the Method chapter for the formal
+model, notation, and algorithmic definitions — whichever fits what's
+being checked. This repo doesn't hold that document itself (see "Keep
+this repo cloneable on its own" in the workspace root's own conventions,
+if you have access to it) — ask for the relevant chapter text or a
+pasted excerpt if it isn't already available. Treat a mismatch between
+this repo's code and the thesis text as something to resolve explicitly
+(see the correctness invariants and the `pr-description` skill's gap-
+flagging convention), not something to silently reconcile either way.
 
 ## Build / test / run
+
+This is the portable path — it works for anyone, on any machine, with any
+venv (or none) active, not just the primary dev machine:
 
 ```bash
 pip install -e ".[dev]"
 pytest
 slap-mapd simulate --storage-rule fixed --controller centralised
 ```
+
+`pyproject.toml`/`requirements.txt` are the actual dependency
+declarations; they don't reference any particular virtualenv path or
+name, so this is what to reach for first on a machine you don't
+recognise, or when in doubt.
+
+The **primary dev machine** additionally has a shared `uv`-managed
+virtualenv at `~/.venvs/rl` (Python 3.10) instead of a per-project one —
+see `docs/GETTING_STARTED.md` for full setup. This is a machine-local
+convenience, not a project requirement: don't assume it exists elsewhere.
+On that machine specifically, for non-interactive / scripted use (CI, an
+agent), call its binaries directly rather than activating first, since an
+activation doesn't persist across separate invocations:
+
+```bash
+uv pip install --python ~/.venvs/rl/bin/python -e ".[dev]"
+~/.venvs/rl/bin/python -m pytest
+~/.venvs/rl/bin/slap-mapd simulate --storage-rule fixed --controller centralised
+```
+
+Interactively there (a human, one shell): `source ~/.venvs/rl/bin/activate`
+once, then the portable commands above.
 
 ## Layout and extensibility
 
