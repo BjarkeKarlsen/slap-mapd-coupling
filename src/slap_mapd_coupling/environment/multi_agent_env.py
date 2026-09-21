@@ -41,6 +41,24 @@ agent's own current vertex. The full o_i(t) feature vector
 (eq:observation/eq:features) is environment/observation.py, M5 -- not
 needed by the centralised controller this milestone wires up, since it
 plans from full state directly, not from o_i(t).
+
+step() also accepts an optional `actions` mapping (issue #30): stage 3
+normally asks the registered Controller to compute u_i(t) for every
+agent from full state (`self._controller.route(...)`), but an RLlib
+rollout worker training a decentralised policy needs the OPPOSITE
+direction -- it observes o_i(t) itself (training/rllib_env.py) and
+supplies each agent's chosen action slot externally, every step, while
+gradients are live. Passing `actions` bypasses `route()` for that step
+and decodes the given slots directly (environment/spaces.py::
+action_for_slot); every other stage (assignment, conflict resolution,
+lifecycle, storage, reward) is untouched, so this is still the same
+six-stage loop, not a second one -- only stage 3's *source* differs.
+The registered-Controller path (`actions=None`) stays the only one
+centralised/section-based ever use, unaffected by this. Controller
+resolution is therefore lazy (looked up on first `actions=None` step,
+not in `__init__`): `config.controller="decentralised"` has no
+registered Controller until #29 lands, but a run driven entirely by
+`actions` never needs one.
 """
 
 from __future__ import annotations
@@ -53,13 +71,15 @@ from typing import Mapping
 import numpy as np
 
 from slap_mapd_coupling.controllers.assignment import assign_tasks
+from slap_mapd_coupling.controllers.base import Controller
 from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
+from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, StorageState
 from slap_mapd_coupling.core.tasks import Task, TaskId
 from slap_mapd_coupling.environment.reward_function import reward as compute_agent_reward
+from slap_mapd_coupling.environment.spaces import action_for_slot
 from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
@@ -122,7 +142,9 @@ class WarehouseMAPDEnv:
         self._skus = dict(skus)
         self._storage_capacities = dict(storage_capacities)
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
-        self._controller = get_controller(config.controller)
+        # Lazy: resolved on first actions=None step, not here -- see
+        # module docstring ("Controller resolution is therefore lazy").
+        self._controller: Controller | None = None
         self._storage_rule = get_storage_rule(config.storage_mode)
         # eq:onestepcost's c(v,w): graph.out_neighbours only exposes
         # targets, not per-edge cost, so cache a lookup once rather than
@@ -138,6 +160,13 @@ class WarehouseMAPDEnv:
         self._priority: tuple[AgentId, ...]
         self._order_rng: np.random.Generator
         self.reset()
+
+    @property
+    def t(self) -> int:
+        """Current timestep -- exposed read-only for callers building o_i(t)
+        (environment/observation.py) alongside self.fleet/self.tasks
+        (training/rllib_env.py, #30)."""
+        return self._t
 
     def reset(
         self, *, seed: int | None = None
@@ -184,6 +213,7 @@ class WarehouseMAPDEnv:
 
     def step(
         self,
+        actions: Mapping[AgentId, int] | None = None,
     ) -> tuple[
         dict[AgentId, VertexId],
         dict[AgentId, float],
@@ -195,6 +225,12 @@ class WarehouseMAPDEnv:
         (observations, rewards, terminated, truncated, infos), dict-keyed
         by agent id plus an "__all__" entry (RLlib/PettingZoo convention)
         signalling whether the whole episode is done.
+
+        `actions`, if given, is a per-agent chosen slot index (eq:mask)
+        decoded via environment/spaces.py::action_for_slot and used
+        directly for stage 3 instead of asking the registered Controller
+        -- see module docstring ("step() also accepts an optional
+        `actions` mapping").
         """
         before_fleet = self.fleet
 
@@ -221,9 +257,20 @@ class WarehouseMAPDEnv:
         # towards omega_j(t) and this timestep's reward.
         active_tasks_by_agent = _active_tasks_by_agent(self.tasks, self._t)
 
-        # Stage 3: routing (pi_route) -- the one stage a controller swap touches.
+        # Stage 3: routing (pi_route) -- the one stage a controller swap
+        # touches, and the one stage `actions` (if given) overrides the
+        # source of, per the module docstring.
         route_start = time.perf_counter()
-        proposed = self._controller.route(self.graph, self.fleet, self.tasks, self._t)
+        if actions is not None:
+            locations = self.fleet.locations()
+            proposed: dict[AgentId, Action] = {
+                agent_id: action_for_slot(self.graph, locations[agent_id], slot)
+                for agent_id, slot in actions.items()
+            }
+        else:
+            if self._controller is None:
+                self._controller = get_controller(self.config.controller)
+            proposed = self._controller.route(self.graph, self.fleet, self.tasks, self._t)
         self.log.routing_runtime_seconds.append(time.perf_counter() - route_start)
 
         # Stage 4: conflict resolution.

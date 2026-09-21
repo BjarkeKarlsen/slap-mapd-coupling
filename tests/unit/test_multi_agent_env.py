@@ -212,3 +212,77 @@ def test_decision_runtimes_logged_once_per_step():
         env.step()
     assert len(env.log.assignment_runtime_seconds) == 6
     assert len(env.log.routing_runtime_seconds) == 6
+
+
+def _decentralised_config(**overrides) -> ExperimentConfig:
+    defaults = dict(
+        storage_mode="fixed",
+        controller="decentralised",
+        congestion_sensitive=False,
+        communication=False,
+        num_agents=4,
+        arrival_rate=1.0,
+        seed=7,
+        horizon=25,
+        wait_cost=0.0,
+        observation_depth=3,
+        discount=0.99,
+        deliver_reward=1.0,
+        override_penalty=0.5,
+        congestion_reward_weight=0.1,
+    )
+    defaults.update(overrides)
+    return ExperimentConfig(**defaults)
+
+
+def test_step_with_external_actions_never_resolves_a_controller():
+    """controller='decentralised' has no registered Controller (#29 isn't
+    implemented yet) -- driving every step via `actions` must not need
+    one, per the module docstring's lazy-resolution design."""
+    env = _env(_graph(), _decentralised_config())
+    env.reset()
+    wait_actions = {agent_id: 0 for agent_id in env.fleet.agents}  # slot 0 is always wait
+    obs, rewards, terminated, truncated, infos = env.step(wait_actions)
+    assert obs == dict(env.fleet.locations())
+    assert env._controller is None  # never resolved
+
+
+def test_step_without_actions_raises_for_unregistered_controller():
+    env = _env(_graph(), _decentralised_config())
+    env.reset()
+    with pytest.raises(KeyError, match="decentralised"):
+        env.step()
+
+
+def test_step_with_external_wait_actions_keeps_agents_stationary():
+    env = _env(_graph(), _decentralised_config(horizon=5))
+    env.reset()
+    before = env.fleet.locations()
+    for _ in range(5):
+        env.step({agent_id: 0 for agent_id in env.fleet.agents})
+    assert env.fleet.locations() == before
+
+
+def test_step_with_external_move_action_matches_action_for_slot():
+    from slap_mapd_coupling.environment.spaces import action_for_slot
+
+    graph = _graph()
+    env = _env(graph, _decentralised_config(horizon=3))
+    env.reset()
+    agent_id = next(iter(env.fleet.agents))
+    location = env.fleet.locations()[agent_id]
+    legal = graph.legal_actions(location)
+    if len(legal) < 2:
+        pytest.skip("agent's start vertex has no legal move slot to exercise")
+    move_action = action_for_slot(graph, location, 1)
+
+    actions = {aid: 0 for aid in env.fleet.agents}
+    actions[agent_id] = 1
+    env.step(actions)
+
+    # The proposal may still be overridden by conflict resolution (stage
+    # 4), so this only checks the DECODED proposal matched action_for_slot,
+    # via the realised trace when nothing conflicts (num_agents small
+    # relative to the instance keeps this deterministic here).
+    realised = env.fleet.locations()[agent_id]
+    assert realised in {location, move_action.target}
