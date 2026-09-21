@@ -25,6 +25,19 @@ determined by this repo's own docs (`README.md`, `docs/`), leave it a
 named, configurable parameter rather than hard-coding a guess, and flag it
 instead of picking silently.
 
+Before implementing or reviewing anything against this model, validate it
+against the actual thesis document, not just this repo's own docs or
+memory of an earlier conversation: the Introduction chapter for scope,
+terminology, and problem framing; the Method chapter for the formal
+model, notation, and algorithmic definitions — whichever fits what's
+being checked. This repo doesn't hold that document itself (see "Keep
+this repo cloneable on its own" in the workspace root's own conventions,
+if you have access to it) — ask for the relevant chapter text or a
+pasted excerpt if it isn't already available. Treat a mismatch between
+this repo's code and the thesis text as something to resolve explicitly
+(see the correctness invariants and the `pr-description` skill's gap-
+flagging convention), not something to silently reconcile either way.
+
 ## Build / test / run
 
 The primary dev machine uses a shared `uv`-managed virtualenv at

@@ -57,3 +57,6 @@ Use `gh pr create --body "$(cat <<'EOF' ... EOF)"` (see the repo-wide git
 conventions for the heredoc pattern and commit attribution). Show the
 drafted Summary/Test plan to the user for approval before running it,
 same as any other PR.
+
+- Remove "Generated with Claude Code" from the PR description before
+  submitting, and remove any "IGNORE" comments from the code itself.
