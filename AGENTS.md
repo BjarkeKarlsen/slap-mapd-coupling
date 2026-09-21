@@ -27,11 +27,22 @@ instead of picking silently.
 
 ## Build / test / run
 
+The primary dev machine uses a shared `uv`-managed virtualenv at
+`~/.venvs/rl` (Python 3.10) rather than a per-project one — see
+`docs/GETTING_STARTED.md` for full setup. For any non-interactive /
+scripted use (CI, an agent), call its binaries directly rather than
+activating first, since an activation doesn't persist across separate
+invocations:
+
 ```bash
-pip install -e ".[dev]"
-pytest
-slap-mapd simulate --storage-rule fixed --controller centralised
+uv pip install --python ~/.venvs/rl/bin/python -e ".[dev]"
+~/.venvs/rl/bin/python -m pytest
+~/.venvs/rl/bin/slap-mapd simulate --storage-rule fixed --controller centralised
 ```
+
+Interactively (a human, one shell): `source ~/.venvs/rl/bin/activate` once,
+then plain `pip install -e ".[dev]"` / `pytest` / `slap-mapd ...` as shown
+in `docs/GETTING_STARTED.md`.
 
 ## Layout and extensibility
 

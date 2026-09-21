@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.venvs/rl/bin/python*)",
+      "Bash(~/.venvs/rl/bin/pytest*)",
+      "Bash(~/.venvs/rl/bin/black*)",
+      "Bash(~/.venvs/rl/bin/flake8*)",
+      "Bash(~/.venvs/rl/bin/mypy*)",
+      "Bash(~/.venvs/rl/bin/slap-mapd*)",
+      "Bash(uv pip install --python ~/.venvs/rl/bin/python*)",
+      "Bash(pytest*)",
+      "Bash(python -m pytest*)",
+      "Bash(black*)",
+      "Bash(flake8*)",
+      "Bash(mypy*)",
+      "Bash(pip install -e*)",
+      "Bash(slap-mapd*)",
+      "Bash(python -m slap_mapd_coupling*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(gh issue*)"
+    ]
+  },
+  "attribution": {
+    "includeCoAuthoredBy": false
+  }
+}
