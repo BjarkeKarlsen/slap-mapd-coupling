@@ -250,7 +250,13 @@ def test_step_with_external_actions_never_resolves_a_controller():
 def test_step_without_actions_raises_for_unregistered_controller():
     env = _env(_graph(), _decentralised_config())
     env.reset()
-    with pytest.raises(KeyError, match="decentralised"):
+    # KeyError if controllers/decentralised.py (#29) hasn't been imported
+    # yet by anything else in this test session (nothing registered under
+    # "decentralised"), RuntimeError if it has (registered, but with no
+    # active model configured via set_active_decentralised_controller --
+    # see that module's docstring) -- either way, calling get_controller
+    # here must fail loudly, not silently return something meaningless.
+    with pytest.raises((KeyError, RuntimeError), match="decentralised"):
         env.step()
 
 
