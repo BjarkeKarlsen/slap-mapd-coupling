@@ -23,7 +23,12 @@ restate that model itself. Do not invent a parameter value that isn't
 pinned down — if a value needed to implement something isn't obviously
 determined by this repo's own docs (`README.md`, `docs/`), leave it a
 named, configurable parameter rather than hard-coding a guess, and flag it
-instead of picking silently.
+instead of picking silently. After leaving it a configurable parameter,
+open a GitHub issue describing precisely what's undetermined and why the
+code can't resolve it on its own (same `gh issue create` convention as
+any other gap — see "Conventions" below) — that issue is what eventually
+turns into the missing definition being written into the thesis document
+itself, not something to leave implicit in the code or a chat reply.
 
 Before implementing or reviewing anything against this model, validate it
 against the actual thesis document, not just this repo's own docs or
