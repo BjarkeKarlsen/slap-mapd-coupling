@@ -22,6 +22,17 @@ arrival are drawn only from cells the greedy target itself wants
 reduced (true surplus, per SKU) -- so per-SKU unit totals are always
 conserved exactly, never invented or lost, regardless of where the cap
 binds.
+
+x_target is itself feasible in full (eq:feasiblestorage), but a PARTIAL
+application of it is not automatically feasible: a vertex can hold
+several SKUs at once, and x_target's own capacity bookkeeping assumes
+every relocation it plans actually happens together. If this cap accepts
+SKU B's arrival at a vertex while SKU A's departure from that same
+vertex isn't itself in the accepted set (A had nowhere accepted to go),
+the vertex would end up over capacity even though the per-SKU accounting
+above stays exactly conserved. So a running per-vertex remaining-capacity
+budget is tracked alongside the per-SKU unit budget, and an arrival is
+capped by whichever is scarcer.
 """
 
 from __future__ import annotations
@@ -50,6 +61,9 @@ def apply_relocation_cap(
     """
     counts: dict[SkuId, dict[VertexId, int]] = {k: dict(v) for k, v in x_prev.counts.items()}
     budget = reassignment_cap
+    remaining_capacity: dict[VertexId, float] = {
+        v: cap - x_prev.used_capacity(v) for v, cap in x_prev.capacities.items()
+    }
 
     for sku_id, vertex in priority:
         if budget <= 0:
@@ -60,7 +74,12 @@ def apply_relocation_cap(
         if deficit <= 0:
             continue  # not actually an arrival relative to the running state
 
-        take = min(deficit, budget)
+        unit_capacity = x_prev.skus[sku_id].unit_capacity
+        fits = int(remaining_capacity.get(vertex, 0.0) // unit_capacity)
+        take = min(deficit, budget, fits)
+        if take <= 0:
+            continue  # no room, no budget, or nothing to relocate: leave this cell as-is
+
         withdrawn = 0
         sku_counts = counts.setdefault(sku_id, {})
         for source_vertex in sorted(x_prev.counts.get(sku_id, {})):
@@ -73,12 +92,16 @@ def apply_relocation_cap(
                 continue  # x_target doesn't actually want this cell reduced
             grab = min(surplus, take - withdrawn)
             sku_counts[source_vertex] = sku_counts.get(source_vertex, 0) - grab
+            remaining_capacity[source_vertex] = (
+                remaining_capacity.get(source_vertex, 0.0) + grab * unit_capacity
+            )
             withdrawn += grab
 
         if withdrawn == 0:
             continue  # nothing available to relocate here yet; leave this cell as-is
 
         sku_counts[vertex] = current_here + withdrawn
+        remaining_capacity[vertex] = remaining_capacity.get(vertex, 0.0) - withdrawn * unit_capacity
         budget -= withdrawn
 
     return StorageState(skus=x_prev.skus, capacities=x_prev.capacities, counts=counts)

@@ -89,6 +89,31 @@ def test_lower_priority_cell_can_still_fit_in_remaining_budget():
     assert result.units("b", 2) == 3
 
 
+def test_result_never_exceeds_vertex_capacity_across_multiple_skus():
+    # Regression: SKU "a" occupies 14/20 capacity at vertex 5 and isn't
+    # itself relocating away (its own arrival elsewhere doesn't fit the
+    # budget). SKU "b" wants to arrive at vertex 5 with 8 units -- x_target
+    # is feasible in full (a reduced to 12 there, freeing room for b's 8),
+    # but a naive per-SKU-only cap would let b's arrival through without
+    # checking that "a" never actually left, overflowing the vertex.
+    capacities = {5: 20.0, 6: 20.0, 7: 20.0}
+    x_prev = StorageState(skus=_skus(), capacities=capacities, counts={"a": {5: 14}, "b": {7: 8}})
+    x_target = StorageState(
+        skus=_skus(), capacities=capacities, counts={"a": {5: 12, 6: 2}, "b": {5: 8}}
+    )
+    priority = [("b", 5), ("a", 6)]  # b's arrival ranked ahead of a's own move
+
+    result = apply_relocation_cap(x_prev, x_target, priority, reassignment_cap=6)
+
+    assert result.used_capacity(5) <= capacities[5]
+    # a never got its own relocation accepted (budget ran out), so it's
+    # still fully at vertex 5; b can only fit whatever room is left.
+    assert result.units("a", 5) == 14
+    assert result.units("b", 5) == 6
+    assert result.units("b", 7) == 2
+    assert result.units("b", 5) + result.units("b", 7) == 8  # b's total conserved
+
+
 def test_per_sku_totals_are_always_conserved():
     x_prev = _state({"a": {1: 4, 2: 6}})
     x_target = _state({"a": {3: 10}})
