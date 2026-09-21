@@ -30,6 +30,34 @@ itself been finalised as having vacated it (`_blocked`'s second check
 below) -- still a single deterministic pass over sigma, still a pure
 function of state and seed, just conservative about chains of moves that
 depend on a not-yet-processed agent's own choice.
+
+With that reservation in place, "waiting always terminates in a feasible
+joint action" (sec:pf:agents's Figure~2.x(c), sec:method:resolution) can
+actually be shown, not just asserted, by induction over the order agents
+are processed in:
+
+  Inductive hypothesis: after processing agents sigma(1),...,sigma(k-1),
+  `finalised` is pairwise collision-free (no eq:vertexconflict or
+  eq:swapconflict among any two of them) -- vacuously true for k=1.
+
+  Step: when agent sigma(k) is processed, `_blocked` either accepts its
+  proposed candidate (then it doesn't conflict with any already-finalised
+  successor by construction, and `finalised` for k agents is still
+  pairwise collision-free by the hypothesis plus this one check), or
+  rejects it and candidate falls back to `start` = before_loc[sigma(k)].
+  This fallback cannot itself be blocked: (a) no already-finalised
+  successor can equal `start`, because any earlier agent that tried to
+  move there would itself have been rejected by the current-vertex
+  reservation while sigma(k) still held it (sigma(k) is only finalised
+  now, at step k); (b) no not-yet-finalised agent's current vertex can
+  equal `start` either, because `before` is collision-free -- at most one
+  agent occupies any vertex at t, and that's sigma(k) itself. So the
+  fallback is always accepted, and the hypothesis holds for k agents too.
+
+  After all m agents: `finalised` is pairwise collision-free, i.e. `after`
+  satisfies eq:vertexconflict and eq:swapconflict for every pair -- this
+  is what the RuntimeError in resolve_conflicts asserts is unreachable,
+  and this argument is why.
 """
 
 from __future__ import annotations
