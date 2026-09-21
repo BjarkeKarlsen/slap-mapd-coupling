@@ -45,12 +45,27 @@ flagging convention), not something to silently reconcile either way.
 
 ## Build / test / run
 
-The primary dev machine uses a shared `uv`-managed virtualenv at
-`~/.venvs/rl` (Python 3.10) rather than a per-project one — see
-`docs/GETTING_STARTED.md` for full setup. For any non-interactive /
-scripted use (CI, an agent), call its binaries directly rather than
-activating first, since an activation doesn't persist across separate
-invocations:
+This is the portable path — it works for anyone, on any machine, with any
+venv (or none) active, not just the primary dev machine:
+
+```bash
+pip install -e ".[dev]"
+pytest
+slap-mapd simulate --storage-rule fixed --controller centralised
+```
+
+`pyproject.toml`/`requirements.txt` are the actual dependency
+declarations; they don't reference any particular virtualenv path or
+name, so this is what to reach for first on a machine you don't
+recognise, or when in doubt.
+
+The **primary dev machine** additionally has a shared `uv`-managed
+virtualenv at `~/.venvs/rl` (Python 3.10) instead of a per-project one —
+see `docs/GETTING_STARTED.md` for full setup. This is a machine-local
+convenience, not a project requirement: don't assume it exists elsewhere.
+On that machine specifically, for non-interactive / scripted use (CI, an
+agent), call its binaries directly rather than activating first, since an
+activation doesn't persist across separate invocations:
 
 ```bash
 uv pip install --python ~/.venvs/rl/bin/python -e ".[dev]"
@@ -58,9 +73,8 @@ uv pip install --python ~/.venvs/rl/bin/python -e ".[dev]"
 ~/.venvs/rl/bin/slap-mapd simulate --storage-rule fixed --controller centralised
 ```
 
-Interactively (a human, one shell): `source ~/.venvs/rl/bin/activate` once,
-then plain `pip install -e ".[dev]"` / `pytest` / `slap-mapd ...` as shown
-in `docs/GETTING_STARTED.md`.
+Interactively there (a human, one shell): `source ~/.venvs/rl/bin/activate`
+once, then the portable commands above.
 
 ## Layout and extensibility
 
