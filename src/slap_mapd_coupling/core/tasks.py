@@ -146,3 +146,19 @@ def free_agents(fleet: FleetState, tasks: Iterable[Task], t: int) -> set[AgentId
     """eq:free: a_i is free at t iff no task active at t has sigma(j) == i."""
     occupied = {task.assigned_agent for task in tasks if task.status(t) == "active"}
     return set(fleet.agents.keys()) - occupied
+
+
+def active_tasks_by_agent(tasks: Iterable[Task], t: int) -> dict[AgentId, Task]:
+    """The active task (if any) each agent is currently serving at t --
+    at most one per agent, since eq:lifecycle's B_t membership plus
+    "no re-tasking" (sec:pf:scope) together guarantee an agent serves at
+    most one active task at once. Shared by controllers/centralised.py,
+    environment/multi_agent_env.py and environment/observation.py rather
+    than each recomputing it.
+    """
+    active: dict[AgentId, Task] = {}
+    for task in tasks:
+        if task.status(t) == "active":
+            assert task.assigned_agent is not None  # guaranteed by Task's own validator
+            active[task.assigned_agent] = task
+    return active
