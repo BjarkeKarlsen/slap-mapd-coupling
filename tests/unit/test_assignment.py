@@ -79,7 +79,12 @@ def test_no_free_agents_leaves_tasks_unassigned():
 def test_already_assigned_and_completed_tasks_are_not_reassigned():
     graph = _line_graph(5)
     fleet = _fleet({1: 0})
-    completed = _task(task_id=1, release_time=0, pickup=1).assign(agent_id=1, t=0).complete(t=1)
+    completed = (
+        _task(task_id=1, release_time=0, pickup=1)
+        .assign(agent_id=1, t=0)
+        .pick_up(t=0)
+        .complete(t=1)
+    )
     waiting = _task(task_id=2, release_time=1, pickup=2)
 
     result = assign_tasks(graph, fleet, [completed, waiting], t=1)
