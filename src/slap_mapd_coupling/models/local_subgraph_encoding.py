@@ -27,7 +27,9 @@ but it is a choice -- documented here so it's easy to revisit.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+import gymnasium as gym
 import numpy as np
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
@@ -63,6 +65,61 @@ class EncodedObservation:
     message_mask: np.ndarray  # [max_messages]
     congestion: float
     action_mask: np.ndarray  # [num_actions], {0.0, 1.0} -- to_action_mask(mask)
+
+    def as_rllib_dict(self) -> dict[str, Any]:
+        """{"action_mask": ..., "observations": {...}} -- the Dict shape
+        masked_observation_space()/ActionMaskingTorchRLModule (#26) and
+        encoded_observation_space() below expect, for one agent's o_i(t)
+        as an RLlib env's per-agent obs (training/rllib_env.py, #30)."""
+        return {
+            "action_mask": self.action_mask,
+            "observations": {
+                "node_features": self.node_features,
+                "node_mask": self.node_mask,
+                "adjacency": self.adjacency,
+                "own_index": self.own_index,
+                "message_features": self.message_features,
+                "message_mask": self.message_mask,
+                "congestion": np.float32(self.congestion),
+            },
+        }
+
+
+def encoded_observation_space(config: LocalSubgraphEncodingConfig) -> gym.spaces.Dict:
+    """The "observations" half of masked_observation_space() (#26) for one
+    agent's o_i(t) -- i.e. encoded_observation_space(config) is exactly
+    what a caller should pass as masked_observation_space's
+    base_observation_space when training the decentralised regime."""
+    return gym.spaces.Dict(
+        {
+            "node_features": gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(config.max_local_nodes, NODE_FEATURE_DIM),
+                dtype=np.float32,
+            ),
+            "node_mask": gym.spaces.Box(
+                low=0.0, high=1.0, shape=(config.max_local_nodes,), dtype=np.float32
+            ),
+            "adjacency": gym.spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(config.max_local_nodes, config.max_local_nodes),
+                dtype=np.float32,
+            ),
+            "own_index": gym.spaces.Discrete(config.max_local_nodes),
+            "message_features": gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(config.max_messages, MESSAGE_FEATURE_DIM),
+                dtype=np.float32,
+            ),
+            "message_mask": gym.spaces.Box(
+                low=0.0, high=1.0, shape=(config.max_messages,), dtype=np.float32
+            ),
+            "congestion": gym.spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
+        }
+    )
 
 
 def _select_nodes(
