@@ -49,15 +49,17 @@ def ranked_storage_vertices(graph: WarehouseGraph) -> list[VertexId]:
 
 def greedy_fill(
     x_prev: StorageState,
-    storage_order: list[VertexId],
+    vertex_order_by_sku: dict[SkuId, list[VertexId]],
     sku_order: list[SkuId],
 ) -> tuple[StorageState, list[tuple[SkuId, VertexId]]]:
     """The shared greedy bin-packing loop: place each SKU's total units
-    (conserved from x_prev) into `storage_order`'s vertices in order,
-    skipping any vertex once it's full. `sku_order` fixes which SKU goes
-    first; F_dem and F_cng differ only in how they compute `sku_order`
-    and (for F_cng) the per-SKU vertex ranking -- this loop itself is
-    identical, so F_cng reuses it too.
+    (conserved from x_prev) into that SKU's own ranked vertex order
+    (`vertex_order_by_sku[sku_id]`), skipping any vertex once it's full.
+    `sku_order` fixes which SKU goes first. F_dem and F_cng differ only
+    in how they compute `sku_order` and each SKU's vertex ranking (F_dem
+    uses the SAME ranking for every SKU; F_cng's score(k,v) makes it
+    genuinely per-SKU) -- this loop itself is identical, so F_cng reuses
+    it too, rather than duplicating the bin-packing logic.
 
     Returns the resulting (uncapped) target StorageState, plus the
     ordered list of (sku, vertex) cells that gained units relative to
@@ -71,7 +73,7 @@ def greedy_fill(
     for sku_id in sku_order:
         remaining_units = sum(x_prev.counts.get(sku_id, {}).values())
         unit_capacity = x_prev.skus[sku_id].unit_capacity
-        for vertex in storage_order:
+        for vertex in vertex_order_by_sku[sku_id]:
             if remaining_units <= 0:
                 break
             fit = int(remaining_capacity[vertex] // unit_capacity)
@@ -97,6 +99,7 @@ def f_dem(
     x_prev: StorageState,
     graph: WarehouseGraph,
     reassignment_cap: int | None,
+    congestion_weight: float | None,
     demand_estimate: DemandEstimate,
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,
@@ -108,5 +111,6 @@ def f_dem(
         )
     sku_order = sorted(x_prev.skus, key=lambda k: (-demand_estimate.get(k, 0.0), k))
     storage_order = ranked_storage_vertices(graph)
-    x_target, priority = greedy_fill(x_prev, storage_order, sku_order)
+    vertex_order_by_sku = {sku_id: storage_order for sku_id in x_prev.skus}
+    x_target, priority = greedy_fill(x_prev, vertex_order_by_sku, sku_order)
     return apply_relocation_cap(x_prev, x_target, priority, reassignment_cap)

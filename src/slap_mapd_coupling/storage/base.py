@@ -29,18 +29,21 @@ class StorageRule(Protocol):
     infeasible result at construction time, so a rule that overfills a
     vertex fails loudly rather than silently.
 
-    `graph` and `reassignment_cap` were added after F_fix (which needs
-    neither): F_dem/F_cng need d_G (via `graph`) to rank storage vertices
-    by access distance, and nu (via `reassignment_cap`) for the shared
-    relocation cap (storage/relocation.py). Every other pure function in
-    this repo (resolution, assignment, the centralised controller) takes
-    graph explicitly as a per-call argument for the same reason: the
-    graph is static per episode but this Protocol has no construction
-    step to bind it at, unlike Controller's registry -- storage's own
-    registry stores the rule itself, not a factory
-    (docs/storage_rule_integration.md). `reassignment_cap` is None for
-    F_fix/rules that ignore it, matching ExperimentConfig's own
-    optionality for storage_mode="fixed".
+    `graph`, `reassignment_cap` and `congestion_weight` were added after
+    F_fix (which needs none of them): F_dem/F_cng need d_G (via `graph`)
+    to rank storage vertices by access distance, nu (via
+    `reassignment_cap`) for the shared relocation cap
+    (storage/relocation.py), and F_cng specifically needs beta (via
+    `congestion_weight`) to weigh eq:storagegreedy's congestion term
+    against access distance. Every other pure function in this repo
+    (resolution, assignment, the centralised controller) takes graph
+    explicitly as a per-call argument for the same reason: the graph is
+    static per episode but this Protocol has no construction step to
+    bind it at, unlike Controller's registry -- storage's own registry
+    stores the rule itself, not a factory
+    (docs/storage_rule_integration.md). `reassignment_cap` and
+    `congestion_weight` are None for rules that ignore them, matching
+    ExperimentConfig's own optionality for storage_mode="fixed"/"demand".
     """
 
     def __call__(
@@ -48,6 +51,7 @@ class StorageRule(Protocol):
         x_prev: StorageState,
         graph: WarehouseGraph,
         reassignment_cap: int | None,
+        congestion_weight: float | None,
         demand_estimate: DemandEstimate,
         traversal_estimate: TrafficEstimate,
         waiting_estimate: TrafficEstimate,

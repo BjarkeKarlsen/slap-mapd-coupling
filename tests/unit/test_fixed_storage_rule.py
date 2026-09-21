@@ -27,6 +27,7 @@ def test_f_fix_returns_the_input_state_unchanged():
         x_prev,
         graph=_graph(),
         reassignment_cap=None,
+        congestion_weight=None,
         demand_estimate={},
         traversal_estimate={},
         waiting_estimate={},
@@ -41,6 +42,7 @@ def test_f_fix_ignores_the_three_estimates_and_reassignment_cap():
         x_prev,
         graph=_graph(),
         reassignment_cap=5,
+        congestion_weight=0.5,
         demand_estimate={"tea": 999.0},
         traversal_estimate={(1, 2): 999.0},
         waiting_estimate={(1, 2): 999.0},
@@ -51,4 +53,4 @@ def test_f_fix_ignores_the_three_estimates_and_reassignment_cap():
 def test_f_fix_registered_under_fixed():
     x_prev = _state()
     rule = get_storage_rule("fixed")
-    assert rule(x_prev, _graph(), None, {}, {}, {}) is x_prev
+    assert rule(x_prev, _graph(), None, None, {}, {}, {}) is x_prev

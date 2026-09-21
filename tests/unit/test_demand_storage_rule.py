@@ -53,8 +53,9 @@ def test_greedy_fill_prefers_closer_vertices_for_higher_ranked_sku():
     capacities = {1: 2.0, 2: 2.0, 3: 2.0}
     x_prev = _state({"hot": {3: 2}, "cold": {1: 2}}, capacities)
     storage_order = ranked_storage_vertices(graph)
+    vertex_order_by_sku = {"hot": storage_order, "cold": storage_order}
 
-    x_target, priority = greedy_fill(x_prev, storage_order, sku_order=["hot", "cold"])
+    x_target, priority = greedy_fill(x_prev, vertex_order_by_sku, sku_order=["hot", "cold"])
 
     assert x_target.units("hot", 1) == 2  # hot (placed first) gets the closest vertex
     assert x_target.units("cold", 1) == 0
@@ -69,8 +70,9 @@ def test_greedy_fill_skips_a_full_vertex():
     capacities = {1: 1.0, 2: 2.0, 3: 2.0}
     x_prev = _state({"hot": {1: 1}, "cold": {2: 1}}, capacities)
     storage_order = ranked_storage_vertices(graph)
+    vertex_order_by_sku = {"hot": storage_order, "cold": storage_order}
 
-    x_target, _ = greedy_fill(x_prev, storage_order, sku_order=["hot", "cold"])
+    x_target, _ = greedy_fill(x_prev, vertex_order_by_sku, sku_order=["hot", "cold"])
 
     assert x_target.units("hot", 1) == 1  # fills vertex 1 to capacity
     assert x_target.units("cold", 1) == 0  # no room left at 1, skipped
@@ -81,7 +83,7 @@ def test_f_dem_raises_without_reassignment_cap():
     graph = _line_graph()
     x_prev = _state({"hot": {3: 2}}, {1: 2.0, 2: 2.0, 3: 2.0})
     with pytest.raises(ValueError, match="reassignment_cap"):
-        f_dem(x_prev, graph, None, {"hot": 10.0}, {}, {})
+        f_dem(x_prev, graph, None, None, {"hot": 10.0}, {}, {})
 
 
 def test_f_dem_respects_the_relocation_cap():
@@ -93,6 +95,7 @@ def test_f_dem_respects_the_relocation_cap():
         x_prev,
         graph,
         reassignment_cap=2,
+        congestion_weight=None,
         demand_estimate={"hot": 10.0},
         traversal_estimate={},
         waiting_estimate={},
@@ -110,5 +113,5 @@ def test_f_dem_registered_under_demand():
     graph = _line_graph()
     x_prev = _state({"hot": {3: 2}}, {1: 2.0, 2: 2.0, 3: 2.0})
     rule = get_storage_rule("demand")
-    result = rule(x_prev, graph, 10, {"hot": 5.0}, {}, {})
+    result = rule(x_prev, graph, 10, None, {"hot": 5.0}, {}, {})
     assert result.units("hot", 1) == 2
