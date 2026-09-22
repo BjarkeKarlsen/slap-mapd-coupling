@@ -55,11 +55,14 @@ def generate_warehouse_graph(params: GeneratorParams) -> WarehouseGraph:
 
     Layout: a main transit corridor (one vertex per aisle column), each
     column dropping a vertical stack of `aisle_length` cells below it
-    (the first `num_storage_vertices` of which, in generation order, are
-    marked as storage faces), extra horizontal cross-aisle edges at a few
-    evenly-spaced heights, and `num_endpoints`/`num_delivery_vertices`
-    vertices hanging off the corridor at either end. Every non-lattice
-    claim rests on `one_way_fraction`: that fraction of otherwise
+    (`num_storage_vertices` of which, chosen by a seeded random sample
+    over every aisle cell, are marked as storage faces -- so which
+    physical cells hold inventory varies per seed, unlike
+    `num_endpoints`/`num_delivery_vertices` vertices hanging off the
+    corridor at either end, whose row -- top/bottom -- is a fixed zoning
+    convention, not seed-dependent), extra horizontal cross-aisle edges at
+    a few evenly-spaced heights. Every non-lattice claim beyond storage
+    placement rests on `one_way_fraction`: that fraction of otherwise
     bidirectional segments is instead realised as a single directed edge.
 
     See `generate_instance` for the same graph plus the layout position
@@ -144,18 +147,38 @@ def _build(params: GeneratorParams) -> tuple[WarehouseGraph, dict[VertexId, tupl
         for i in range(params.num_delivery_vertices)
     ]
 
+    # A seeded random subset, not "the first num_storage_vertices in
+    # generation order" (which always clustered every instance's storage
+    # vertices in the leftmost columns, identically regardless of seed --
+    # issue #75): which physical cells hold inventory is exactly the kind
+    # of per-instance variation a seed sweep needs, unlike endpoint/
+    # delivery's row (top/bottom), which is a deliberate, fixed zoning
+    # convention, not something to randomise.
     aisle_ids = [vid for (kind, _row, _col), vid in pos_to_id.items() if kind == "aisle"]
-    for vid in aisle_ids[: params.num_storage_vertices]:
+    storage_ids = rng.sample(aisle_ids, min(params.num_storage_vertices, len(aisle_ids)))
+    for vid in storage_ids:
         vertices[vid] = Vertex(id=vid, role=VertexRole(movable=True, storage=True))
 
-    # Bridge edges: each is the ONLY connection into a leaf vertex (a
-    # delivery point, an endpoint, or an entire aisle stack). Randomising
-    # these one-way would strand that leaf half the time (its single edge
-    # ends up oriented the wrong way, making the vertex unreachable) --
-    # that is a generator defect, not a legitimate one-way aisle, so
-    # bridge edges always stay bidirectional. Only interior edges (within
-    # an aisle, or along a corridor/cross-aisle row) have an alternate
-    # route and are safe to randomise.
+    # Bridge edges: the connection(s) into a leaf vertex (a delivery
+    # point, an endpoint, or an entire aisle stack). Randomising these
+    # one-way would strand that leaf half the time (its edge ends up
+    # oriented the wrong way, making the vertex unreachable) -- that is a
+    # generator defect, not a legitimate one-way aisle, so bridge edges
+    # always stay bidirectional. Only interior edges (within an aisle, or
+    # along a corridor/cross-aisle row) have an alternate route and are
+    # safe to randomise.
+    #
+    # Delivery and endpoint vertices get a SECOND bridge edge to a
+    # different aisle column (when num_aisles > 1), rather than being a
+    # strict graph-theoretic pendant with exactly one edge in and out.
+    # Found via #55: a single-bridge dead-end lets two agents needing to
+    # pass through it in opposite directions permanently deadlock under
+    # naive prioritised planning (issue #10) -- not a collision/
+    # correctness bug (resolution still prevents that), but it made this
+    # generator's own instances unable to demonstrate reasonable
+    # throughput. This halves (not eliminates) that risk by giving those
+    # vertices an alternate route; a full fix needs real deadlock
+    # detection/backtracking, out of this generator's scope.
     bridge_edges: list[tuple[VertexId, VertexId]] = []
     interior_edges: list[tuple[VertexId, VertexId]] = []
 
@@ -187,10 +210,16 @@ def _build(params: GeneratorParams) -> tuple[WarehouseGraph, dict[VertexId, tupl
     for i, target in enumerate(delivery_ids):
         col = i % params.num_aisles
         bridge_edges.append((pos_to_id[("aisle", params.aisle_length, col)], target))
+        if params.num_aisles > 1:
+            second_col = (col + 1) % params.num_aisles
+            bridge_edges.append((pos_to_id[("aisle", params.aisle_length, second_col)], target))
 
     for i, target in enumerate(endpoint_ids):
         col = i % params.num_aisles
         bridge_edges.append((pos_to_id[("corridor", 0, col)], target))
+        if params.num_aisles > 1:
+            second_col = (col + 1) % params.num_aisles
+            bridge_edges.append((pos_to_id[("corridor", 0, second_col)], target))
 
     edges: list[Edge] = []
     for a, b in bridge_edges:
