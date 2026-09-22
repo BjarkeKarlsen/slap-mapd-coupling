@@ -11,7 +11,10 @@ A/B/C worked example -- written directly on the node, with its "sku:count"
 contents labelled underneath; a side list gives each letter's used/max
 capacity (eq:feasiblestorage's cap(v)) -- node-level capacity reads
 naturally as one list, while per-SKU contents read naturally next to the
-node holding them.
+node holding them. Delivery and endpoint vertices get their own short
+handles too (D1, D2, ... / E1, E2, ...) -- no contents/capacity to show
+for them yet, but a fixed per-node name is what a future path or
+congestion overlay would need to refer to a specific node by.
 """
 
 import os
@@ -20,8 +23,10 @@ from slap_mapd_coupling.core.storage_state import StorageState, SkuType
 from slap_mapd_coupling.core.graph import VertexId
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_instance
 from slap_mapd_coupling.viz.warehouse_plot import (
+    assign_delivery_endpoint_names,
     assign_storage_letters,
     plot_graph,
+    plot_node_names,
     plot_storage_capacity_list,
     plot_storage_contents,
 )
@@ -71,6 +76,7 @@ def main() -> None:
     )
     instance = generate_instance(params)
     letters = assign_storage_letters(instance.graph)
+    node_names = assign_delivery_endpoint_names(instance.graph)
     storage_vertices = sorted(letters)
 
     storage = build_storage_state(storage_vertices)
@@ -84,6 +90,7 @@ def main() -> None:
     ax = plot_graph(instance.graph, instance.positions)
     plot_storage_contents(ax, instance.positions, storage, letters)
     plot_storage_capacity_list(ax, storage, letters)
+    plot_node_names(ax, instance.graph, instance.positions, node_names)
     ax.set_title("StorageState on the generated instance")
 
     out_dir = os.path.join(os.path.dirname(__file__), "output")

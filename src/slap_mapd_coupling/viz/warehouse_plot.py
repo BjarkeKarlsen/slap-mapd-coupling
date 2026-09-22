@@ -188,6 +188,57 @@ def assign_storage_letters(graph: WarehouseGraph) -> dict[VertexId, str]:
     return dict(zip(storage_vertices, string.ascii_uppercase))
 
 
+def assign_delivery_endpoint_names(graph: WarehouseGraph) -> dict[VertexId, str]:
+    """D1, D2, ... for delivery vertices and E1, E2, ... for endpoint
+    vertices, in vertex-id order -- short handles for future overlays that
+    need to refer to a specific node (a path trace, per-node congestion).
+    A vertex that's also storage is skipped: assign_storage_letters already
+    names it, matching theme.ROLE_PRIORITY's storage-over-endpoint
+    precedence (delivery already outranks both there)."""
+    names: dict[VertexId, str] = {}
+    delivery_count = 0
+    endpoint_count = 0
+    for vertex_id in sorted(graph.vertices):
+        role = graph.vertices[vertex_id].role
+        if role.storage:
+            continue
+        if role.delivery:
+            delivery_count += 1
+            names[vertex_id] = f"D{delivery_count}"
+        elif role.endpoint:
+            endpoint_count += 1
+            names[vertex_id] = f"E{endpoint_count}"
+    return names
+
+
+def plot_node_names(
+    ax: Axes,
+    graph: WarehouseGraph,
+    positions: dict[VertexId, tuple[float, float]],
+    names: dict[VertexId, str],
+) -> Axes:
+    """Overlay: each named vertex's short handle (see
+    assign_delivery_endpoint_names) written on the node, coloured by its
+    role like plot_graph's own markers -- lighter weight than
+    plot_storage_contents' bold letters, since these nodes have no
+    contents/capacity to also show yet."""
+    for vertex_id, name in names.items():
+        role = graph.vertices[vertex_id].role
+        style, _secondary = theme.style_for_role(role)
+        x, y = positions[vertex_id]
+        ax.annotate(
+            name,
+            (x, y),
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color=style.edge,
+            zorder=6,
+        )
+    return ax
+
+
 def plot_storage_contents(
     ax: Axes,
     positions: dict[VertexId, tuple[float, float]],
