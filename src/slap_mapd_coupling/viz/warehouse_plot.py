@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
 import math
+import string
 
 from matplotlib.patches import Circle, RegularPolygon, Rectangle
 
@@ -176,6 +177,83 @@ def plot_storage_heatmap(
             fontsize=8,
             color="#c0392b",
         )
+    return ax
+
+
+def assign_storage_letters(graph: WarehouseGraph) -> dict[VertexId, str]:
+    """A, B, C, ... in vertex-id order -- a short display name for each
+    storage vertex, for plot_storage_contents/plot_storage_capacity_list
+    (matches 01b_storage_and_config.py's own A/B/C worked example)."""
+    storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
+    return dict(zip(storage_vertices, string.ascii_uppercase))
+
+
+def plot_storage_contents(
+    ax: Axes,
+    positions: dict[VertexId, tuple[float, float]],
+    storage: StorageState,
+    letters: dict[VertexId, str],
+) -> Axes:
+    """Overlay: each storage vertex's letter name written on the node, with
+    its "sku:count" contents (units > 0 only) labelled underneath."""
+    for vertex_id, letter in letters.items():
+        x, y = positions[vertex_id]
+        ax.annotate(
+            letter,
+            (x, y),
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold",
+            color="#2f6fae",
+            zorder=6,
+        )
+        held = [(sku_id, storage.units(sku_id, vertex_id)) for sku_id in storage.skus]
+        held = [(sku_id, units) for sku_id, units in held if units > 0]
+        if not held:
+            continue
+        label = "\n".join(f"{sku_id}:{units}" for sku_id, units in held)
+        ax.annotate(
+            label,
+            (x, y),
+            textcoords="offset points",
+            xytext=(12, -10 * len(held)),
+            fontsize=8,
+            linespacing=1.4,
+            zorder=7,
+        )
+    return ax
+
+
+def plot_storage_capacity_list(
+    ax: Axes,
+    storage: StorageState,
+    letters: dict[VertexId, str],
+) -> Axes:
+    """Side list (outside the axes, to its right, boxed): one line per
+    storage vertex, "letter -- used/max cap", followed by each SKU's
+    unit_capacity (b_k, eq:feasiblestorage) as its own "sku=b_k" line under
+    "Space per SKU" -- the b_k values are what let a reader verify the used
+    totals themselves (e.g. coffee:4 at b_k=2.0 contributes 8)."""
+    lines = ["Storage capacity", ""]
+    for vertex_id, letter in letters.items():
+        used = storage.used_capacity(vertex_id)
+        cap = storage.capacities[vertex_id]
+        lines.append(f"{letter}   {used:g}/{cap:g}")
+    lines += ["", "Space per SKU", ""]
+    for sku_id, sku in storage.skus.items():
+        lines.append(f"{sku_id}={sku.unit_capacity:g}")
+    ax.text(
+        1.04,
+        0.98,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        family="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", edgecolor="#9aa5b1"),
+    )
     return ax
 
 
