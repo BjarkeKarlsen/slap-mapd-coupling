@@ -15,7 +15,6 @@ matplotlib.use("Agg")  # headless-safe, matches thesis-progress/scripts/images/f
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
-import math
 import string
 
 from matplotlib.patches import Circle, RegularPolygon, Rectangle
@@ -33,9 +32,11 @@ def _patch_for_shape(shape: str, xy: tuple[float, float], size: float, **kwargs)
         s = size
         return Rectangle((xy[0] - s / 2, xy[1] - s / 2), s, s, **kwargs)
     if shape == "diamond":
-        return RegularPolygon(
-            xy, numVertices=4, radius=size / 1.5, orientation=math.pi / 4, **kwargs
-        )
+        # orientation=0 gives a diamond (pointy top/bottom/left/right),
+        # matching plot_graph's own legend marker="D" -- orientation=pi/4
+        # would instead rotate it into an axis-aligned square, which
+        # looked like a mix of the two shapes rather than either one.
+        return RegularPolygon(xy, numVertices=4, radius=size / 1.5, orientation=0, **kwargs)
     return Circle(xy, size / 2, **kwargs)
 
 
