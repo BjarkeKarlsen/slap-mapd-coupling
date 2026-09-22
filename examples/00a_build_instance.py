@@ -41,7 +41,7 @@ def main() -> None:
         num_storage_vertices=16,
         num_delivery_vertices=6,
         num_endpoints=fleet_size,
-        seed=1,
+        seed=42,
     )
     print("GeneratorParams (bigger + denser than 00_build_instance.py):")
     print(params.model_dump_json(indent=2))
