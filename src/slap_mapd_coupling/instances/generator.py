@@ -55,11 +55,14 @@ def generate_warehouse_graph(params: GeneratorParams) -> WarehouseGraph:
 
     Layout: a main transit corridor (one vertex per aisle column), each
     column dropping a vertical stack of `aisle_length` cells below it
-    (the first `num_storage_vertices` of which, in generation order, are
-    marked as storage faces), extra horizontal cross-aisle edges at a few
-    evenly-spaced heights, and `num_endpoints`/`num_delivery_vertices`
-    vertices hanging off the corridor at either end. Every non-lattice
-    claim rests on `one_way_fraction`: that fraction of otherwise
+    (`num_storage_vertices` of which, chosen by a seeded random sample
+    over every aisle cell, are marked as storage faces -- so which
+    physical cells hold inventory varies per seed, unlike
+    `num_endpoints`/`num_delivery_vertices` vertices hanging off the
+    corridor at either end, whose row -- top/bottom -- is a fixed zoning
+    convention, not seed-dependent), extra horizontal cross-aisle edges at
+    a few evenly-spaced heights. Every non-lattice claim beyond storage
+    placement rests on `one_way_fraction`: that fraction of otherwise
     bidirectional segments is instead realised as a single directed edge.
 
     See `generate_instance` for the same graph plus the layout position
@@ -144,8 +147,16 @@ def _build(params: GeneratorParams) -> tuple[WarehouseGraph, dict[VertexId, tupl
         for i in range(params.num_delivery_vertices)
     ]
 
+    # A seeded random subset, not "the first num_storage_vertices in
+    # generation order" (which always clustered every instance's storage
+    # vertices in the leftmost columns, identically regardless of seed --
+    # issue #75): which physical cells hold inventory is exactly the kind
+    # of per-instance variation a seed sweep needs, unlike endpoint/
+    # delivery's row (top/bottom), which is a deliberate, fixed zoning
+    # convention, not something to randomise.
     aisle_ids = [vid for (kind, _row, _col), vid in pos_to_id.items() if kind == "aisle"]
-    for vid in aisle_ids[: params.num_storage_vertices]:
+    storage_ids = rng.sample(aisle_ids, min(params.num_storage_vertices, len(aisle_ids)))
+    for vid in storage_ids:
         vertices[vid] = Vertex(id=vid, role=VertexRole(movable=True, storage=True))
 
     # Bridge edges: the connection(s) into a leaf vertex (a delivery
