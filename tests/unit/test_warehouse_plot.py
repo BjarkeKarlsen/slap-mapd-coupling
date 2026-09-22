@@ -152,12 +152,12 @@ def test_plot_storage_contents_overlay_does_not_raise():
         counts={"tea": {1: 4}, "mugs": {1: 2}},
     )
 
-    result = plot_storage_contents(ax, positions, storage, {1: "A"})
+    result = plot_storage_contents(ax, positions, storage)
 
     assert result is ax
 
 
-def test_plot_storage_contents_with_zero_units_only_draws_the_letter():
+def test_plot_storage_contents_with_zero_units_is_a_noop():
     graph = _small_graph()
     positions = {1: (0.0, 0.0), 2: (1.0, 0.0), 3: (2.0, 0.0)}
     ax = plot_graph(graph, positions)
@@ -167,7 +167,7 @@ def test_plot_storage_contents_with_zero_units_only_draws_the_letter():
         counts={},
     )
 
-    result = plot_storage_contents(ax, positions, storage, {1: "A"})
+    result = plot_storage_contents(ax, positions, storage)
 
     assert result is ax
 
@@ -188,12 +188,14 @@ def test_plot_storage_capacity_list_overlay_does_not_raise():
 
 
 def test_plot_node_names_overlay_does_not_raise():
+    # Draws every vertex's name in one pass, storage letters included --
+    # plot_storage_contents no longer draws the letter itself, so
+    # plot_node_names is the only place a vertex's name gets drawn.
     graph = _mixed_role_graph()
     positions = {v: (float(v), 0.0) for v in graph.vertices}
     ax = plot_graph(graph, positions)
     names = assign_vertex_names(graph)
-    non_storage_names = {v: n for v, n in names.items() if not graph.vertices[v].role.storage}
 
-    result = plot_node_names(ax, graph, positions, non_storage_names)
+    result = plot_node_names(ax, graph, positions, names)
 
     assert result is ax

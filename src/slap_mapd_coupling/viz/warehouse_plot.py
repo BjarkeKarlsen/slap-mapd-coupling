@@ -223,12 +223,12 @@ def plot_node_names(
     positions: dict[VertexId, tuple[float, float]],
     names: dict[VertexId, str],
 ) -> Axes:
-    """Overlay: each named vertex's short handle (see assign_vertex_names)
+    """Overlay: every named vertex's short handle (see assign_vertex_names)
     written on the node, coloured by its role like plot_graph's own
-    markers -- lighter weight than plot_storage_contents' bold letters,
-    since these nodes have no contents/capacity to also show yet. Callers
-    typically pass assign_vertex_names' output filtered to non-storage
-    vertices, since plot_storage_contents already draws storage letters."""
+    markers -- the one place that draws a vertex's name, for storage,
+    delivery, and endpoint vertices alike. plot_storage_contents only
+    draws a storage vertex's "sku:count" contents underneath, not its
+    name, so callers pass assign_vertex_names' full output here."""
     for vertex_id, name in names.items():
         role = graph.vertices[vertex_id].role
         style, _secondary = theme.style_for_role(role)
@@ -238,7 +238,7 @@ def plot_node_names(
             (x, y),
             ha="center",
             va="center",
-            fontsize=9,
+            fontsize=10,
             fontweight="bold",
             color=style.edge,
             zorder=6,
@@ -250,26 +250,18 @@ def plot_storage_contents(
     ax: Axes,
     positions: dict[VertexId, tuple[float, float]],
     storage: StorageState,
-    letters: dict[VertexId, str],
 ) -> Axes:
-    """Overlay: each storage vertex's letter name written on the node, with
-    its "sku:count" contents (units > 0 only) labelled underneath."""
-    for vertex_id, letter in letters.items():
-        x, y = positions[vertex_id]
-        ax.annotate(
-            letter,
-            (x, y),
-            ha="center",
-            va="center",
-            fontsize=10,
-            fontweight="bold",
-            color="#2f6fae",
-            zorder=6,
-        )
+    """Overlay: each storage vertex's "sku:count" contents (units > 0 only)
+    labelled underneath it. The vertex's own name (letter) is
+    plot_node_names' job, not this function's -- storage.capacities is
+    keyed exactly by V_str, so this needs no separate letters/names
+    argument to know which vertices are storage."""
+    for vertex_id in storage.capacities:
         held = [(sku_id, storage.units(sku_id, vertex_id)) for sku_id in storage.skus]
         held = [(sku_id, units) for sku_id, units in held if units > 0]
         if not held:
             continue
+        x, y = positions[vertex_id]
         label = "\n".join(f"{sku_id}:{units}" for sku_id, units in held)
         ax.annotate(
             label,

@@ -5,16 +5,17 @@
 without fabricating one. This script closes that gap: a real
 generate_instance() graph + positions, a StorageState assigned onto its
 actual storage vertices (some holding more than one SKU at once), rendered
-as one picture via viz.warehouse_plot. Each storage vertex is given a short
-letter name (A, B, C, ...) -- matching 01b_storage_and_config.py's own
-A/B/C worked example -- written directly on the node, with its "sku:count"
-contents labelled underneath; a side list gives each letter's used/max
+as one picture via viz.warehouse_plot. Every non-plain vertex is given a
+short name by plot_node_names (storage vertices: A, B, C, ... matching
+01b_storage_and_config.py's own A/B/C worked example; delivery/endpoint
+vertices: D1, D2, ... / E1, E2, ...) -- no contents/capacity to show for
+delivery/endpoint yet, but a fixed per-node name is what a future path or
+congestion overlay would need to refer to a specific node by. Storage
+vertices additionally get their "sku:count" contents labelled underneath
+(plot_storage_contents) and a side list gives each letter's used/max
 capacity (eq:feasiblestorage's cap(v)) -- node-level capacity reads
 naturally as one list, while per-SKU contents read naturally next to the
-node holding them. Delivery and endpoint vertices get their own short
-handles too (D1, D2, ... / E1, E2, ...) -- no contents/capacity to show
-for them yet, but a fixed per-node name is what a future path or
-congestion overlay would need to refer to a specific node by.
+node holding them.
 """
 
 import os
@@ -76,7 +77,6 @@ def main() -> None:
     instance = generate_instance(params)
     names = assign_vertex_names(instance.graph)
     letters = {v: n for v, n in names.items() if instance.graph.vertices[v].role.storage}
-    node_names = {v: n for v, n in names.items() if not instance.graph.vertices[v].role.storage}
     storage_vertices = sorted(letters)
 
     storage = build_storage_state(storage_vertices)
@@ -88,9 +88,9 @@ def main() -> None:
         )
 
     ax = plot_graph(instance.graph, instance.positions)
-    plot_storage_contents(ax, instance.positions, storage, letters)
+    plot_node_names(ax, instance.graph, instance.positions, names)
+    plot_storage_contents(ax, instance.positions, storage)
     plot_storage_capacity_list(ax, storage, letters)
-    plot_node_names(ax, instance.graph, instance.positions, node_names)
     ax.set_title("StorageState on the generated instance")
 
     out_dir = os.path.join(os.path.dirname(__file__), "output")
