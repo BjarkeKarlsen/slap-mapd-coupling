@@ -6,8 +6,7 @@ from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.graph import Edge, Vertex, VertexRole, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, StorageState
 from slap_mapd_coupling.viz.warehouse_plot import (
-    assign_delivery_endpoint_names,
-    assign_storage_letters,
+    assign_vertex_names,
     plot_agents,
     plot_graph,
     plot_node_names,
@@ -113,21 +112,31 @@ def test_plot_traffic_with_no_traversals_is_a_noop():
     assert result is ax
 
 
-def _two_storage_graph() -> WarehouseGraph:
+def _mixed_role_graph() -> WarehouseGraph:
     vertices = {
-        3: Vertex(id=3, role=VertexRole(movable=True, storage=True)),
         1: Vertex(id=1, role=VertexRole(movable=True, storage=True)),
-        2: Vertex(id=2, role=VertexRole(movable=True)),
+        2: Vertex(id=2, role=VertexRole(movable=True, storage=True, delivery=True)),
+        3: Vertex(id=3, role=VertexRole(movable=True, delivery=True, endpoint=True)),
+        4: Vertex(id=4, role=VertexRole(movable=True, endpoint=True)),
+        5: Vertex(id=5, role=VertexRole(movable=True, delivery=True)),
+        6: Vertex(id=6, role=VertexRole(movable=True)),
     }
     return WarehouseGraph(vertices=vertices, edges=(), wait_cost=0.0)
 
 
-def test_assign_storage_letters_names_storage_vertices_in_id_order():
-    graph = _two_storage_graph()
+def test_assign_vertex_names_covers_storage_delivery_endpoint_and_plain():
+    graph = _mixed_role_graph()
 
-    letters = assign_storage_letters(graph)
+    names = assign_vertex_names(graph)
 
-    assert letters == {1: "A", 3: "B"}
+    # 1: storage-only -> A. 2: storage+delivery -> still gets a storage
+    # letter (B), not a D# name -- StorageState capacity is unconditional,
+    # independent of theme.ROLE_PRIORITY's marker-shape priority (which
+    # would draw vertex 2 with a delivery marker). 3: delivery+endpoint ->
+    # D1 only (not also an E#). 4: endpoint-only -> E1. 5: delivery-only
+    # -> D2. 6: plain -> no name at all.
+    assert names == {1: "A", 2: "B", 3: "D1", 4: "E1", 5: "D2"}
+    assert 6 not in names
 
 
 def test_plot_storage_contents_overlay_does_not_raise():
@@ -178,35 +187,13 @@ def test_plot_storage_capacity_list_overlay_does_not_raise():
     assert result is ax
 
 
-def _delivery_endpoint_graph() -> WarehouseGraph:
-    vertices = {
-        1: Vertex(id=1, role=VertexRole(movable=True, storage=True)),
-        2: Vertex(id=2, role=VertexRole(movable=True, delivery=True, endpoint=True)),
-        3: Vertex(id=3, role=VertexRole(movable=True, endpoint=True)),
-        4: Vertex(id=4, role=VertexRole(movable=True, delivery=True)),
-        5: Vertex(id=5, role=VertexRole(movable=True)),
-    }
-    return WarehouseGraph(vertices=vertices, edges=(), wait_cost=0.0)
-
-
-def test_assign_delivery_endpoint_names_skips_storage_and_plain_vertices():
-    graph = _delivery_endpoint_graph()
-
-    names = assign_delivery_endpoint_names(graph)
-
-    # vertex 1 is storage (assign_storage_letters' job, not this one's),
-    # vertex 5 is plain -- neither gets a name here. Vertex 2 has both
-    # delivery and endpoint set and is named D1, matching delivery's
-    # priority over endpoint in theme.ROLE_PRIORITY.
-    assert names == {2: "D1", 3: "E1", 4: "D2"}
-
-
 def test_plot_node_names_overlay_does_not_raise():
-    graph = _delivery_endpoint_graph()
-    positions = {1: (0.0, 0.0), 2: (1.0, 0.0), 3: (2.0, 0.0), 4: (3.0, 0.0), 5: (4.0, 0.0)}
+    graph = _mixed_role_graph()
+    positions = {v: (float(v), 0.0) for v in graph.vertices}
     ax = plot_graph(graph, positions)
-    names = assign_delivery_endpoint_names(graph)
+    names = assign_vertex_names(graph)
+    non_storage_names = {v: n for v, n in names.items() if not graph.vertices[v].role.storage}
 
-    result = plot_node_names(ax, graph, positions, names)
+    result = plot_node_names(ax, graph, positions, non_storage_names)
 
     assert result is ax

@@ -23,8 +23,7 @@ from slap_mapd_coupling.core.storage_state import StorageState, SkuType
 from slap_mapd_coupling.core.graph import VertexId
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_instance
 from slap_mapd_coupling.viz.warehouse_plot import (
-    assign_delivery_endpoint_names,
-    assign_storage_letters,
+    assign_vertex_names,
     plot_graph,
     plot_node_names,
     plot_storage_capacity_list,
@@ -75,8 +74,9 @@ def main() -> None:
         seed=1,
     )
     instance = generate_instance(params)
-    letters = assign_storage_letters(instance.graph)
-    node_names = assign_delivery_endpoint_names(instance.graph)
+    names = assign_vertex_names(instance.graph)
+    letters = {v: n for v, n in names.items() if instance.graph.vertices[v].role.storage}
+    node_names = {v: n for v, n in names.items() if not instance.graph.vertices[v].role.storage}
     storage_vertices = sorted(letters)
 
     storage = build_storage_state(storage_vertices)

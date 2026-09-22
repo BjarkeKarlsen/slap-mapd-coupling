@@ -180,29 +180,34 @@ def plot_storage_heatmap(
     return ax
 
 
-def assign_storage_letters(graph: WarehouseGraph) -> dict[VertexId, str]:
-    """A, B, C, ... in vertex-id order -- a short display name for each
-    storage vertex, for plot_storage_contents/plot_storage_capacity_list
-    (matches 01b_storage_and_config.py's own A/B/C worked example)."""
-    storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
-    return dict(zip(storage_vertices, string.ascii_uppercase))
+def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
+    """Short display name for every vertex playing a storage, delivery, or
+    endpoint role (plain vertices get none), in vertex-id order: storage
+    vertices get A, B, C, ... (matches 01b_storage_and_config.py's own
+    A/B/C worked example); delivery and endpoint vertices get D1, D2, ...
+    / E1, E2, ... -- short handles for future overlays that need to refer
+    to a specific node (a path trace, per-node congestion).
 
-
-def assign_delivery_endpoint_names(graph: WarehouseGraph) -> dict[VertexId, str]:
-    """D1, D2, ... for delivery vertices and E1, E2, ... for endpoint
-    vertices, in vertex-id order -- short handles for future overlays that
-    need to refer to a specific node (a path trace, per-node congestion).
-    A vertex that's also storage is skipped: assign_storage_letters already
-    names it, matching theme.ROLE_PRIORITY's storage-over-endpoint
-    precedence (delivery already outranks both there)."""
+    Storage is checked unconditionally, not via theme.ROLE_PRIORITY (which
+    picks delivery over storage for the marker *shape* -- a rendering
+    judgement call, per its own comment, not a statement about which
+    vertices hold StorageState capacity): a vertex that's both storage and
+    delivery still has real capacity/inventory to report via
+    plot_storage_contents/plot_storage_capacity_list, so it must keep its
+    letter regardless of which shape plot_graph draws for it. Such a
+    vertex is not additionally given a D#/E# name; callers wanting only
+    the non-storage names can filter this dict by
+    `not graph.vertices[v].role.storage`.
+    """
     names: dict[VertexId, str] = {}
+    storage_letters = iter(string.ascii_uppercase)
     delivery_count = 0
     endpoint_count = 0
     for vertex_id in sorted(graph.vertices):
         role = graph.vertices[vertex_id].role
         if role.storage:
-            continue
-        if role.delivery:
+            names[vertex_id] = next(storage_letters)
+        elif role.delivery:
             delivery_count += 1
             names[vertex_id] = f"D{delivery_count}"
         elif role.endpoint:
@@ -217,11 +222,12 @@ def plot_node_names(
     positions: dict[VertexId, tuple[float, float]],
     names: dict[VertexId, str],
 ) -> Axes:
-    """Overlay: each named vertex's short handle (see
-    assign_delivery_endpoint_names) written on the node, coloured by its
-    role like plot_graph's own markers -- lighter weight than
-    plot_storage_contents' bold letters, since these nodes have no
-    contents/capacity to also show yet."""
+    """Overlay: each named vertex's short handle (see assign_vertex_names)
+    written on the node, coloured by its role like plot_graph's own
+    markers -- lighter weight than plot_storage_contents' bold letters,
+    since these nodes have no contents/capacity to also show yet. Callers
+    typically pass assign_vertex_names' output filtered to non-storage
+    vertices, since plot_storage_contents already draws storage letters."""
     for vertex_id, name in names.items():
         role = graph.vertices[vertex_id].role
         style, _secondary = theme.style_for_role(role)
