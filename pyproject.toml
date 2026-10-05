@@ -16,6 +16,7 @@ dependencies = [
     "torch>=2.0.0",
     "gymnasium>=0.29.0",
     "numpy>=1.24.0",
+    "scipy>=1.10",
     "networkx>=3.0",
     "matplotlib>=3.7.0",
     "pyyaml>=6.0",
@@ -56,6 +57,12 @@ warn_unused_configs = true
 # for it specifically (not project-wide) is the standard mypy pattern for
 # an untyped dependency.
 module = "networkx.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Same pattern for scipy, used only for the t quantile of the paired
+# comparison (evaluation/comparison.py); scipy ships no inline types.
+module = "scipy.*"
 ignore_missing_imports = true
 
 [project.scripts]

@@ -187,7 +187,9 @@ def plot_traffic(
 ) -> Axes:
     """Overlay: one arrow per traversed edge, width scaled by traversal count.
 
-    Visualises the mu_T(e) input to eq:entropy / eq:concentration.
+    Visualises the per-edge traversal counts EpisodeLog.edge_traversals
+    records. A diagnostic picture of where traffic went, not part of the
+    score (sec:pf:measures).
     """
     max_flow = max(edge_traversals.values(), default=0)
     if max_flow == 0:

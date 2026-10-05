@@ -36,14 +36,17 @@ class ExperimentConfig(BaseModel):
     num_agents: PositiveInt  # m
     arrival_rate: PositiveFloat  # lambda_task
     seed: int
-    horizon: PositiveInt  # T, evaluation window
+    horizon: PositiveInt  # T, the evaluation horizon (tab:evalparams)
 
     wait_cost: NonNegativeFloat  # c_wait
     storage_epoch_length: PositiveInt | None = None  # Delta; None means F_fix (Delta = infinity)
     congestion_weight: PositiveFloat | None = None  # beta, eq:storagegreedy
     reassignment_cap: PositiveInt | None = None  # nu, max relocated units/epoch
     observation_depth: PositiveInt | None = None  # d, eq:localsubgraph
-    congestion_radius: PositiveInt | None = None  # r_cng, eq:congestion
+    # r_cng, eq:congestion. Also the window crowding (eq:crowding) is read
+    # over: until the thesis's single field-of-view depth d_obs replaces
+    # the three radii here, this is the d_obs that delta_i(t) uses.
+    congestion_radius: PositiveInt | None = None
     communication_radius: PositiveInt | None = None  # r_com, eq:commgraph
 
     # eq:reward / eq:objective (tab:rlparams, sec:method:rl): required only
@@ -60,6 +63,12 @@ class ExperimentConfig(BaseModel):
     # thesis-progress/GAPS.tex's [G11]-style symbol-collision notes), not a
     # naming mistake here; named distinctly to keep the two apart in code.
     congestion_reward_weight: NonNegativeFloat | None = None  # r_cng (reward sense), eq:reward
+
+    # f_up, eq:throughput: the run keeps up if Lambda_T >= f_up *
+    # lambda_task. tab:evalparams leaves its value TBD, so it stays a
+    # configurable parameter with no default; RunMetrics.keeps_up is None
+    # until it is set, rather than judged against a guessed threshold.
+    keep_up_threshold: PositiveFloat | None = None
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -112,6 +121,14 @@ class ExperimentConfig(BaseModel):
                     "congestion_sensitive=True with storage_mode='congestion' requires "
                     "congestion_weight (beta)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _keep_up_threshold_at_most_one(self) -> "ExperimentConfig":
+        """eq:throughput states f_up <= 1: a fleet cannot be required to
+        finish tasks faster than they arrive."""
+        if self.keep_up_threshold is not None and self.keep_up_threshold > 1:
+            raise ValueError(f"keep_up_threshold (f_up) = {self.keep_up_threshold} must be <= 1.")
         return self
 
     @model_validator(mode="after")

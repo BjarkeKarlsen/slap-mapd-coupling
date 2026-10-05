@@ -78,6 +78,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, StorageState
 from slap_mapd_coupling.core.tasks import Task, TaskId, active_tasks_by_agent
+from slap_mapd_coupling.environment.observation import local_subgraph, occupancy_fraction
 from slap_mapd_coupling.environment.reward_function import reward as compute_agent_reward
 from slap_mapd_coupling.environment.spaces import action_for_slot
 from slap_mapd_coupling.resolution.conflict_resolution import (
@@ -100,15 +101,26 @@ class EpisodeLog:
     online, during the step loop -- not recomputed at the horizon.
     evaluation/evaluator.py (#16) reads this off at the end of an
     episode to build one RunMetrics row; this class only accumulates,
-    it does not itself compute throughput/entropy/etc.
+    it does not itself compute throughput/service time/etc.
+
+    edge_traversals and total_movement_cost are not part of the score
+    (sec:pf:measures no longer reports traffic concentration or movement
+    cost). They stay logged because the replay-determinism invariant
+    compares them, and per-edge traversal counts are what an online
+    traffic estimator for F (issue #60) would read.
     """
 
-    edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)  # -> mu_T(e)
+    edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)
     backlog_by_t: list[int] = field(default_factory=list)  # B_t, every timestep
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)
-    total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:movementcost
+    total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:onestepcost
+    # sum_i delta_i(t) at every timestep t = 0..T-1 (eq:crowding); stays
+    # empty when config.congestion_radius is None (no window to read it over).
+    crowding_sum_by_t: list[float] = field(default_factory=list)
+    # nu_t, units relocated at each storage update (eq:relocation).
+    relocated_units_by_update: list[int] = field(default_factory=list)
 
     def record_edge(self, edge: EdgeKey) -> None:
         self.edge_traversals[edge] = self.edge_traversals.get(edge, 0) + 1
@@ -139,7 +151,7 @@ class WarehouseMAPDEnv:
         self._storage_rule = get_storage_rule(config.storage_mode)
         # eq:onestepcost's c(v,w): graph.out_neighbours only exposes
         # targets, not per-edge cost, so cache a lookup once rather than
-        # linear-scanning graph.edges every step for eq:movementcost.
+        # linear-scanning graph.edges every step for total_movement_cost.
         self._edge_costs: dict[EdgeKey, float] = {(e.source, e.target): e.cost for e in graph.edges}
 
         self.fleet: FleetState
@@ -224,6 +236,7 @@ class WarehouseMAPDEnv:
         `actions` mapping").
         """
         before_fleet = self.fleet
+        self._record_crowding(before_fleet)
 
         # Stage 1: orders -> new tasks entering Q_t.
         self.tasks.extend(self._generate_tasks())
@@ -277,7 +290,7 @@ class WarehouseMAPDEnv:
                 self.log.record_edge((before_locations[agent_id], action.target))
 
         # eq:onestepcost's hat_c(l_i(t), l_i(t+1)), summed into
-        # eq:movementcost -- against the REALISED transition for every
+        # log.total_movement_cost -- against the REALISED transition for every
         # agent, not the proposal, so an overridden move is correctly
         # costed as a wait, not as the move that didn't happen.
         for agent_id, before_v in before_locations.items():
@@ -310,6 +323,7 @@ class WarehouseMAPDEnv:
             # waiting_estimate -- flagged here, not silently assumed
             # correct, since those rules will currently only ever see an
             # empty rho_hat_t (i.e. rank every SKU as equally undemanded).
+            before_storage = self.storage
             self.storage = self._storage_rule(
                 self.storage,
                 self.graph,
@@ -318,6 +332,9 @@ class WarehouseMAPDEnv:
                 {},
                 {},
                 {},
+            )
+            self.log.relocated_units_by_update.append(
+                _relocated_units(before_storage, self.storage)
             )
 
         rewards = self._compute_rewards(
@@ -401,8 +418,26 @@ class WarehouseMAPDEnv:
             updated.append(task)
         return updated
 
+    def _record_crowding(self, fleet: FleetState) -> None:
+        """sum_i delta_i(t) for the state at timestep t (eq:crowding), each
+        delta_i(t) per eq:congestion: the other agents inside a_i's window,
+        over the vertices available to hold them. Read over
+        config.congestion_radius; skipped when that is None, so crowding is
+        reported as unknown rather than as zero."""
+        radius = self.config.congestion_radius
+        if radius is None:
+            return
+        self.log.crowding_sum_by_t.append(
+            sum(
+                occupancy_fraction(
+                    fleet, local_subgraph(self.graph, state.location, radius), excl={agent_id}
+                )
+                for agent_id, state in fleet.agents.items()
+            )
+        )
+
     def _backlog(self, t: int) -> int:
-        """B_t = |Q_t| + |B_t| (eq:functional's backlog)."""
+        """B_t = |Q_t| + |B_t|, the backlog the keep-up check plots (eq:throughput)."""
         return sum(1 for task in self.tasks if task.status(t) in ("waiting", "active"))
 
     def _compute_rewards(
@@ -460,3 +495,15 @@ class WarehouseMAPDEnv:
                 congestion_reward_weight=self.config.congestion_reward_weight,
             )
         return rewards
+
+
+def _relocated_units(before: StorageState, after: StorageState) -> int:
+    """nu_t (eq:relocation): units that arrive at a (SKU, vertex) cell they
+    were not at before. Counted the same way storage/relocation.py's cap
+    counts a relocation, so nu_t <= nu by construction."""
+    moved = 0
+    for sku_id, per_vertex in after.counts.items():
+        previous = before.counts.get(sku_id, {})
+        for vertex, count in per_vertex.items():
+            moved += max(0, count - previous.get(vertex, 0))
+    return moved
