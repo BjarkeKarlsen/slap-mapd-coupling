@@ -169,7 +169,7 @@ def test_encode_observation_truncates_nodes_keeping_own_vertex_and_closest_eta()
 def test_encode_observation_truncates_messages_keeping_closest_senders():
     graph = _line_graph(10)
     fleet = _fleet({1: 0, 2: 2, 3: 4, 4: 6})
-    config = _config(observation_depth=9, communication=True, communication_radius=9)
+    config = _config(observation_depth=9, communication=True)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
     assert len(observation.messages) == 3  # distances 2, 4, 6
     mask = legality_mask(graph, vertex=0)
@@ -189,7 +189,7 @@ def test_encode_observation_truncates_messages_keeping_closest_senders():
 def test_encode_observation_congestion_and_action_mask():
     graph = _line_graph(6)
     fleet = _fleet({1: 2, 2: 3})
-    config = _config(observation_depth=2, congestion_sensitive=True, congestion_radius=1)
+    config = _config(observation_depth=2, congestion_sensitive=True)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
     mask = legality_mask(graph, vertex=2)
     encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1)

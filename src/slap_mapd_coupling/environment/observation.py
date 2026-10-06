@@ -24,17 +24,14 @@ Two points flagged, not literally specified:
   other three roles apply (the residual/default category "role(v)"
   implies, and the only one of the four that isn't an actual VertexRole
   field).
-- delta_i(t) needs a congestion radius, but ExperimentConfig only
-  requires congestion_radius when congestion_sensitive=True (it's
-  otherwise None) -- so a decentralised agent with congestion_sensitive
-  =False has no radius to evaluate eq:congestion's window at. Observation
-  .congestion is therefore Optional: None when congestion_radius isn't
-  configured (nothing to compute, not silently reported as zero
-  congestion), a real float otherwise. This mirrors the "sensitivity
-  toggle" language itself (sec:pf:controllers): whether the *policy*
-  conditions on delta_i(t) is the toggle; whether it's even computed
-  follows the same flag here, since there is no separate parameter for
-  "compute it but let the policy ignore it."
+- delta_i(t) is the occupancy fraction of the agent's own field of view
+  V_i^(d_obs)(t) (eq:congestion), so it needs no radius of its own
+  (issue #88). Observation.congestion is still Optional: None when
+  congestion_sensitive=False. Whether the policy conditions on
+  delta_i(t) is the sensitivity toggle (sec:pf:controllers), and there
+  is no separate parameter for "compute it but let the policy ignore
+  it." The run-level crowding measure (eq:crowding) needs it for every
+  agent regardless of the toggle, which is the evaluator's concern (#93).
 """
 
 from __future__ import annotations
@@ -79,7 +76,7 @@ class Observation:
 
     visible_vertices: tuple[VertexId, ...]  # V_i^(d)(t)
     features: dict[VertexId, VertexFeatures]
-    congestion: float | None  # delta_i(t); None iff congestion_radius isn't configured
+    congestion: float | None  # delta_i(t); None iff congestion_sensitive=False
     messages: tuple[Message, ...]
 
 
@@ -121,14 +118,15 @@ def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[
 
 
 def communication_neighbours(
-    graph: WarehouseGraph, fleet: FleetState, agent_id: AgentId, communication_radius: float
+    graph: WarehouseGraph, fleet: FleetState, agent_id: AgentId, observation_depth: float
 ) -> tuple[AgentId, ...]:
-    """{a_j : (a_i,a_j) in E^A_t} (eq:commgraph)."""
+    """{a_j : (a_i,a_j) in E^A_t} (eq:commgraph), bounded by the field of
+    view d_obs (issue #88)."""
     location = fleet.locations()[agent_id]
     return tuple(
         other_id
         for other_id, state in fleet.agents.items()
-        if other_id != agent_id and graph.distance(location, state.location) <= communication_radius
+        if other_id != agent_id and graph.distance(location, state.location) <= observation_depth
     )
 
 
@@ -164,12 +162,11 @@ def build_observation(
     }
 
     congestion: float | None = None
-    if config.congestion_radius is not None:
-        window = local_subgraph(graph, location, config.congestion_radius)
-        congestion = occupancy_fraction(fleet, window, excl={agent_id})
+    if config.congestion_sensitive:
+        congestion = occupancy_fraction(fleet, visible, excl={agent_id})
 
     messages: tuple[Message, ...] = ()
-    if config.communication and config.communication_radius is not None:
+    if config.communication:
         messages = tuple(
             Message(
                 sender=other_id,
@@ -181,7 +178,7 @@ def build_observation(
                 ),
             )
             for other_id in communication_neighbours(
-                graph, fleet, agent_id, config.communication_radius
+                graph, fleet, agent_id, config.observation_depth
             )
         )
 
