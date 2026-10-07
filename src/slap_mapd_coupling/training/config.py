@@ -123,6 +123,7 @@ def build_ppo_config(
     *,
     policy_id: str = DEFAULT_POLICY_ID,
     num_env_runners: int = 0,
+    use_gpu: bool = False,
 ) -> PPOConfig:
     """Assembles a ray.rllib.algorithms.ppo.PPOConfig for the
     decentralised regime: registers training/env.py's MultiAgentEnv
@@ -138,6 +139,12 @@ def build_ppo_config(
     own `seed` (PPOConfig.debugging) to `seed_split.base_seed`, so the
     disjoint split (sec:method:training) actually reaches training
     rather than only being exercised in tests.
+
+    `use_gpu` requests one GPU for the local learner
+    (PPOConfig.learners(num_gpus_per_learner=...)); RLlib otherwise
+    defaults to CPU-only training regardless of what's available on the
+    machine. Execution detail, not a study parameter -- defaulted off,
+    same as `policy_id`/`num_env_runners`.
 
     `policy_id`/`num_env_runners` are naming/execution details, not
     study parameters -- defaulted, unlike every PPOHyperparameters/
@@ -167,6 +174,18 @@ def build_ppo_config(
     train_seeds, _ = split_seeds(seed_split)
 
     def env_creator(_env_config: dict) -> WarehouseMAPDMultiAgentEnv:
+        # Registers the storage rules in WHICHEVER process actually calls
+        # this -- with num_env_runners > 0, that is a separate worker
+        # process, not the one that imported storage/fixed.py et al. at
+        # the top of the caller's own script, and each process keeps its
+        # own copy of storage/registry.py's module-level registry. These
+        # imports are idempotent (Python only runs a module's top-level
+        # code once per process, caching it in sys.modules), so repeated
+        # env_creator calls within one worker never double-register.
+        import slap_mapd_coupling.storage.congestion  # noqa: F401
+        import slap_mapd_coupling.storage.demand  # noqa: F401
+        import slap_mapd_coupling.storage.fixed  # noqa: F401
+
         return WarehouseMAPDMultiAgentEnv(
             graph,
             skus,
@@ -210,6 +229,7 @@ def build_ppo_config(
             rollout_fragment_length=ppo_hyperparameters.rollout_fragment_length,
         )
         .debugging(seed=seed_split.base_seed)
+        .learners(num_gpus_per_learner=1 if use_gpu else 0)
         .training(
             gamma=experiment_config.discount,
             lr=ppo_hyperparameters.lr,

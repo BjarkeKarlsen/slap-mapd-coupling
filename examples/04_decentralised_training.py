@@ -27,10 +27,23 @@ Scope, flagged rather than silently narrowed:
   checkpoint into evaluator.py for an apples-to-apples RunMetrics
   comparison is #29's job, not re-derived here.
 
-Hyperparameters below are deliberately small/fast (short horizon, tiny
-network, few iterations) so this runs in well under a minute on a
-laptop CPU -- a real sweep run would use tab:trainparams's actual
-(currently TBD) values, not these.
+Hyperparameters below are still deliberately small relative to a real
+sweep (tab:trainparams's actual values are TBD, not these), but sized
+to actually converge on some task completions within a few minutes,
+not just to demonstrate the pipeline runs: with the previous tinier
+defaults (hidden_width=16, 1 GNN round, 5 iterations), the policy's
+logits stayed close to untrained noise and greedy evaluation picked
+"wait" for every agent at every timestep, so no task was ever
+completed, training iteration count or not. A wider/deeper encoder
+and more iterations (below) does learn real navigation; flagged here
+since the previous "deliberately small/fast" sizing undershot even a
+smoke test's own "completes at least some tasks" goal (see this
+docstring's first paragraph).
+
+--gpu requests one GPU for the learner (passed through to
+build_ppo_config's use_gpu); --env-runners=N parallelises rollout
+collection across N worker processes. Both are execution details,
+tuned to the machine running this script, not study parameters.
 """
 
 from __future__ import annotations
@@ -41,6 +54,7 @@ from pathlib import Path
 import numpy as np
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
+from slap_mapd_coupling.controllers.decentralised import _sample_legal_slot
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -109,7 +123,7 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
         num_agents=FLEET_SIZE,
         arrival_rate=0.3,
         seed=seed,
-        horizon=30,
+        horizon=150,
         wait_cost=0.5,
         observation_depth=3,
         discount=0.99,
@@ -126,18 +140,35 @@ def build_seed_split(base_seed: int) -> SeedSplitConfig:
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=3)
 
 
-def build_hyperparameters() -> PPOHyperparameters:
-    # Deliberately small/fast -- see module docstring.
+def build_hyperparameters(num_env_runners: int) -> PPOHyperparameters:
+    # See module docstring: sized to actually converge, not just to be
+    # fast. hidden_width=16/num_rounds=1 (the previous sizing) left the
+    # encoder with too little capacity to learn directed navigation in
+    # this instance; train_batch_size=180 (6 episodes/iteration) was
+    # also too little experience per update for 3 agents sharing one
+    # policy to disentangle useful signal from noise.
+    rollout_fragment_length = 30
+    # RLlib requires train_batch_size to be an (approximate) multiple of
+    # num_env_runners * rollout_fragment_length whenever num_env_runners
+    # > 0 (PPOConfig.validate_train_batch_size_vs_rollout_fragment_length);
+    # with num_env_runners=0 (local, synchronous sampling) any value
+    # works, so this still picks the multiple of rollout_fragment_length
+    # closest to the same ~600-sample target used before --env-runners
+    # existed, rather than a value that only happens to work for one
+    # specific worker count.
+    per_iteration_samples = max(num_env_runners, 1) * rollout_fragment_length
+    multiple = max(1, round(600 / per_iteration_samples))
+    train_batch_size = multiple * per_iteration_samples
     return PPOHyperparameters(
         lr=3e-4,
         clip_param=0.2,
         gae_lambda=0.95,
-        minibatch_size=64,
-        num_epochs=3,
-        rollout_fragment_length=30,
-        entropy_coeff=0.01,
+        minibatch_size=128,
+        num_epochs=5,
+        rollout_fragment_length=rollout_fragment_length,
+        entropy_coeff=0.02,
         vf_loss_coeff=1.0,
-        train_batch_size=180,
+        train_batch_size=train_batch_size,
         credit_signal="per_agent",
     )
 
@@ -149,11 +180,13 @@ def train(
     counts: dict[SkuId, dict[VertexId, int]],
     config: ExperimentConfig,
     num_iterations: int,
+    num_env_runners: int = 0,
+    use_gpu: bool = False,
 ):
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=16)
+    gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32)
     d_max = max_out_degree(graph)
-    head_config = PolicyValueHeadConfig(hidden_width=16, num_actions=d_max + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=32, num_actions=d_max + 1)
 
     ppo_config = build_ppo_config(
         graph,
@@ -164,9 +197,10 @@ def train(
         enc_config,
         gnn_config,
         head_config,
-        build_hyperparameters(),
+        build_hyperparameters(num_env_runners),
         build_seed_split(config.seed),
-        num_env_runners=0,
+        num_env_runners=num_env_runners,
+        use_gpu=use_gpu,
     ).callbacks(CorrectnessInvariantCallbacks)
 
     algo = ppo_config.build_algo()
@@ -186,10 +220,21 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
     """Runs the trained RLModule for a few fresh episodes directly
     (bypassing the Controller Protocol -- see module docstring for why),
     checking the same correctness invariants training already enforces
-    and reporting how many tasks got completed."""
+    and reporting how many tasks got completed.
+
+    Samples from pi_theta(.|o_i(t)) rather than taking the greedy
+    argmax: training samples (PPO's rollouts), so evaluating with a
+    different action rule than the one actually optimised is its own
+    mismatch, and controllers/decentralised.py's DecentralisedController
+    already establishes sampling as this repo's convention for actually
+    running the policy, not just training it. Greedy argmax on a
+    not-fully-converged policy can also lock onto a worse, degenerate
+    trajectory (e.g. oscillating between two vertices forever) that
+    sampling's own stochasticity would have escaped."""
     print(f"\n=== Evaluating the trained policy over {num_episodes} fresh episodes ===")
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
     module = algo.get_module("shared_policy")
+    rng = np.random.default_rng(config.seed + 2000)
 
     for episode_idx in range(num_episodes):
         # This bypasses training/env.py's usual train_seeds cycling (see
@@ -219,9 +264,10 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
             # Pair logits[i] with agent_ids[i], NOT env.agents[i] -- obs's
             # own key order (which _to_batch stacks in) isn't guaranteed
             # to match env.agents's fixed order.
-            actions = {
-                aid: int(np.argmax(logits[i].detach().numpy())) for i, aid in enumerate(agent_ids)
-            }
+            actions = {}
+            for i, aid in enumerate(agent_ids):
+                mask = obs[aid]["action_mask"]
+                actions[aid] = _sample_legal_slot(logits[i].detach().numpy(), mask, rng)
             obs, rewards, terminated, truncated, infos = env.step(actions)
             assert is_collision_free(before_fleet, env._env.fleet), "collision during evaluation"
             assert is_feasible(env._env.storage), "infeasible storage during evaluation"
@@ -259,16 +305,29 @@ def _to_batch(obs: dict) -> tuple[dict, list[str]]:
 
 def main() -> None:
     regime: TrainingRegime = "matched" if "--regime=matched" in sys.argv[1:] else "fixed_only"
-    num_iterations = 5
+    num_iterations = 500
+    num_env_runners = 0
+    use_gpu = "--gpu" in sys.argv[1:]
     for arg in sys.argv[1:]:
         if arg.startswith("--iterations="):
             num_iterations = int(arg.split("=", 1)[1])
+        elif arg.startswith("--env-runners="):
+            num_env_runners = int(arg.split("=", 1)[1])
 
     graph = build_instance()
     skus, capacities, counts = build_storage(graph)
     config = build_config(regime, seed=0)
 
-    algo, _ = train(graph, skus, capacities, counts, config, num_iterations)
+    algo, _ = train(
+        graph,
+        skus,
+        capacities,
+        counts,
+        config,
+        num_iterations,
+        num_env_runners=num_env_runners,
+        use_gpu=use_gpu,
+    )
 
     saved_path = save_checkpoint(algo, CHECKPOINT_DIR)
     print(f"\nCheckpoint saved to {saved_path}")
