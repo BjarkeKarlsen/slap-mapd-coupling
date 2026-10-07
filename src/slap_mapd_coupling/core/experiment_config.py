@@ -46,6 +46,21 @@ class ExperimentConfig(BaseModel):
     congestion_radius: PositiveInt | None = None  # r_cng, eq:congestion
     communication_radius: PositiveInt | None = None  # r_com, eq:commgraph
 
+    # eq:reward / eq:objective (tab:rlparams, sec:method:rl): required only
+    # for controller="decentralised", same gating as observation_depth
+    # above, since eq:objective explicitly "applies to whichever regime is
+    # realised as a LEARNED controller" and only the decentralised regime
+    # trains (AGENTS.md: --checkpoint never applies to the other two).
+    discount: PositiveFloat | None = None  # gamma, eq:objective
+    deliver_reward: NonNegativeFloat | None = None  # r_deliver, eq:reward
+    override_penalty: NonNegativeFloat | None = None  # r_blk, eq:reward
+    # r_cng in eq:reward (a reward WEIGHT) is a different symbol from
+    # congestion_radius's r_cng above (a graph-distance RADIUS, eq:congestion)
+    # -- a genuine notation collision in the thesis text itself (see
+    # thesis-progress/GAPS.tex's [G11]-style symbol-collision notes), not a
+    # naming mistake here; named distinctly to keep the two apart in code.
+    congestion_reward_weight: NonNegativeFloat | None = None  # r_cng (reward sense), eq:reward
+
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
         if self.storage_mode == "fixed":
@@ -69,6 +84,14 @@ class ExperimentConfig(BaseModel):
                 raise ValueError("controller='decentralised' requires observation_depth (d).")
             if self.communication and self.communication_radius is None:
                 raise ValueError("communication=True requires communication_radius (r_com).")
+            for name in (
+                "discount",
+                "deliver_reward",
+                "override_penalty",
+                "congestion_reward_weight",
+            ):
+                if getattr(self, name) is None:
+                    raise ValueError(f"controller='decentralised' requires {name}.")
         elif self.communication:
             raise ValueError(
                 "communication=True only applies to controller='decentralised' "
@@ -89,4 +112,14 @@ class ExperimentConfig(BaseModel):
                     "congestion_sensitive=True with storage_mode='congestion' requires "
                     "congestion_weight (beta)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _discount_in_unit_interval(self) -> "ExperimentConfig":
+        """eq:objective's gamma is a standard POSG discount factor; the
+        thesis pins no explicit bound beyond that, so the conventional
+        (0, 1] range is enforced here as a flagged assumption, not
+        silently assumed."""
+        if self.discount is not None and self.discount > 1:
+            raise ValueError(f"discount (gamma) = {self.discount} must be in (0, 1].")
         return self
