@@ -17,9 +17,9 @@ package" discipline #26/#27 already established): `setup()` must build
 return raw action-dist-input logits; `self.vf(critic_embedding)` must
 return a value tensor RLlib squeezes on its last dim (see
 `ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module`).
-GNNEncoder.forward_padded already produces one shared z_i (eq:readout)
+GNNEncoder.forward_padded already produces one shared z_i (the readout)
 for both roles -- unlike RLlib's own actor/critic-encoder split, there
-is no separate value encoder here, matching eq:readout's single z_i
+is no separate value encoder here, matching the readout's single z_i
 feeding both pi_theta and V_theta (sec:method:model): ACTOR and CRITIC
 are the same tensor.
 

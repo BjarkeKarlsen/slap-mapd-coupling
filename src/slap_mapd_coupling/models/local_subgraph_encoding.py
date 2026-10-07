@@ -2,26 +2,19 @@
 into the fixed-shape tensors GNNEncoder.forward_padded (#27) and RLlib's
 batched training pipeline need.
 
-G_i^(d)(t) has a variable vertex count (eq:localsubgraph); RLlib's
-tensor-batched pipeline needs a fixed shape. Per the user-approved
-option for #28, this pads/masks to a fixed max_local_nodes cap.
+G_i^(d_obs)(t) has a variable vertex count (the field of view); RLlib's
+tensor-batched pipeline needs a fixed shape, so this pads/masks to a
+fixed max_local_nodes cap.
 
-Truncation policy, flagged rather than picked silently since the thesis
-text never addresses what to do when |G_i^(d)(t)| exceeds a fixed cap
-(a real gap: eq:localsubgraph defines the local subgraph itself, not a
-bound on its size, and eq:observation/eq:msgpass are written as if the
-whole thing were always carried):
+The thesis doesn't say what to do when |G_i^(d_obs)(t)| exceeds a fixed
+cap, so the truncation policy is a flagged choice, not a thesis fact:
   - Nodes: always keep the agent's own vertex l_i(t) (own_index must be
-    valid), then fill remaining slots by ascending eta_i(v,t)
-    (eq:potential) -- i.e. keep the vertices closest to the agent's
-    current goal first, the ones most likely to matter for the decision.
-    Any edge to a truncated-away vertex is simply absent from the
-    resulting (dense) adjacency, matching what "not in G_i^(d)(t) after
-    truncation" should mean.
+    valid), then fill remaining slots by ascending eta_i(v,t) (the
+    distance label), keeping the vertices closest to the agent's current
+    goal first. An edge to a truncated-away vertex is simply absent from
+    the resulting (dense) adjacency.
   - Messages: keep the max_messages closest senders by distance
-    (Message.distance), for the same reasoning.
-This is the natural "keep what's closest" choice, not an arbitrary one,
-but it is a choice -- documented here so it's easy to revisit.
+    (Message.distance).
 """
 
 from __future__ import annotations
@@ -152,7 +145,7 @@ def encode_observation(
     config: LocalSubgraphEncodingConfig,
 ) -> EncodedObservation:
     """o_i(t) (#25) + its action mask (environment/spaces.py::legality_mask,
-    eq:mask) -> the fixed-shape EncodedObservation GNNEncoder.forward_padded
+    the action mask) -> the fixed-shape EncodedObservation GNNEncoder.forward_padded
     (#27) and RLlib both need. `mask` is the caller's own legality_mask
     result, not recomputed here (same "pass it, don't recompute per call"
     convention legality_mask's own docstring already uses for d_max)."""
