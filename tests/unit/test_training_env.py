@@ -55,12 +55,14 @@ def _config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-def _env(**config_overrides) -> WarehouseMAPDMultiAgentEnv:
+def _env(
+    train_seeds: tuple[int, ...] = (100, 101, 102), **config_overrides
+) -> WarehouseMAPDMultiAgentEnv:
     graph = _graph()
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     return WarehouseMAPDMultiAgentEnv(
-        graph, skus, counts, capacities, _config(**config_overrides), enc_config
+        graph, skus, counts, capacities, _config(**config_overrides), enc_config, train_seeds
     )
 
 
@@ -75,6 +77,11 @@ def test_rejects_non_decentralised_controller():
             override_penalty=None,
             congestion_reward_weight=None,
         )
+
+
+def test_empty_train_seeds_rejected():
+    with pytest.raises(ValueError, match="train_seeds"):
+        _env(train_seeds=())
 
 
 def test_reset_observations_match_declared_spaces():
@@ -96,6 +103,49 @@ def test_step_with_wait_actions_keeps_agents_stationary():
     assert env._env.fleet.locations() == before
     assert set(rewards) == set(env.agents)
     assert terminated["__all__"] is False
+
+
+def test_successive_resets_cycle_through_training_seeds_only():
+    """sec:method:training: seeds are split disjointly between training
+    and evaluation. RLlib always calls reset(seed=None) at episode start
+    (training/env.py's module docstring), so successive resets must cycle
+    through train_seeds in order and never stray into an eval seed."""
+    train_seeds = (10, 11, 12)
+    eval_seeds = (13, 14)
+    env = _env(train_seeds=train_seeds)
+
+    seen = []
+    for _ in range(7):  # more than one full cycle
+        env.reset()
+        seen.append(env.last_seed)
+
+    assert seen == [10, 11, 12, 10, 11, 12, 10]
+    assert set(seen).isdisjoint(eval_seeds)
+
+
+def test_two_envs_with_the_same_train_seeds_produce_the_same_sequence():
+    train_seeds = (20, 21, 22)
+    env_a = _env(train_seeds=train_seeds)
+    env_b = _env(train_seeds=train_seeds)
+
+    sequence_a = [_reset_and_get_seed(env_a) for _ in range(5)]
+    sequence_b = [_reset_and_get_seed(env_b) for _ in range(5)]
+
+    assert sequence_a == sequence_b
+
+
+def _reset_and_get_seed(env: WarehouseMAPDMultiAgentEnv) -> int:
+    env.reset()
+    assert env.last_seed is not None
+    return env.last_seed
+
+
+def test_explicit_seed_overrides_the_training_cycle():
+    env = _env(train_seeds=(30, 31))
+    env.reset(seed=999)
+    assert env.last_seed == 999
+    env.reset()  # back to the cycle, starting at index 0
+    assert env.last_seed == 30
 
 
 def test_step_respects_action_mask_and_truncates_at_horizon():

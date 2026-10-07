@@ -51,7 +51,12 @@ from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.callbacks import CorrectnessInvariantCallbacks
-from slap_mapd_coupling.training.config import PPOHyperparameters, TrainingRegime, build_ppo_config
+from slap_mapd_coupling.training.config import (
+    PPOHyperparameters,
+    SeedSplitConfig,
+    TrainingRegime,
+    build_ppo_config,
+)
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 from slap_mapd_coupling.training.utils import save_checkpoint
 
@@ -114,6 +119,13 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
     )
 
 
+def build_seed_split(base_seed: int) -> SeedSplitConfig:
+    # Illustrative demo values. train/eval seed counts (tab:trainparams)
+    # are TBD, tracked in #85; small here since this script is a
+    # deliberately quick smoke test, not a real sweep run.
+    return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=3)
+
+
 def build_hyperparameters() -> PPOHyperparameters:
     # Deliberately small/fast -- see module docstring.
     return PPOHyperparameters(
@@ -153,6 +165,7 @@ def train(
         gnn_config,
         head_config,
         build_hyperparameters(),
+        build_seed_split(config.seed),
         num_env_runners=0,
     ).callbacks(CorrectnessInvariantCallbacks)
 
@@ -179,13 +192,21 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
     module = algo.get_module("shared_policy")
 
     for episode_idx in range(num_episodes):
+        # This bypasses training/env.py's usual train_seeds cycling (see
+        # module docstring): the single seed below is the only entry in
+        # its own cycle, so reset()'s seed=None path resolves to exactly
+        # the ad hoc per-episode seed this script already used, same as
+        # before train_seeds existed. A real evaluation seed, from
+        # split_seeds's own eval half, is #68/B14's job, not this one.
+        episode_config = config.model_copy(update={"seed": config.seed + 1000 + episode_idx})
         env = WarehouseMAPDMultiAgentEnv(
             graph,
             skus,
             counts,
             capacities,
-            config.model_copy(update={"seed": config.seed + 1000 + episode_idx}),
+            episode_config,
             enc_config,
+            (episode_config.seed,),
         )
         obs, _ = env.reset()
         before_fleet = env._env.fleet

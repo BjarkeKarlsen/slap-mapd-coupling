@@ -23,11 +23,20 @@ driven) contract:
 Only ever constructed with config.controller="decentralised" -- the
 other two architectures already have their own env-driven loop
 (examples/01, examples/03) and never need this adapter.
+
+Each training episode draws from `train_seeds` (training/config.py's
+disjoint split, sec:method:training), cycling through them in order
+rather than sampling, so successive episodes never repeat a seed until
+every seed in the split has been used once. The thesis states the
+split is disjoint but not whether training draws from it by cycling or
+by sampling; cycling is the simpler choice and guarantees every
+training seed is used equally often, flagged here as a choice rather
+than a thesis fact.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
@@ -59,12 +68,18 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         storage_capacities: Mapping[VertexId, float],
         config: ExperimentConfig,
         encoding_config: LocalSubgraphEncodingConfig,
+        train_seeds: Sequence[int],
     ) -> None:
         if config.controller != "decentralised":
             raise ValueError(
                 f"WarehouseMAPDMultiAgentEnv is only meaningful for "
                 f"controller='decentralised', got {config.controller!r} -- the other "
                 "two architectures drive WarehouseMAPDEnv directly (examples/01, /03)."
+            )
+        if not train_seeds:
+            raise ValueError(
+                "train_seeds must be non-empty: the disjoint training split "
+                "(training/config.py::split_seeds) requires at least one seed."
             )
         super().__init__()
         self.graph = graph
@@ -74,6 +89,8 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._config = config
         self._encoding_config = encoding_config
         self._d_max = max_out_degree(graph)
+        self._train_seeds = tuple(train_seeds)
+        self._next_train_seed_index = 0
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
         base_observation_space = encoded_observation_space(encoding_config)
@@ -87,6 +104,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._env = WarehouseMAPDEnv(
             graph, skus, initial_storage_counts, storage_capacities, config
         )
+        self.last_seed: Optional[int] = None  # the seed the most recent reset() actually used
 
     # RLlib's own MultiAgentEnv.reset()/step() signatures are already
     # loosely typed against gymnasium.core.Env's single-agent generics
@@ -97,6 +115,14 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
     def reset(  # type: ignore[override]
         self, *, seed: Optional[int] = None, options: Optional[dict] = None
     ) -> tuple[dict[str, Any], dict[str, dict]]:
+        # RLlib calls reset(seed=None) at the start of every training
+        # episode (sec:method:training: seeds are split disjointly between
+        # training and evaluation). An explicit seed, if the caller passes
+        # one, is honoured as-is rather than overridden by the cycle.
+        if seed is None:
+            seed = self._train_seeds[self._next_train_seed_index % len(self._train_seeds)]
+            self._next_train_seed_index += 1
+        self.last_seed = seed
         super().reset(seed=seed, options=options)
         self._env.reset(seed=seed)
         return self._encode_all_observations(), {str(aid): {} for aid in self.agents}

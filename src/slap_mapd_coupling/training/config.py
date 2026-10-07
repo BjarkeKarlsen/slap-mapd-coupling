@@ -119,6 +119,7 @@ def build_ppo_config(
     gnn_encoder_config: GNNEncoderConfig,
     policy_value_head_config: PolicyValueHeadConfig,
     ppo_hyperparameters: PPOHyperparameters,
+    seed_split: SeedSplitConfig,
     *,
     policy_id: str = DEFAULT_POLICY_ID,
     num_env_runners: int = 0,
@@ -131,6 +132,12 @@ def build_ppo_config(
     RLlib's Catalog-built default -- see module docstring for what's
     TBD vs fixed here. `experiment_config.controller` must already be
     "decentralised" (WarehouseMAPDMultiAgentEnv enforces this itself).
+
+    `seed_split` feeds the adapter its training seeds (training/env.py
+    cycles through them, see that module's docstring) and sets RLlib's
+    own `seed` (PPOConfig.debugging) to `seed_split.base_seed`, so the
+    disjoint split (sec:method:training) actually reaches training
+    rather than only being exercised in tests.
 
     `policy_id`/`num_env_runners` are naming/execution details, not
     study parameters -- defaulted, unlike every PPOHyperparameters/
@@ -157,6 +164,8 @@ def build_ppo_config(
             "action count must match this instance's actual d_max, not an unrelated value."
         )
 
+    train_seeds, _ = split_seeds(seed_split)
+
     def env_creator(_env_config: dict) -> WarehouseMAPDMultiAgentEnv:
         return WarehouseMAPDMultiAgentEnv(
             graph,
@@ -165,6 +174,7 @@ def build_ppo_config(
             storage_capacities,
             experiment_config,
             encoding_config,
+            train_seeds,
         )
 
     register_env(_ENV_NAME, env_creator)
@@ -199,6 +209,7 @@ def build_ppo_config(
             num_env_runners=num_env_runners,
             rollout_fragment_length=ppo_hyperparameters.rollout_fragment_length,
         )
+        .debugging(seed=seed_split.base_seed)
         .training(
             gamma=experiment_config.discount,
             lr=ppo_hyperparameters.lr,
