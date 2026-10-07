@@ -11,8 +11,6 @@ Where the code still differs from the thesis:
   issue #91.
 - The field of view and the communication graph use cost distance d_G,
   not hop distance, see issue #89.
-- delta_i(t) is None when congestion_sensitive=False, although the thesis
-  always includes it in o_i(t).
 
 The vertex features use a multi-hot role (storage, delivery, endpoint,
 transit), because VertexRole allows a vertex several roles. Transit is
@@ -61,7 +59,7 @@ class Observation:
 
     visible_vertices: tuple[VertexId, ...]  # V_i^(d_obs)(t)
     features: dict[VertexId, VertexFeatures]
-    congestion: float | None  # delta_i(t); None iff congestion_sensitive=False
+    congestion: float  # delta_i(t); always one of o_i(t)'s three pieces
     messages: tuple[Message, ...]
 
 
@@ -148,9 +146,7 @@ def build_observation(
         for v in visible
     }
 
-    congestion: float | None = None
-    if config.congestion_sensitive:
-        congestion = occupancy_fraction(fleet, visible, excl={agent_id})
+    congestion = occupancy_fraction(fleet, visible, excl={agent_id})
 
     messages: tuple[Message, ...] = ()
     if config.communication:

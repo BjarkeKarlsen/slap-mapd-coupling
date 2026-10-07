@@ -123,12 +123,16 @@ def test_build_observation_eta_uses_current_goal_before_pickup():
     assert obs.features[4].eta == 0  # the goal itself
 
 
-def test_build_observation_congestion_none_when_insensitive():
+def test_build_observation_congestion_present_when_insensitive():
+    """delta_i(t) is always one of o_i(t)'s three pieces (sec:pf:observations,
+    sec:pf:controllers); congestion_sensitive only decides whether the
+    policy reacts to it, not whether it's computed."""
     graph = _line_graph(5)
-    fleet = _fleet({1: 2})
-    config = _config(observation_depth=2, congestion_sensitive=False)
+    fleet = _fleet({1: 2, 2: 3})
+    config = _config(observation_depth=1, congestion_sensitive=False)
     obs = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
-    assert obs.congestion is None
+    # field of view (d_obs=1) = {1,2,3}, excl={1}; agent 2 (at 3) is inside -> 1/(3-1)=0.5
+    assert obs.congestion == pytest.approx(0.5)
 
 
 def test_build_observation_congestion_over_field_of_view_when_sensitive():

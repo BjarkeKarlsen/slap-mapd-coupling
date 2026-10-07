@@ -182,8 +182,6 @@ def encode_observation(
         message_features[i] = (message.distance, message.eta)
         message_mask[i] = 1.0
 
-    congestion = observation.congestion if observation.congestion is not None else 0.0
-
     return EncodedObservation(
         node_features=node_features,
         node_mask=node_mask,
@@ -191,6 +189,6 @@ def encode_observation(
         own_index=own_index,
         message_features=message_features,
         message_mask=message_mask,
-        congestion=congestion,
+        congestion=observation.congestion,
         action_mask=to_action_mask(mask),
     )

@@ -149,13 +149,10 @@ class GNNEncoder(nn.Module):
             aggregated = torch.zeros(MESSAGE_FEATURE_DIM)
 
         # the readout always includes delta_i(t); Observation.congestion is
-        # None specifically when observation_depth (d_obs) isn't configured
-        # (environment/observation.py) -- falls back to 0.0 here, since
-        # the encoder needs a concrete scalar regardless of whether the
-        # policy is meant to condition on it (the "sensitivity" toggle
-        # governs training/interpretation, not tensor shape).
-        congestion = observation.congestion if observation.congestion is not None else 0.0
-        congestion_tensor = torch.tensor([congestion], dtype=torch.float32)
+        # always a concrete scalar (environment/observation.py), whether or
+        # not the policy is meant to condition on it (the "sensitivity"
+        # toggle governs training/interpretation, not tensor shape).
+        congestion_tensor = torch.tensor([observation.congestion], dtype=torch.float32)
 
         return torch.cat([own_embedding, aggregated, congestion_tensor], dim=-1)
 
