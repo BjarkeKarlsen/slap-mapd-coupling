@@ -8,7 +8,7 @@ from slap_mapd_coupling.instances.generator import (
     generate_instance,
 )
 from slap_mapd_coupling.instances.validation import check_well_formedness
-from slap_mapd_coupling.viz.warehouse_plot import plot_graph
+from slap_mapd_coupling.viz.warehouse_plot import assign_vertex_names, plot_graph, plot_node_names
 
 
 def main() -> None:
@@ -91,7 +91,10 @@ def main() -> None:
     # -- test_generate_warehouse_graph_unchanged_by_refactor guarantees the
     # two entry points never drift apart.
     instance = generate_instance(accepted_params)
+    names = assign_vertex_names(instance.graph)
     ax = plot_graph(instance.graph, instance.positions)
+    plot_node_names(ax, instance.graph, instance.positions, names)
+
     out_dir = os.path.join(os.path.dirname(__file__), "output")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "instance.png")

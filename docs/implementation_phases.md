@@ -31,7 +31,9 @@ don't start one before the previous is done and tested.
 - [x] `viz/` — `theme.py`, `layout.py`, `warehouse_plot.py` (matplotlib),
       `pygame_renderer.py` (interactive, optional `[viz]` extra)
 - [x] `examples/00_build_instance.py`, `00b_pygame_preview.py`,
-      `01b_storage_and_config.py`
+      `01b_storage_and_config.py`, `01c_storage_state_on_instance.py`
+      (post-run-style storage heatmap on a real generated instance,
+      closes #70)
 - [x] 62 unit tests, 93% coverage, CI (`test` + `lint` jobs), black/
       flake8/mypy all clean
 
