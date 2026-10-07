@@ -4,12 +4,12 @@ Turns a proposed joint action into a collision-free one. A priority
 permutation sigma of {1,...,m} is drawn once per episode from the episode
 seed and held fixed for that episode. At each timestep, agents are
 processed in sigma order: each one's proposed successor is tentatively
-accepted unless it violates eq:vertexconflict or eq:swapconflict against
+accepted unless it violates the vertex rule or the swap rule against
 the already-finalised successors of higher-priority agents, in which case
-it is overridden to `wait` (always legal, eq:actions) and its override
-flag for t is set. That flag feeds the -n_blocked term of the reward (eq:reward) and is
-what defines omega_j(t) (eq:waiting); see sec:impl:logging -- log it once,
-here, rather than re-deriving it at either call site.
+it is overridden to `wait` (always legal in the action set) and its
+override flag for t is set. That flag feeds the -n_blocked term of the
+reward and defines omega_j(t) in the mean blocked time (sec:impl:logging).
+It is logged once, here, rather than re-derived at either call site.
 
 Deviation from the thesis text (flagged, not silently patched -- see the
 PR for issue #7): the text's own feasibility argument for step 3 ("waiting
@@ -37,8 +37,8 @@ actually be shown, not just asserted, by induction over the order agents
 are processed in:
 
   Inductive hypothesis: after processing agents sigma(1),...,sigma(k-1),
-  `finalised` is pairwise collision-free (no eq:vertexconflict or
-  eq:swapconflict among any two of them) -- vacuously true for k=1.
+  `finalised` is pairwise collision-free (no vertex-rule or
+  swap-rule violation among any two of them) -- vacuously true for k=1.
 
   Step: when agent sigma(k) is processed, `_blocked` either accepts its
   proposed candidate (then it doesn't conflict with any already-finalised
@@ -55,7 +55,7 @@ are processed in:
   fallback is always accepted, and the hypothesis holds for k agents too.
 
   After all m agents: `finalised` is pairwise collision-free, i.e. `after`
-  satisfies eq:vertexconflict and eq:swapconflict for every pair -- this
+  satisfies the vertex rule and the swap rule for every pair -- this
   is what the RuntimeError in resolve_conflicts asserts is unreachable,
   and this argument is why.
 """
@@ -107,9 +107,9 @@ def _blocked(
     finalised: Mapping[AgentId, VertexId],
 ) -> bool:
     for other_id, other_candidate in finalised.items():
-        if other_candidate == candidate:  # eq:vertexconflict
+        if other_candidate == candidate:  # vertex rule
             return True
-        if before_loc[other_id] == candidate and start == other_candidate:  # eq:swapconflict
+        if before_loc[other_id] == candidate and start == other_candidate:  # swap rule
             return True
     for other_id, other_start in before_loc.items():
         if other_id == agent_id or other_id in finalised:
@@ -154,7 +154,7 @@ def resolve_conflicts(
         if not is_legal_transition(graph, start, candidate):
             raise ValueError(
                 f"Agent {agent_id} proposed an illegal transition {start}->{candidate} "
-                "(eq:transition); conflict resolution assumes already-masked proposals."
+                "(the move rule); conflict resolution assumes already-masked proposals."
             )
 
         if _blocked(agent_id, start, candidate, before_loc, finalised):

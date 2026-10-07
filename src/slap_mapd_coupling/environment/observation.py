@@ -1,22 +1,22 @@
-"""o_i(t), the decentralised observation (eq:observation, sec:method:rl).
+"""o_i(t), the decentralised observation (sec:method:rl).
 
-Built from the field of view G_i^(d_obs)(t) (eq:localsubgraph), the
-distance label eta_i(v,t) on every visible vertex (eq:potential) and the
-congestion feature delta_i(t) (eq:congestion). The result is a structured
-Observation. Encoding it into tensors is the job of models/ (sec:method:model).
+Built from the field of view G_i^(d_obs)(t), the distance label eta_i(v,t)
+on every visible vertex and the congestion feature delta_i(t). The result
+is a structured Observation. Encoding it into tensors is the job of
+models/ (sec:method:model).
 
 Where the code still differs from the thesis:
 - Messages are carried here as hand-built (distance, eta_j) pairs. In the
   thesis they are learned by the policy and are not part of o_i(t), see
   issue #91.
-- The field of view and the communication graph (eq:commgraph) use cost
-  distance d_G, not hop distance, see issue #89.
+- The field of view and the communication graph use cost distance d_G,
+  not hop distance, see issue #89.
 - delta_i(t) is None when congestion_sensitive=False, although the thesis
   always includes it in o_i(t).
 
-The vertex features (eq:features) use a multi-hot role (storage, delivery,
-endpoint, transit), because VertexRole allows a vertex several roles.
-Transit is true when none of the other three apply.
+The vertex features use a multi-hot role (storage, delivery, endpoint,
+transit), because VertexRole allows a vertex several roles. Transit is
+true when none of the other three apply.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ from slap_mapd_coupling.environment.reward_function import current_target
 
 @dataclass(frozen=True)
 class VertexFeatures:
-    """f(v,t), the vertex features (eq:features): the multi-hot role, the
-    distance label eta_i(v,t) (eq:potential), and whether another agent
+    """f(v,t), the vertex features: the multi-hot role, the
+    distance label eta_i(v,t), and whether another agent
     occupies v."""
 
     storage: bool
@@ -56,7 +56,7 @@ class Message:
 
 @dataclass(frozen=True)
 class Observation:
-    """o_i(t), the decentralised observation (eq:observation), structured
+    """o_i(t), the decentralised observation, structured
     rather than a fixed-size vector."""
 
     visible_vertices: tuple[VertexId, ...]  # V_i^(d_obs)(t)
@@ -66,7 +66,7 @@ class Observation:
 
 
 def local_subgraph(graph: WarehouseGraph, location: VertexId, depth: float) -> tuple[VertexId, ...]:
-    """V_i^(d_obs)(t), the vertices of the field of view (eq:localsubgraph).
+    """V_i^(d_obs)(t), the vertices of the field of view.
 
     Uses cost distance d_G(l_i(t), v) <= d_obs. The thesis uses hop
     distance, see issue #89."""
@@ -85,7 +85,7 @@ def role_flags(role: VertexRole) -> tuple[bool, bool, bool, bool]:
 
 
 def eta(graph: WarehouseGraph, vertex: VertexId, target: VertexId) -> float:
-    """eta_i(v,t) = d_G(v, q_i(t)), the distance label (eq:potential), for
+    """eta_i(v,t) = d_G(v, q_i(t)), the distance label, for
     any visible vertex v."""
     return graph.distance(vertex, target)
 
@@ -93,7 +93,7 @@ def eta(graph: WarehouseGraph, vertex: VertexId, target: VertexId) -> float:
 def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[AgentId]) -> float:
     """Share of `window` occupied by agents outside `excl`. With the field
     of view as window and the agent itself excluded, this is the
-    congestion feature delta_i(t) (eq:congestion)."""
+    congestion feature delta_i(t)."""
     window_set = set(window)
     occupants = sum(
         1
@@ -107,7 +107,7 @@ def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[
 def communication_neighbours(
     graph: WarehouseGraph, fleet: FleetState, agent_id: AgentId, observation_depth: float
 ) -> tuple[AgentId, ...]:
-    """{a_j : (a_i,a_j) in E^A_t}, the communication graph (eq:commgraph),
+    """{a_j : (a_i,a_j) in E^A_t}, the communication graph,
     bounded by d_obs."""
     location = fleet.locations()[agent_id]
     return tuple(
