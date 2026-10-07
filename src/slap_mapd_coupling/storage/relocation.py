@@ -7,6 +7,12 @@ computed by F_dem/F_cng, not as a penalty term those rules have to weigh.
 Shared here because both rules need the identical cap-and-tie-break logic
 (sec:method:storage says so explicitly) -- neither should reimplement it.
 
+The cap only binds "when F_dem or F_cng would relocate more than nu
+units" (sec:method:storage); below that, x_target is returned unchanged
+without running the priority loop below, which processes cells in one
+pass and would otherwise drop a reachable arrival that a lower-priority
+departure elsewhere would have freed, even though the total is under nu.
+
 Flagged, not literally specified: the thesis says "only the nu
 highest-marginal-value relocations are applied... ties broken by SKU id
 then vertex id," but never defines what one unit's marginal value is, or
@@ -59,6 +65,12 @@ def apply_relocation_cap(
     id) -- that ordering is the calling rule's responsibility, since only
     it knows its own eq:storagegreedy score.
     """
+    total_relocated = sum(
+        x_target.units(sku_id, vertex) - x_prev.units(sku_id, vertex) for sku_id, vertex in priority
+    )
+    if total_relocated <= reassignment_cap:  # the cap doesn't bind, see module docstring
+        return x_target
+
     counts: dict[SkuId, dict[VertexId, int]] = {k: dict(v) for k, v in x_prev.counts.items()}
     budget = reassignment_cap
     remaining_capacity: dict[VertexId, float] = {
