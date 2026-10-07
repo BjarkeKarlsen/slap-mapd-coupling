@@ -33,10 +33,12 @@ from slap_mapd_coupling.viz.warehouse_plot import (
 
 
 def build_storage_state(storage_vertices: list[VertexId]) -> StorageState:
-    """The thesis's tea/coffee/mugs worked example, spread across whichever
-    storage vertices this instance actually generated (same convention as
-    01b_storage_and_config.py's show_storage_state), with some vertices
-    deliberately holding more than one SKU at once."""
+    """An example in the style of the tea, coffee and mugs table
+    (tab:storagematrix), though with its own counts, not tab:storagematrix's
+    own, spread across whichever storage vertices this instance actually
+    generated (same convention as 01b_storage_and_config.py's
+    show_storage_state), with some vertices deliberately holding more than
+    one SKU at once."""
     skus = {
         "tea": SkuType(sku_id="tea", unit_capacity=1.0),
         "coffee": SkuType(sku_id="coffee", unit_capacity=2.0),

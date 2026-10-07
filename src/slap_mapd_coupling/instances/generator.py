@@ -61,9 +61,11 @@ def generate_warehouse_graph(params: GeneratorParams) -> WarehouseGraph:
     `num_endpoints`/`num_delivery_vertices` vertices hanging off the
     corridor at either end, whose row -- top/bottom -- is a fixed zoning
     convention, not seed-dependent), extra horizontal cross-aisle edges at
-    a few evenly-spaced heights. Every non-lattice claim beyond storage
-    placement rests on `one_way_fraction`: that fraction of otherwise
-    bidirectional segments is instead realised as a single directed edge.
+    a few evenly-spaced heights. Storage placement only marks which
+    vertices are in `V_str`; it adds no edges and changes no costs, so it
+    doesn't affect the graph's lattice-ness. The only non-lattice claim
+    rests on `one_way_fraction`: that fraction of otherwise bidirectional
+    segments is instead realised as a single directed edge.
 
     See `generate_instance` for the same graph plus the layout position
     used to build it (e.g. for plotting) -- this function and that one
