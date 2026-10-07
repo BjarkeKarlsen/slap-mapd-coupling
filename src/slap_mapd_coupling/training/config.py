@@ -142,6 +142,12 @@ def build_ppo_config(
             "(sec:method:training); credit_signal must be 'per_agent'. "
             "team_mean applies only to the centralised and section-based arms (#83, #86)."
         )
+    if experiment_config.discount is None:
+        raise ValueError(
+            "experiment_config.discount (gamma, the learning objective) is required to build a "
+            "PPOConfig; ExperimentConfig already enforces this for controller='decentralised', "
+            "so this indicates a caller bug."
+        )
     d_max = max_out_degree(graph)
     expected_num_actions = d_max + 1
     if policy_value_head_config.num_actions != expected_num_actions:
@@ -194,6 +200,7 @@ def build_ppo_config(
             rollout_fragment_length=ppo_hyperparameters.rollout_fragment_length,
         )
         .training(
+            gamma=experiment_config.discount,
             lr=ppo_hyperparameters.lr,
             clip_param=ppo_hyperparameters.clip_param,
             lambda_=ppo_hyperparameters.gae_lambda,
