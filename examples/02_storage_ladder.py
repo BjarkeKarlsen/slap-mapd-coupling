@@ -103,7 +103,8 @@ def main() -> None:
             f"  completed={metrics.num_completed_tasks} "
             f"throughput={metrics.throughput:.3f} "
             f"backlog={metrics.backlog} "
-            f"num_traversed_edges={metrics.num_traversed_edges}"
+            f"storage_updates={metrics.num_storage_updates} "
+            f"relocated_per_update={metrics.mean_relocated_units:.2f}"
         )
 
     print(

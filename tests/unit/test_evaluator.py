@@ -1,11 +1,13 @@
 """Unit tests for slap_mapd_coupling.evaluation.evaluator."""
 
 import slap_mapd_coupling.controllers.centralised  # noqa: F401 -- registers "centralised"
+import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
-from slap_mapd_coupling.core.storage_state import SkuType
-from slap_mapd_coupling.evaluation.evaluator import _traffic_measures, run_episode
+from slap_mapd_coupling.core.storage_state import SkuType, StorageState
+from slap_mapd_coupling.environment.multi_agent_env import _relocated_units
+from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 
 
@@ -76,43 +78,68 @@ def test_negligible_arrival_rate_produces_no_completions_and_none_fields():
     metrics = _run(_graph(), _config(horizon=5, arrival_rate=1e-9))
     assert metrics.num_completed_tasks == 0
     assert metrics.mean_service_time is None
-    assert metrics.movement_cost_per_task is None
+    assert metrics.mean_wait_for_agent is None
+    assert metrics.mean_travel_time is None
     assert metrics.mean_blocked_time is None
 
 
-def test_a_run_with_traffic_reports_entropy_and_concentration_as_complements():
-    metrics = _run(_graph(), _config(horizon=30, arrival_rate=2.0))
-    assert metrics.num_traversed_edges > 0
-    assert metrics.traffic_entropy is not None
-    assert metrics.traffic_concentration is not None
-    assert abs((metrics.traffic_entropy + metrics.traffic_concentration) - 1.0) < 1e-9
+def test_service_time_splits_into_three_parts_that_add_up():
+    metrics = _run(_graph(), _config(horizon=40, arrival_rate=1.0))
+    assert metrics.num_completed_tasks > 0
+    assert metrics.mean_service_time is not None
+    assert metrics.mean_wait_for_agent is not None
+    assert metrics.mean_travel_time is not None
+    assert metrics.mean_blocked_time is not None
+    assert metrics.mean_travel_time > 0.0
+    parts = metrics.mean_wait_for_agent + metrics.mean_travel_time + metrics.mean_blocked_time
+    assert abs(parts - metrics.mean_service_time) < 1e-9
+
+
+def test_keeps_up_is_unset_without_a_threshold():
+    metrics = _run(_graph(), _config(horizon=30))
+    assert metrics.keeps_up is None
+    assert metrics.keep_up_ratio == metrics.throughput / metrics.arrival_rate
+
+
+def test_keeps_up_compares_throughput_with_the_threshold():
+    config = _config(horizon=40, arrival_rate=1.0, keep_up_threshold=0.5)
+    metrics = _run(_graph(), config)
+    assert metrics.keeps_up == (metrics.throughput >= 0.5 * config.arrival_rate)
+
+
+def test_crowding_is_unset_without_a_field_of_view():
+    assert _run(_graph(), _config(horizon=10)).mean_crowding is None
+
+
+def test_crowding_is_a_fraction_with_a_field_of_view():
+    metrics = _run(_graph(), _config(horizon=20, observation_depth=2))
+    assert metrics.mean_crowding is not None
+    assert 0.0 <= metrics.mean_crowding <= 1.0
+
+
+def test_fixed_storage_has_no_update_and_relocates_nothing():
+    metrics = _run(_graph(), _config(horizon=20))
+    assert metrics.num_storage_updates == 0
+    assert metrics.mean_relocated_units == 0.0
+
+
+def test_adaptive_storage_updates_every_epoch_within_the_cap():
+    config = _config(storage_mode="demand", storage_epoch_length=5, reassignment_cap=3, horizon=23)
+    metrics = _run(_graph(), config)
+    assert metrics.num_storage_updates == 23 // 5
+    assert 0.0 <= metrics.mean_relocated_units <= 3
+
+
+def test_relocated_units_counts_arrivals_at_new_cells():
+    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
+    capacities = {1: 10.0, 2: 10.0, 3: 10.0}
+    before = StorageState(skus=skus, capacities=capacities, counts={"tea": {1: 5, 2: 0}})
+    after = StorageState(skus=skus, capacities=capacities, counts={"tea": {1: 2, 2: 2, 3: 1}})
+    # Three units left vertex 1: two arrive at 2, one at 3.
+    assert _relocated_units(before, after) == 3
+    assert _relocated_units(before, before) == 0
 
 
 def test_decision_runtimes_are_nonnegative_and_present():
     metrics = _run(_graph(), _config(horizon=10))
     assert metrics.mean_decision_runtime_seconds >= 0.0
-
-
-def test_traffic_measures_no_traversals():
-    assert _traffic_measures({}) == (0, None, None)
-
-
-def test_traffic_measures_single_edge_is_maximally_concentrated():
-    assert _traffic_measures({(1, 2): 5}) == (1, 0.0, 1.0)
-
-
-def test_traffic_measures_uniform_usage_gives_entropy_one():
-    # Four edges, equal traversal counts -> perfectly uniform -> H_T = 1.
-    num_traversed, entropy, concentration = _traffic_measures(
-        {(1, 2): 10, (2, 3): 10, (3, 4): 10, (4, 5): 10}
-    )
-    assert num_traversed == 4
-    assert entropy == 1.0
-    assert concentration == 0.0
-
-
-def test_traffic_measures_skewed_usage_gives_entropy_below_one():
-    num_traversed, entropy, concentration = _traffic_measures({(1, 2): 100, (2, 3): 1})
-    assert num_traversed == 2
-    assert 0.0 < entropy < 1.0
-    assert concentration == 1.0 - entropy

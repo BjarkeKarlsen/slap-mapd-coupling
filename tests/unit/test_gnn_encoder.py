@@ -76,7 +76,7 @@ def test_forward_output_shape_matches_output_dim():
 def test_zero_rounds_returns_raw_features_concatenated_with_message_and_congestion():
     graph = _line_graph(6)
     fleet = _fleet({1: 2, 2: 4})
-    config = _config(observation_depth=3, congestion_sensitive=True, congestion_radius=1)
+    config = _config(observation_depth=3, congestion_sensitive=True)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
 
     encoder = GNNEncoder(GNNEncoderConfig(num_rounds=0, hidden_width=8))
@@ -95,13 +95,13 @@ def test_zero_rounds_returns_raw_features_concatenated_with_message_and_congesti
     )
     assert torch.allclose(z[:NODE_FEATURE_DIM], expected_node_part)
     assert torch.allclose(z[NODE_FEATURE_DIM:-1], torch.zeros(MESSAGE_FEATURE_DIM))  # no messages
-    assert z[-1].item() == observation.congestion
+    assert z[-1].item() == torch.tensor(observation.congestion).item()  # float32
 
 
 def test_congestion_falls_back_to_zero_when_not_configured():
     graph = _line_graph(6)
     fleet = _fleet({1: 2})
-    config = _config(observation_depth=3, congestion_radius=None)
+    config = _config(observation_depth=3, congestion_sensitive=False)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
     assert observation.congestion is None
 
@@ -226,7 +226,7 @@ def test_forward_padded_matches_unbatched_forward_with_messages_and_zero_rounds(
     task2 = Task(task_id=2, release_time=0, pickup_vertex=4, delivery_vertex=0, sku="sku-1").assign(
         agent_id=2, t=0
     )
-    config = _config(observation_depth=4, communication=True, communication_radius=1)
+    config = _config(observation_depth=4, communication=True)
     observation = build_observation(graph, fleet, [task2], agent_id=1, t=0, config=config)
     assert observation.messages  # sanity: this scenario actually exercises messages
 

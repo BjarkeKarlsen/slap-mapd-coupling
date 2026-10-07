@@ -73,3 +73,9 @@ def test_discount_above_one_rejected():
 def test_discount_of_exactly_one_is_allowed():
     config = ExperimentConfig(**_base(**_decentralised_reward_kwargs(discount=1.0)))
     assert config.discount == 1.0
+
+
+def test_keep_up_threshold_must_not_exceed_one():
+    with pytest.raises(ValueError):
+        ExperimentConfig(**_base(keep_up_threshold=1.5))
+    assert ExperimentConfig(**_base(keep_up_threshold=0.95)).keep_up_threshold == 0.95

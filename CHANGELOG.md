@@ -53,6 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correct).
 
 ### Changed
+- Run scoring follows the thesis's revised `sec:pf:measures`. `RunMetrics`
+  now reports a keep-up check (`keep_up_ratio`, `keeps_up` against the new
+  `ExperimentConfig.keep_up_threshold` f_up, left unset because its value
+  is still TBD), mean service time split into `mean_wait_for_agent`,
+  `mean_travel_time` and `mean_blocked_time` (validated to add up),
+  `mean_crowding` (the mean of delta_i(t), now computed every timestep
+  over `congestion_radius`), and relocations per storage update. The new
+  `evaluation/comparison.py` implements eq:rqformal as a paired t-test
+  over seeds. Traffic entropy/concentration and movement cost per task are
+  no longer reported, though the episode log still records traversals and
+  movement cost for the replay-determinism invariant. `scipy` is now a
+  declared dependency (it was only installed transitively via ray).
 - Rewrote `docs/implementation_phases.md`: it was still the generic
   template checklist (and actively wrong in one place — it listed the
   old `train`/`evaluate`/`inspect`/`generate-config` CLI). Replaced with

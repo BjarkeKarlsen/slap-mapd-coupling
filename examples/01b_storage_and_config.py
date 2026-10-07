@@ -100,17 +100,20 @@ def show_run_metrics_shape() -> None:
         horizon=1000,
         num_completed_tasks=0,
         throughput=0.0,
+        keep_up_ratio=0.0,
         num_waiting_tasks=3,
         num_active_tasks=0,
         backlog=3,
-        num_traversed_edges=0,
+        num_storage_updates=0,
+        mean_relocated_units=0.0,
         mean_decision_runtime_seconds=0.004,
     )
     print(row.model_dump_json(indent=2))
     print(
-        "Note: with num_completed_tasks=0 (no simulator yet), mean_service_time, "
-        "movement_cost_per_task and mean_blocked_time must stay None -- "
-        "'runs with |C_T|=0 are reported separately', per eq:throughput."
+        "Note: with num_completed_tasks=0, mean_service_time and its three parts "
+        "(mean_wait_for_agent, mean_travel_time, mean_blocked_time) must stay None "
+        "-- there is no finished task to average over (eq:meanservice), and such a "
+        "run fails the keep-up check (eq:throughput) anyway."
     )
 
 
