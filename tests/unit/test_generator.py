@@ -57,3 +57,42 @@ def test_generate_warehouse_graph_unchanged_by_refactor():
     assert direct.vertices == via_instance.vertices
     assert direct.edges == via_instance.edges
     assert direct.wait_cost == via_instance.wait_cost
+
+
+def test_delivery_and_endpoint_vertices_are_not_strict_pendants():
+    # #55: with num_aisles > 1, every delivery/endpoint vertex should
+    # have at least two distinct out-neighbours (two bridge edges to two
+    # different aisle columns), not exactly one -- otherwise it's a
+    # graph-theoretic dead end that two agents can permanently deadlock
+    # over under naive prioritised planning.
+    graph = generate_warehouse_graph(_params(one_way_fraction=0.0))
+    leaf_vertices = [
+        v for v, vertex in graph.vertices.items() if vertex.role.delivery or vertex.role.endpoint
+    ]
+    assert leaf_vertices  # sanity: the fixture params actually produce some
+    for v in leaf_vertices:
+        out_degree = len({e.target for e in graph.edges if e.source == v})
+        assert out_degree >= 2, f"vertex {v} has only {out_degree} outgoing edge(s)"
+
+
+def test_single_aisle_delivery_and_endpoint_vertices_stay_single_bridge():
+    # num_aisles=1: there is no second column to attach to, so a single
+    # bridge edge is unavoidable, not a regression.
+    params = GeneratorParams(
+        num_aisles=1,
+        aisle_length=4,
+        num_cross_aisles=1,
+        one_way_fraction=0.0,
+        wait_cost=0.0,
+        num_storage_vertices=2,
+        num_delivery_vertices=1,
+        num_endpoints=1,
+        seed=0,
+    )
+    graph = generate_warehouse_graph(params)
+    leaf_vertices = [
+        v for v, vertex in graph.vertices.items() if vertex.role.delivery or vertex.role.endpoint
+    ]
+    for v in leaf_vertices:
+        out_degree = len({e.target for e in graph.edges if e.source == v})
+        assert out_degree == 1
