@@ -10,6 +10,7 @@ from slap_mapd_coupling.storage.congestion import (
     nearest_delivery_point,
     score,
 )
+from slap_mapd_coupling.storage.demand import f_dem
 
 
 def _line_graph() -> WarehouseGraph:
@@ -150,6 +151,38 @@ def test_f_cng_ties_broken_by_vertex_id_with_zero_congestion_weight():
     )
     assert result.units("hot", 1) == 3  # pure distance tie -> lower vertex id wins
     assert result.units("hot", 2) == 0
+
+
+def test_f_cng_with_zero_beta_matches_f_dem():
+    """beta >= 0 (sec:method:storage): at beta=0 the congestion term
+    vanishes from score(k,v), so F_cng's ranking collapses to F_dem's own
+    access-distance ranking and both rules should land on the same
+    configuration, even with nonzero traffic data to rank against."""
+    graph = _line_graph()
+    capacities = {1: 5.0, 2: 5.0, 3: 5.0}
+    x_prev = _state({"hot": {3: 5}}, capacities)
+    traversal = {(0, 1): 100.0, (1, 2): 100.0, (2, 3): 100.0}
+    waiting = {(0, 1): 100.0, (1, 2): 100.0, (2, 3): 100.0}
+
+    cng_result = f_cng(
+        x_prev,
+        graph,
+        reassignment_cap=10,
+        congestion_weight=0.0,
+        demand_estimate={"hot": 10.0},
+        traversal_estimate=traversal,
+        waiting_estimate=waiting,
+    )
+    dem_result = f_dem(
+        x_prev,
+        graph,
+        reassignment_cap=10,
+        congestion_weight=None,
+        demand_estimate={"hot": 10.0},
+        traversal_estimate=traversal,
+        waiting_estimate=waiting,
+    )
+    assert cng_result.counts == dem_result.counts
 
 
 def test_f_cng_registered_under_congestion():
