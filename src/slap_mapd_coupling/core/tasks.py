@@ -15,14 +15,25 @@ TaskId = int
 
 
 class Task(BaseModel):
-    """tau_j = (r_j, s_j, g_j, k_j), eq:task, plus y_j/d_j.
+    """tau_j = (r_j, s_j, g_j, k_j), eq:task, plus y_j/p_j/d_j.
 
-    Status is a method computed from the three timestamps (eq:lifecycle),
-    never a stored field, so it cannot drift out of sync with them.
-    assignment_time/completion_time start unset and are each settable
-    exactly once via .assign()/.complete(): this is how "no re-tasking
-    once assigned" (sec:pf:scope) is enforced at the type level, not just
-    by controller discipline.
+    Status is a method computed from the timestamps (eq:lifecycle), never
+    a stored field, so it cannot drift out of sync with them.
+    assignment_time/pickup_time/completion_time start unset and are each
+    settable exactly once via .assign()/.pick_up()/.complete(): this is
+    how "no re-tasking once assigned" (sec:pf:scope) is enforced at the
+    type level, not just by controller discipline.
+
+    pickup_time (p_j) is not part of the thesis's own eq:task notation --
+    the model names q_i(t), "the vertex agent a_i is currently trying to
+    reach, ... the pickup vertex s_j of its assigned task before pickup
+    and the delivery vertex g_j after" (sec:pf:observations), but never
+    specifies what marks "after." This field is that marker, added here
+    because a routing controller genuinely needs it (a location-only
+    check is unsound: once an agent leaves s_j, location != s_j again,
+    which would send it back to pickup); see `current_goal` below for
+    q_i(t) restricted to one task. Flagged for the thesis text too, not
+    just the code -- see thesis-progress's note alongside this change.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -34,6 +45,7 @@ class Task(BaseModel):
     sku: SkuId  # k_j
     assigned_agent: AgentId | None = None  # sigma(j)
     assignment_time: NonNegativeInt | None = None  # y_j
+    pickup_time: NonNegativeInt | None = None  # p_j (not thesis notation, see docstring)
     completion_time: NonNegativeInt | None = None  # d_j
 
     @model_validator(mode="after")
@@ -42,12 +54,19 @@ class Task(BaseModel):
             raise ValueError(
                 f"y_j={self.assignment_time} < r_j={self.release_time}; requires r_j <= y_j."
             )
-        if self.completion_time is not None:
+        if self.pickup_time is not None:
             if self.assignment_time is None:
-                raise ValueError("d_j set without y_j: r_j <= y_j <= d_j requires y_j first.")
-            if self.completion_time < self.assignment_time:
+                raise ValueError("p_j set without y_j: r_j <= y_j <= p_j requires y_j first.")
+            if self.pickup_time < self.assignment_time:
                 raise ValueError(
-                    f"d_j={self.completion_time} < y_j={self.assignment_time}; requires y_j <= d_j."
+                    f"p_j={self.pickup_time} < y_j={self.assignment_time}; requires y_j <= p_j."
+                )
+        if self.completion_time is not None:
+            if self.pickup_time is None:
+                raise ValueError("d_j set without p_j: an agent cannot deliver before pickup.")
+            if self.completion_time < self.pickup_time:
+                raise ValueError(
+                    f"d_j={self.completion_time} < p_j={self.pickup_time}; requires p_j <= d_j."
                 )
         if (self.assigned_agent is None) != (self.assignment_time is None):
             raise ValueError(
@@ -83,9 +102,18 @@ class Task(BaseModel):
             {**self.model_dump(), "assigned_agent": agent_id, "assignment_time": t}
         )
 
-    def complete(self, t: int) -> "Task":
+    def pick_up(self, t: int) -> "Task":
+        """Marks p_j: the agent has reached s_j. See the class docstring
+        for why this timestamp exists even though eq:task doesn't name it."""
         if self.assignment_time is None:
-            raise ValueError(f"Task {self.task_id} cannot complete before assignment.")
+            raise ValueError(f"Task {self.task_id} cannot be picked up before assignment.")
+        if self.pickup_time is not None:
+            raise ValueError(f"Task {self.task_id} already picked up at p_j={self.pickup_time}.")
+        return Task.model_validate({**self.model_dump(), "pickup_time": t})
+
+    def complete(self, t: int) -> "Task":
+        if self.pickup_time is None:
+            raise ValueError(f"Task {self.task_id} cannot complete before pickup.")
         if self.completion_time is not None:
             raise ValueError(
                 f"Task {self.task_id} already completed at d_j={self.completion_time}."
@@ -104,6 +132,14 @@ class Task(BaseModel):
     def service_time(self) -> int | None:
         """zeta_j = d_j - r_j (eq:servicetime); None until completed."""
         return None if self.completion_time is None else self.completion_time - self.release_time
+
+    @property
+    def current_goal(self) -> VertexId:
+        """q_i(t) restricted to this task: s_j before pickup, g_j after
+        (sec:pf:observations). Only meaningful while the task is active
+        (assigned, not completed) -- callers check status(t) themselves,
+        this property doesn't re-derive it."""
+        return self.pickup_vertex if self.pickup_time is None else self.delivery_vertex
 
 
 def free_agents(fleet: FleetState, tasks: Iterable[Task], t: int) -> set[AgentId]:
