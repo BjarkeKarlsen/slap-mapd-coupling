@@ -44,17 +44,21 @@ class ExperimentConfig(BaseModel):
     congestion_weight: NonNegativeFloat | None = None  # beta >= 0, congestion-aware score
     reassignment_cap: PositiveInt | None = None  # nu, max relocated units/epoch
     # d_obs, depth of the field of view. It also bounds the communication
-    # graph and the congestion feature, so there are no separate radii (#88).
-    observation_depth: PositiveInt | None = None
+    # graph and the congestion feature, so there are no separate radii
+    # (#88). Required for every controller: the field of view, and the
+    # congestion feature it bounds, are read by all three architectures
+    # (sec:pf:env, sec:pf:controllers), not only the decentralised one.
+    observation_depth: PositiveInt
     # f_up in the keep-up check (tab:evalparams), TBD (#85).
     # None leaves RunMetrics.keeps_up unset.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
 
     # Reward and learning objective (tab:rlparams, sec:method:rl). Required
-    # only for controller="decentralised", same gating as observation_depth
-    # above, since the learning objective "applies to whichever regime is
-    # realised as a LEARNED controller" and only the decentralised regime
-    # trains (AGENTS.md: --checkpoint never applies to the other two).
+    # only for controller="decentralised", since the learning objective
+    # "applies to whichever regime is realised as a LEARNED controller"
+    # and only the decentralised regime trains (AGENTS.md: --checkpoint
+    # never applies to the other two). Unlike observation_depth above,
+    # these have no meaning for a non-learned controller at all.
     discount: PositiveFloat | None = None  # gamma, learning objective
     deliver_reward: NonNegativeFloat | None = None  # n_deliver, reward
     override_penalty: NonNegativeFloat | None = None  # n_blocked, reward
@@ -79,8 +83,6 @@ class ExperimentConfig(BaseModel):
     @model_validator(mode="after")
     def _controller_parameters(self) -> "ExperimentConfig":
         if self.controller == "decentralised":
-            if self.observation_depth is None:
-                raise ValueError("controller='decentralised' requires observation_depth (d_obs).")
             for name in (
                 "discount",
                 "deliver_reward",

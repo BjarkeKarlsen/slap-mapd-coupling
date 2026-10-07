@@ -56,8 +56,7 @@ class RunMetrics(BaseModel):
     mean_blocked_time: NonNegativeFloat | None = None  # W_T, eq:waiting
 
     # --- congestion, eq:crowding ---
-    # bar_delta_T in [0,1]; None iff observation_depth (d_obs) is not configured.
-    mean_crowding: NonNegativeFloat | None = Field(default=None, le=1.0)
+    mean_crowding: NonNegativeFloat = Field(le=1.0)  # bar_delta_T in [0,1]
 
     # --- slow-loop cost, eq:relocation ---
     num_storage_updates: NonNegativeInt  # floor(T / Delta); 0 under F_fix

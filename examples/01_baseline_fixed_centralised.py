@@ -32,11 +32,13 @@ from slap_mapd_coupling.instances.generator import (
 
 FLEET_SIZE = 6
 
-# Illustrative demo values. The thesis leaves both TBD: T (evaluation
-# horizon) is a sweep parameter tracked in #85, and the order stream's
-# rate lambda_task waits on the demand model of #94.
+# Illustrative demo values. The thesis leaves all three TBD: T
+# (evaluation horizon) and d_obs (field-of-view depth) are sweep
+# parameters tracked in #85, and the order stream's rate lambda_task
+# waits on the demand model of #94.
 ILLUSTRATIVE_HORIZON = 150
 ILLUSTRATIVE_ARRIVAL_RATE = 0.1
+ILLUSTRATIVE_OBSERVATION_DEPTH = 2
 
 
 def _instance_params() -> GeneratorParams:
@@ -107,6 +109,7 @@ def build_config(seed: int) -> ExperimentConfig:
         seed=seed,
         horizon=ILLUSTRATIVE_HORIZON,
         wait_cost=0.5,
+        observation_depth=ILLUSTRATIVE_OBSERVATION_DEPTH,
     )
 
 

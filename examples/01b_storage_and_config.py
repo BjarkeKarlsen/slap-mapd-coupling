@@ -16,6 +16,9 @@ from slap_mapd_coupling.evaluation.metrics import RunMetrics
 
 def show_experiment_configs() -> None:
     print("=== ExperimentConfig: one cell per storage rule ===")
+    # observation_depth (d_obs) is illustrative; the thesis leaves it TBD
+    # by sweep (tab:rlparams), tracked in #85.
+    illustrative_observation_depth = 2
     common = dict(
         controller="centralised",
         congestion_sensitive=False,
@@ -25,6 +28,7 @@ def show_experiment_configs() -> None:
         seed=0,
         horizon=1000,
         wait_cost=0.5,
+        observation_depth=illustrative_observation_depth,
     )
 
     fixed = ExperimentConfig(storage_mode="fixed", **common)
@@ -107,6 +111,7 @@ def show_run_metrics_shape() -> None:
         num_storage_updates=0,
         mean_relocated_units=0.0,
         mean_decision_runtime_seconds=0.004,
+        mean_crowding=0.0,
     )
     print(row.model_dump_json(indent=2))
     print(

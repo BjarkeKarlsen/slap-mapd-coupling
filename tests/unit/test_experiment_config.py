@@ -17,6 +17,7 @@ def _base(**overrides) -> dict:
         seed=0,
         horizon=100,
         wait_cost=0.0,
+        observation_depth=2,
     )
     defaults.update(overrides)
     return defaults
@@ -37,10 +38,18 @@ def test_communication_requires_decentralised():
         ExperimentConfig(**_base(communication=True))
 
 
+def test_observation_depth_required_for_every_controller():
+    """d_obs bounds the field of view, and every architecture reads it
+    (sec:pf:env, sec:pf:controllers), not only the decentralised one."""
+    base = _base()
+    del base["observation_depth"]
+    with pytest.raises(ValidationError, match="observation_depth"):
+        ExperimentConfig(**base)
+
+
 def _decentralised_reward_kwargs(**overrides) -> dict:
     defaults = dict(
         controller="decentralised",
-        observation_depth=2,
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
@@ -52,7 +61,7 @@ def _decentralised_reward_kwargs(**overrides) -> dict:
 
 def test_decentralised_controller_requires_reward_parameters():
     with pytest.raises(ValidationError, match="discount"):
-        ExperimentConfig(**_base(controller="decentralised", observation_depth=2))
+        ExperimentConfig(**_base(controller="decentralised"))
 
 
 def test_decentralised_controller_with_reward_parameters_is_valid():

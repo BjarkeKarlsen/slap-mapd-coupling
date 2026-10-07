@@ -74,6 +74,7 @@ def _config(seed: int, num_agents: int = 4, horizon: int = 40) -> ExperimentConf
         seed=seed,
         horizon=horizon,
         wait_cost=0.5,
+        observation_depth=2,
     )
 
 

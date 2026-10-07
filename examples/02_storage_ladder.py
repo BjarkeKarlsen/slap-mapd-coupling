@@ -31,11 +31,12 @@ from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and
 
 FLEET_SIZE = 6
 
-# Illustrative demo values. Delta, nu and beta (tab:storageparams) are all
-# TBD by sweep, tracked in #85.
+# Illustrative demo values. Delta, nu, beta (tab:storageparams) and
+# d_obs (tab:rlparams) are all TBD by sweep, tracked in #85.
 ILLUSTRATIVE_STORAGE_EPOCH_LENGTH = 25  # Delta
 ILLUSTRATIVE_REASSIGNMENT_CAP = 10  # nu
 ILLUSTRATIVE_CONGESTION_WEIGHT = 1.0  # beta
+ILLUSTRATIVE_OBSERVATION_DEPTH = 2  # d_obs
 
 
 def build_instance() -> WarehouseGraph:
@@ -83,6 +84,7 @@ def build_config(storage_mode: StorageMode, seed: int) -> ExperimentConfig:
         seed=seed,
         horizon=150,
         wait_cost=0.5,
+        observation_depth=ILLUSTRATIVE_OBSERVATION_DEPTH,
     )
     if storage_mode == "fixed":
         return ExperimentConfig(storage_mode="fixed", **common)
