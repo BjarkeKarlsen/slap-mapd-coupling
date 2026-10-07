@@ -41,7 +41,7 @@ class ExperimentConfig(BaseModel):
 
     wait_cost: NonNegativeFloat  # c_wait
     storage_epoch_length: PositiveInt | None = None  # Delta; None means F_fix (Delta = infinity)
-    congestion_weight: PositiveFloat | None = None  # beta, congestion-aware score
+    congestion_weight: NonNegativeFloat | None = None  # beta >= 0, congestion-aware score
     reassignment_cap: PositiveInt | None = None  # nu, max relocated units/epoch
     # d_obs, depth of the field of view. It also bounds the communication
     # graph and the congestion feature, so there are no separate radii (#88).

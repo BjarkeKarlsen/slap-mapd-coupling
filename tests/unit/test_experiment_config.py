@@ -79,3 +79,24 @@ def test_keep_up_threshold_must_not_exceed_one():
     with pytest.raises(ValueError):
         ExperimentConfig(**_base(keep_up_threshold=1.5))
     assert ExperimentConfig(**_base(keep_up_threshold=0.95)).keep_up_threshold == 0.95
+
+
+def test_congestion_weight_zero_is_valid():
+    """beta >= 0 (sec:method:storage): zero congestion weight is a valid,
+    not just a positive, setting."""
+    config = ExperimentConfig(
+        **_base(
+            storage_mode="congestion",
+            storage_epoch_length=25,
+            reassignment_cap=10,
+            congestion_weight=0.0,
+        )
+    )
+    assert config.congestion_weight == 0.0
+
+
+def test_congestion_mode_still_requires_congestion_weight_set():
+    with pytest.raises(ValidationError, match="congestion_weight"):
+        ExperimentConfig(
+            **_base(storage_mode="congestion", storage_epoch_length=25, reassignment_cap=10)
+        )
