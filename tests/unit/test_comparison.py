@@ -32,6 +32,7 @@ def _run(seed: int, service_time: float, storage_mode: str = "fixed", **override
         num_storage_updates=0 if storage_mode == "fixed" else 4,
         mean_relocated_units=0.0 if storage_mode == "fixed" else 2.0,
         mean_decision_runtime_seconds=0.001,
+        mean_crowding=0.0,
     )
     values.update(overrides)
     return RunMetrics(**values)

@@ -38,6 +38,7 @@ def _config(**overrides) -> ExperimentConfig:
         seed=7,
         horizon=25,
         wait_cost=0.0,
+        observation_depth=2,
     )
     defaults.update(overrides)
     return ExperimentConfig(**defaults)

@@ -25,6 +25,7 @@ def _base(**overrides) -> dict:
         num_storage_updates=0,
         mean_relocated_units=0.0,
         mean_decision_runtime_seconds=0.01,
+        mean_crowding=0.0,
     )
     defaults.update(overrides)
     return defaults

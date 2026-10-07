@@ -37,6 +37,7 @@ def _config(**overrides) -> ExperimentConfig:
         seed=7,
         horizon=25,
         wait_cost=0.0,
+        observation_depth=2,
     )
     defaults.update(overrides)
     return ExperimentConfig(**defaults)
@@ -107,12 +108,11 @@ def test_keeps_up_compares_throughput_with_the_threshold():
     assert metrics.keeps_up == (metrics.throughput >= 0.5 * config.arrival_rate)
 
 
-def test_crowding_is_unset_without_a_field_of_view():
-    assert _run(_graph(), _config(horizon=10)).mean_crowding is None
-
-
-def test_crowding_is_a_fraction_with_a_field_of_view():
-    metrics = _run(_graph(), _config(horizon=20, observation_depth=2))
+def test_crowding_is_a_fraction_for_the_centralised_controller():
+    """d_obs is required for every controller (sec:pf:env,
+    sec:pf:controllers), so a centralised (planner) run reports a
+    numeric mean_crowding too, not just the decentralised arm."""
+    metrics = _run(_graph(), _config(horizon=20, controller="centralised"))
     assert metrics.mean_crowding is not None
     assert 0.0 <= metrics.mean_crowding <= 1.0
 

@@ -65,10 +65,11 @@ def _env(**config_overrides) -> WarehouseMAPDMultiAgentEnv:
 
 
 def test_rejects_non_decentralised_controller():
+    # observation_depth is required for every controller now (sec:pf:env),
+    # unlike the reward fields below, which stay None for a non-learned one.
     with pytest.raises(ValueError, match="decentralised"):
         _env(
             controller="centralised",
-            observation_depth=None,
             discount=None,
             deliver_reward=None,
             override_penalty=None,

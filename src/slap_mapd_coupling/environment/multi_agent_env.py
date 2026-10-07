@@ -116,8 +116,8 @@ class EpisodeLog:
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)
     total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:onestepcost
-    # sum_i delta_i(t) at every timestep t = 0..T-1 (eq:crowding); stays
-    # empty when config.observation_depth is None (no window to read it over).
+    # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
+    # every controller (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (eq:relocation).
     relocated_units_by_update: list[int] = field(default_factory=list)
@@ -420,14 +420,13 @@ class WarehouseMAPDEnv:
         return updated
 
     def _record_crowding(self, fleet: FleetState) -> None:
-        """sum_i delta_i(t) for the state at timestep t (eq:crowding), each
-        delta_i(t) per eq:congestion: the other agents inside a_i's window,
-        over the vertices available to hold them. Read over the field of view
-        d_obs (config.observation_depth); skipped when that is None, so crowding is
-        reported as unknown rather than as zero."""
+        """sum_i delta_i(t) for the state at timestep t (the mean
+        crowding), each delta_i(t) per the congestion feature: the other
+        agents inside a_i's window, over the vertices available to hold
+        them. Read over the field of view d_obs (config.observation_depth),
+        required for every controller, so this runs every timestep
+        regardless of architecture (sec:pf:env, sec:pf:controllers)."""
         depth = self.config.observation_depth
-        if depth is None:
-            return
         self.log.crowding_sum_by_t.append(
             sum(
                 occupancy_fraction(

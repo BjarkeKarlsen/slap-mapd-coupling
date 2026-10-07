@@ -77,11 +77,10 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     num_active = sum(1 for task in env.tasks if task.status(horizon) == "active")
     backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
 
-    # Crowding, eq:crowding: the mean of delta_i(t) over agents and timesteps.
+    # The mean crowding: the mean of delta_i(t) over agents and
+    # timesteps, recorded every timestep for every controller.
     crowding_sums = env.log.crowding_sum_by_t
-    mean_crowding = (
-        sum(crowding_sums) / (config.num_agents * len(crowding_sums)) if crowding_sums else None
-    )
+    mean_crowding = sum(crowding_sums) / (config.num_agents * len(crowding_sums))
 
     # Relocations per storage update, eq:relocation.
     relocations = env.log.relocated_units_by_update
