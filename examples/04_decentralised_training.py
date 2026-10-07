@@ -126,6 +126,7 @@ def build_hyperparameters() -> PPOHyperparameters:
         entropy_coeff=0.01,
         vf_loss_coeff=1.0,
         train_batch_size=180,
+        credit_signal="per_agent",
     )
 
 

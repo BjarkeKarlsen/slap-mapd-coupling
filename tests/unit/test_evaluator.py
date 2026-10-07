@@ -107,12 +107,12 @@ def test_keeps_up_compares_throughput_with_the_threshold():
     assert metrics.keeps_up == (metrics.throughput >= 0.5 * config.arrival_rate)
 
 
-def test_crowding_is_unset_without_a_radius():
+def test_crowding_is_unset_without_a_field_of_view():
     assert _run(_graph(), _config(horizon=10)).mean_crowding is None
 
 
-def test_crowding_is_a_fraction_with_a_radius():
-    metrics = _run(_graph(), _config(horizon=20, congestion_radius=2))
+def test_crowding_is_a_fraction_with_a_field_of_view():
+    metrics = _run(_graph(), _config(horizon=20, observation_depth=2))
     assert metrics.mean_crowding is not None
     assert 0.0 <= metrics.mean_crowding <= 1.0
 

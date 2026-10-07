@@ -47,6 +47,10 @@ from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 TrainingRegime = Literal["fixed_only", "matched"]  # sec:method:training
+# tab:trainparams credit signal [A9], open for the centralised and
+# section-based arms (issue #83). The decentralised arm always learns
+# from each agent's own R_i.
+CreditSignal = Literal["team_mean", "per_agent"]
 DEFAULT_POLICY_ID = "shared_policy"  # full parameter sharing, sec:method:training
 _ENV_NAME = "warehouse_mapd_multi_agent_env"
 
@@ -73,6 +77,11 @@ class PPOHyperparameters(BaseModel):
     entropy_coeff: NonNegativeFloat
     vf_loss_coeff: PositiveFloat
     train_batch_size: PositiveInt  # RLlib API requirement, see docstring
+    # No default: the thesis leaves it open for the centralised and
+    # section-based arms (#83), so a run must state it rather than inherit
+    # an RLlib default. build_ppo_config only accepts "per_agent" while
+    # the decentralised arm is the only one that trains.
+    credit_signal: CreditSignal
 
 
 class SeedSplitConfig(BaseModel):
@@ -127,6 +136,12 @@ def build_ppo_config(
     study parameters -- defaulted, unlike every PPOHyperparameters/
     SeedSplitConfig field above.
     """
+    if ppo_hyperparameters.credit_signal != "per_agent":
+        raise ValueError(
+            "the decentralised arm learns from each agent's own R_i "
+            "(sec:method:training); credit_signal must be 'per_agent'. "
+            "team_mean applies only to the centralised and section-based arms (#83, #86)."
+        )
     d_max = max_out_degree(graph)
     expected_num_actions = d_max + 1
     if policy_value_head_config.num_actions != expected_num_actions:

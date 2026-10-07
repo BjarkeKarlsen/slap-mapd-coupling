@@ -117,7 +117,7 @@ class EpisodeLog:
     routing_runtime_seconds: list[float] = field(default_factory=list)
     total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:onestepcost
     # sum_i delta_i(t) at every timestep t = 0..T-1 (eq:crowding); stays
-    # empty when config.congestion_radius is None (no window to read it over).
+    # empty when config.observation_depth is None (no window to read it over).
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (eq:relocation).
     relocated_units_by_update: list[int] = field(default_factory=list)
@@ -421,16 +421,16 @@ class WarehouseMAPDEnv:
     def _record_crowding(self, fleet: FleetState) -> None:
         """sum_i delta_i(t) for the state at timestep t (eq:crowding), each
         delta_i(t) per eq:congestion: the other agents inside a_i's window,
-        over the vertices available to hold them. Read over
-        config.congestion_radius; skipped when that is None, so crowding is
+        over the vertices available to hold them. Read over the field of view
+        d_obs (config.observation_depth); skipped when that is None, so crowding is
         reported as unknown rather than as zero."""
-        radius = self.config.congestion_radius
-        if radius is None:
+        depth = self.config.observation_depth
+        if depth is None:
             return
         self.log.crowding_sum_by_t.append(
             sum(
                 occupancy_fraction(
-                    fleet, local_subgraph(self.graph, state.location, radius), excl={agent_id}
+                    fleet, local_subgraph(self.graph, state.location, depth), excl={agent_id}
                 )
                 for agent_id, state in fleet.agents.items()
             )

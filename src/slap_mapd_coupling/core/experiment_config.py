@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     NonNegativeFloat,
     PositiveFloat,
     PositiveInt,
@@ -42,12 +43,13 @@ class ExperimentConfig(BaseModel):
     storage_epoch_length: PositiveInt | None = None  # Delta; None means F_fix (Delta = infinity)
     congestion_weight: PositiveFloat | None = None  # beta, eq:storagegreedy
     reassignment_cap: PositiveInt | None = None  # nu, max relocated units/epoch
-    observation_depth: PositiveInt | None = None  # d, eq:localsubgraph
-    # r_cng, eq:congestion. Also the window crowding (eq:crowding) is read
-    # over: until the thesis's single field-of-view depth d_obs replaces
-    # the three radii here, this is the d_obs that delta_i(t) uses.
-    congestion_radius: PositiveInt | None = None
-    communication_radius: PositiveInt | None = None  # r_com, eq:commgraph
+    # d_obs, eq:localsubgraph. The one field of view: it also bounds the
+    # communication graph (eq:commgraph) and the congestion feature
+    # (eq:congestion), so there are no separate radii (issue #88).
+    observation_depth: PositiveInt | None = None
+    # f_up, keep-up threshold in eq:throughput (tab:evalparams, TBD, #85).
+    # Optional until the evaluator uses it (#93).
+    keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
 
     # eq:reward / eq:objective (tab:rlparams, sec:method:rl): required only
     # for controller="decentralised", same gating as observation_depth
@@ -55,20 +57,9 @@ class ExperimentConfig(BaseModel):
     # realised as a LEARNED controller" and only the decentralised regime
     # trains (AGENTS.md: --checkpoint never applies to the other two).
     discount: PositiveFloat | None = None  # gamma, eq:objective
-    deliver_reward: NonNegativeFloat | None = None  # r_deliver, eq:reward
-    override_penalty: NonNegativeFloat | None = None  # r_blk, eq:reward
-    # r_cng in eq:reward (a reward WEIGHT) is a different symbol from
-    # congestion_radius's r_cng above (a graph-distance RADIUS, eq:congestion)
-    # -- a genuine notation collision in the thesis text itself (see
-    # thesis-progress/GAPS.tex's [G11]-style symbol-collision notes), not a
-    # naming mistake here; named distinctly to keep the two apart in code.
-    congestion_reward_weight: NonNegativeFloat | None = None  # r_cng (reward sense), eq:reward
-
-    # f_up, eq:throughput: the run keeps up if Lambda_T >= f_up *
-    # lambda_task. tab:evalparams leaves its value TBD, so it stays a
-    # configurable parameter with no default; RunMetrics.keeps_up is None
-    # until it is set, rather than judged against a guessed threshold.
-    keep_up_threshold: PositiveFloat | None = None
+    deliver_reward: NonNegativeFloat | None = None  # n_deliver, eq:reward
+    override_penalty: NonNegativeFloat | None = None  # n_blocked, eq:reward
+    congestion_reward_weight: NonNegativeFloat | None = None  # n_cng, eq:reward
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -90,9 +81,7 @@ class ExperimentConfig(BaseModel):
     def _controller_parameters(self) -> "ExperimentConfig":
         if self.controller == "decentralised":
             if self.observation_depth is None:
-                raise ValueError("controller='decentralised' requires observation_depth (d).")
-            if self.communication and self.communication_radius is None:
-                raise ValueError("communication=True requires communication_radius (r_com).")
+                raise ValueError("controller='decentralised' requires observation_depth (d_obs).")
             for name in (
                 "discount",
                 "deliver_reward",
@@ -111,11 +100,6 @@ class ExperimentConfig(BaseModel):
     @model_validator(mode="after")
     def _congestion_sensitivity_parameters(self) -> "ExperimentConfig":
         if self.congestion_sensitive:
-            if self.controller == "decentralised" and self.congestion_radius is None:
-                raise ValueError(
-                    "congestion_sensitive=True with a decentralised controller requires "
-                    "congestion_radius (r_cng)."
-                )
             if self.storage_mode == "congestion" and self.congestion_weight is None:
                 raise ValueError(
                     "congestion_sensitive=True with storage_mode='congestion' requires "
