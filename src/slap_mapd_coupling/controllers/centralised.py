@@ -10,7 +10,7 @@ from typing import Sequence
 from slap_mapd_coupling.controllers.registry import register_controller
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
-from slap_mapd_coupling.core.tasks import Task
+from slap_mapd_coupling.core.tasks import Task, active_tasks_by_agent
 
 Path = tuple[VertexId, ...]
 State = tuple[VertexId, int]  # (vertex, timesteps elapsed since this call's t)
@@ -70,7 +70,7 @@ class CentralisedController:
         t: int,
     ) -> dict[AgentId, Action]:
         locations = fleet.locations()
-        active_by_agent = _active_tasks_by_agent(tasks, t)
+        active_by_agent = active_tasks_by_agent(tasks, t)
         order = _priority_order(fleet, active_by_agent)
 
         reserved_vertices: dict[int, set[VertexId]] = {}
@@ -90,15 +90,6 @@ class CentralisedController:
             actions[agent_id] = _first_action(start, path)
 
         return actions
-
-
-def _active_tasks_by_agent(tasks: Sequence[Task], t: int) -> dict[AgentId, Task]:
-    active: dict[AgentId, Task] = {}
-    for task in tasks:
-        if task.status(t) == "active":
-            assert task.assigned_agent is not None  # guaranteed by Task's own validator
-            active[task.assigned_agent] = task
-    return active
 
 
 def _assignment_time(task: Task) -> int:
