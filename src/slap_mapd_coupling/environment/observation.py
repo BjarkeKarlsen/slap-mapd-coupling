@@ -1,37 +1,22 @@
-"""o_i(t): the decentralised agent's observation (eq:observation, sec:method:rl).
+"""o_i(t), the decentralised observation (sec:method:rl).
 
-o_i(t) = (G_i^(d)(t), eta_i(., t), delta_i(t), messages from
-{a_j : (a_i,a_j) in E^A_t}) -- the local subgraph within observation depth
-d (eq:localsubgraph), the progress-potential annotation on every visible
-vertex (eq:potential), the agent-level congestion feature (eq:congestion,
-the decentralised instance of the generic occupancy fraction
-eq:occupancy), and one message per agent within communication range
-(eq:commgraph), each carrying (d_G(l_i(t),l_j(t)), eta_j(l_j(t),t)).
+Built from the field of view G_i^(d_obs)(t), the distance label eta_i(v,t)
+on every visible vertex and the congestion feature delta_i(t). The result
+is a structured Observation. Encoding it into tensors is the job of
+models/ (sec:method:model).
 
-This module returns a *structured* Observation, not a fixed-size tensor:
-"how o_i(t) is encoded into a vector... [is] a modelling choice specified
-in sec:method:model," i.e. models/gnn_encoder.py's job (#27/#28), not
-this one's.
+Where the code still differs from the thesis:
+- Messages are carried here as hand-built (distance, eta_j) pairs. In the
+  thesis they are learned by the policy and are not part of o_i(t), see
+  issue #91.
+- The field of view and the communication graph use cost distance d_G,
+  not hop distance, see issue #89.
+- delta_i(t) is None when congestion_sensitive=False, although the thesis
+  always includes it in o_i(t).
 
-Two points flagged, not literally specified:
-- eq:features writes role(v) as if it were a single category in
-  {V_str, V_del, V_ep, transit}, but core/graph.py's VertexRole is
-  deliberately non-exclusive (a vertex can be storage AND an endpoint at
-  once) -- a real, pre-existing tension between the formal text and this
-  repo's own graph model, not something this module introduces. Resolved
-  by using a multi-hot vector (storage, delivery, endpoint, transit)
-  instead of a strict one-hot, where transit is true iff none of the
-  other three roles apply (the residual/default category "role(v)"
-  implies, and the only one of the four that isn't an actual VertexRole
-  field).
-- delta_i(t) is the occupancy fraction of the agent's own field of view
-  V_i^(d_obs)(t) (eq:congestion), so it needs no radius of its own
-  (issue #88). Observation.congestion is still Optional: None when
-  congestion_sensitive=False. Whether the policy conditions on
-  delta_i(t) is the sensitivity toggle (sec:pf:controllers), and there
-  is no separate parameter for "compute it but let the policy ignore
-  it." The run-level crowding measure (eq:crowding) needs it for every
-  agent regardless of the toggle, which is the evaluator's concern (#93).
+The vertex features use a multi-hot role (storage, delivery, endpoint,
+transit), because VertexRole allows a vertex several roles. Transit is
+true when none of the other three apply.
 """
 
 from __future__ import annotations
@@ -48,9 +33,9 @@ from slap_mapd_coupling.environment.reward_function import current_target
 
 @dataclass(frozen=True)
 class VertexFeatures:
-    """f(v,t) (eq:features): the multi-hot role, the progress-potential
-    annotation eta_i(v,t) (eq:potential), and whether another agent
-    currently occupies v."""
+    """f(v,t), the vertex features: the multi-hot role, the
+    distance label eta_i(v,t), and whether another agent
+    occupies v."""
 
     storage: bool
     delivery: bool
@@ -71,19 +56,20 @@ class Message:
 
 @dataclass(frozen=True)
 class Observation:
-    """o_i(t) (eq:observation), structured rather than a fixed-size vector
-    (see module docstring)."""
+    """o_i(t), the decentralised observation, structured
+    rather than a fixed-size vector."""
 
-    visible_vertices: tuple[VertexId, ...]  # V_i^(d)(t)
+    visible_vertices: tuple[VertexId, ...]  # V_i^(d_obs)(t)
     features: dict[VertexId, VertexFeatures]
     congestion: float | None  # delta_i(t); None iff congestion_sensitive=False
     messages: tuple[Message, ...]
 
 
 def local_subgraph(graph: WarehouseGraph, location: VertexId, depth: float) -> tuple[VertexId, ...]:
-    """V_i^(d)(t) = {v in V_mov : d_G(l_i(t), v) <= d} (eq:localsubgraph).
-    d_G is the cost-weighted shortest-path distance (WarehouseGraph.distance),
-    not a hop count -- eq:localsubgraph is explicit about using d_G."""
+    """V_i^(d_obs)(t), the vertices of the field of view.
+
+    Uses cost distance d_G(l_i(t), v) <= d_obs. The thesis uses hop
+    distance, see issue #89."""
     return tuple(
         v
         for v, vertex in graph.vertices.items()
@@ -99,14 +85,15 @@ def role_flags(role: VertexRole) -> tuple[bool, bool, bool, bool]:
 
 
 def eta(graph: WarehouseGraph, vertex: VertexId, target: VertexId) -> float:
-    """eta_i(v,t) = d_G(v, q_i(t)) (eq:potential), for an arbitrary
-    visible vertex v -- not just the agent's own location, unlike
-    reward_function.py's `potential` (which is -eta at l_i(t) alone)."""
+    """eta_i(v,t) = d_G(v, q_i(t)), the distance label, for
+    any visible vertex v."""
     return graph.distance(vertex, target)
 
 
 def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[AgentId]) -> float:
-    """delta(S,t;excl) (eq:occupancy)."""
+    """Share of `window` occupied by agents outside `excl`. With the field
+    of view as window and the agent itself excluded, this is the
+    congestion feature delta_i(t)."""
     window_set = set(window)
     occupants = sum(
         1
@@ -120,8 +107,8 @@ def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[
 def communication_neighbours(
     graph: WarehouseGraph, fleet: FleetState, agent_id: AgentId, observation_depth: float
 ) -> tuple[AgentId, ...]:
-    """{a_j : (a_i,a_j) in E^A_t} (eq:commgraph), bounded by the field of
-    view d_obs (issue #88)."""
+    """{a_j : (a_i,a_j) in E^A_t}, the communication graph,
+    bounded by d_obs."""
     location = fleet.locations()[agent_id]
     return tuple(
         other_id
@@ -141,7 +128,7 @@ def build_observation(
     """o_i(t) for one agent at one timestep."""
     if config.observation_depth is None:
         raise ValueError(
-            "build_observation requires config.observation_depth (d); "
+            "build_observation requires config.observation_depth (d_obs); "
             "ExperimentConfig already enforces this for controller='decentralised'."
         )
 
