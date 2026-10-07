@@ -20,7 +20,7 @@ State = tuple[VertexId, int]  # (vertex, timesteps elapsed since this call's t)
 class CentralisedController:
     """pi^route: prioritised planning (space-time A*) over the full graph
     (sec:method:controllers). Agents are planned in a fixed order --
-    earliest y_j first, i.e. whichever active task each agent currently
+    earliest t_j^assigned first, i.e. whichever active task each agent currently
     serves was assigned soonest; free agents (no active task) have no
     task-driven urgency the thesis defines an order for, so they're
     planned last, ordered by agent_id for determinism. Each agent after
@@ -93,7 +93,7 @@ class CentralisedController:
 
 
 def _assignment_time(task: Task) -> int:
-    assert task.assignment_time is not None  # every active task has y_j set
+    assert task.assignment_time is not None  # every active task has t_j^assigned set
     return task.assignment_time
 
 

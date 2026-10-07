@@ -23,7 +23,7 @@ def test_task_status_boundary_at_assignment_time():
     assert task.status(9) == "active"
 
 
-def test_task_status_boundary_at_completion_time():
+def test_task_status_boundary_at_finish_time():
     task = _task(release_time=5).assign(agent_id=2, t=9).pick_up(t=11).complete(t=14)
     assert task.status(13) == "active"
     assert task.status(14) == "completed"
