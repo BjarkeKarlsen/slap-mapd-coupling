@@ -114,6 +114,31 @@ def test_result_never_exceeds_vertex_capacity_across_multiple_skus():
     assert result.units("b", 5) + result.units("b", 7) == 8  # b's total conserved
 
 
+def test_cap_does_not_bind_below_nu_even_if_the_one_pass_order_would_drop_an_arrival():
+    """sec:method:storage: the cap only binds "when F_dem or F_cng would
+    relocate more than nu units." Here SKU "a" wants vertex 3, which is
+    full of SKU "b"; "b" is only leaving because its own (lower-priority)
+    arrival elsewhere is accepted. The one-pass loop, processing "a"
+    before "b" vacates, would see no room and drop "a" for good, even
+    though the total (4 units) is well under nu=5 and x_target is
+    reachable in full once both moves are counted together."""
+    skus = {
+        "a": SkuType(sku_id="a", unit_capacity=1.0),
+        "b": SkuType(sku_id="b", unit_capacity=1.0),
+    }
+    capacities = {1: 10.0, 3: 2.0, 4: 10.0}
+    x_prev = StorageState(skus=skus, capacities=capacities, counts={"a": {1: 2}, "b": {3: 2}})
+    x_target = StorageState(skus=skus, capacities=capacities, counts={"a": {3: 2}, "b": {4: 2}})
+    priority = [("a", 3), ("b", 4)]  # a's higher marginal value ranks it first
+
+    result = apply_relocation_cap(x_prev, x_target, priority, reassignment_cap=5)
+
+    assert result.units("a", 3) == 2
+    assert result.units("a", 1) == 0
+    assert result.units("b", 4) == 2
+    assert result.units("b", 3) == 0
+
+
 def test_per_sku_totals_are_always_conserved():
     x_prev = _state({"a": {1: 4, 2: 6}})
     x_target = _state({"a": {3: 10}})
