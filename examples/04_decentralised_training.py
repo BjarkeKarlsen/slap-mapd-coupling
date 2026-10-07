@@ -29,16 +29,21 @@ Scope, flagged rather than silently narrowed:
 
 Hyperparameters below are still deliberately small relative to a real
 sweep (tab:trainparams's actual values are TBD, not these), but sized
-to actually converge on some task completions within a few minutes,
-not just to demonstrate the pipeline runs: with the previous tinier
-defaults (hidden_width=16, 1 GNN round, 5 iterations), the policy's
-logits stayed close to untrained noise and greedy evaluation picked
-"wait" for every agent at every timestep, so no task was ever
-completed, training iteration count or not. A wider/deeper encoder
-and more iterations (below) does learn real navigation; flagged here
-since the previous "deliberately small/fast" sizing undershot even a
-smoke test's own "completes at least some tasks" goal (see this
-docstring's first paragraph).
+to actually converge on some task completions, not just to demonstrate
+the pipeline runs: with the previous tinier defaults (hidden_width=16,
+1 GNN round, horizon=30, 5 iterations), the policy's logits stayed
+close to untrained noise and greedy evaluation picked "wait" for every
+agent at every timestep, so no task was ever completed, training
+iteration count or not. A wider/deeper encoder, a longer horizon and
+far more iterations (below) does learn real navigation -- confirmed
+directly: a 500-iteration, horizon=150 run completed 4/2/3 tasks across
+its three evaluation episodes, with zero collisions. The current
+defaults (horizon=300, 5000 iterations) ask for noticeably more than
+that confirmed run, sized for a multi-hour pass rather than a quick
+check -- pass --iterations=N to run something shorter (500 took about
+15 minutes with --gpu --env-runners=6 on an 8-core/RTX-2070 machine).
+Once a checkpoint exists, 04b_evaluate_checkpoint.py re-evaluates it
+without retraining.
 
 --gpu requests one GPU for the learner (passed through to
 build_ppo_config's use_gpu); --env-runners=N parallelises rollout
@@ -80,14 +85,14 @@ CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_c
 
 def build_instance() -> WarehouseGraph:
     params = GeneratorParams(
-        num_aisles=3,
-        aisle_length=4,
-        num_cross_aisles=2,
+        num_aisles=12,
+        aisle_length=12,
+        num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
         wait_cost=0.5,
-        num_storage_vertices=6,
-        num_delivery_vertices=2,
+        num_storage_vertices=10,
+        num_delivery_vertices=6,
         num_endpoints=FLEET_SIZE,
         seed=1,
     )
@@ -123,7 +128,7 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
         num_agents=FLEET_SIZE,
         arrival_rate=0.3,
         seed=seed,
-        horizon=150,
+        horizon=300,
         wait_cost=0.5,
         observation_depth=3,
         discount=0.99,
@@ -305,7 +310,7 @@ def _to_batch(obs: dict) -> tuple[dict, list[str]]:
 
 def main() -> None:
     regime: TrainingRegime = "matched" if "--regime=matched" in sys.argv[1:] else "fixed_only"
-    num_iterations = 500
+    num_iterations = 5000
     num_env_runners = 0
     use_gpu = "--gpu" in sys.argv[1:]
     for arg in sys.argv[1:]:
