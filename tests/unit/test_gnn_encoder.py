@@ -1,5 +1,6 @@
 """Unit tests for slap_mapd_coupling.models.gnn_encoder."""
 
+import pytest
 import torch
 
 from slap_mapd_coupling.core.agents import AgentState, FleetState
@@ -98,16 +99,18 @@ def test_zero_rounds_returns_raw_features_concatenated_with_message_and_congesti
     assert z[-1].item() == torch.tensor(observation.congestion).item()  # float32
 
 
-def test_congestion_falls_back_to_zero_when_not_configured():
+def test_congestion_is_read_even_when_not_sensitive():
+    """delta_i(t) is always one of o_i(t)'s three pieces (sec:pf:observations);
+    congestion_sensitive only decides whether the policy reacts to it."""
     graph = _line_graph(6)
-    fleet = _fleet({1: 2})
+    fleet = _fleet({1: 2, 2: 3})
     config = _config(observation_depth=3, congestion_sensitive=False)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
-    assert observation.congestion is None
+    assert observation.congestion > 0.0
 
     encoder = GNNEncoder(GNNEncoderConfig(num_rounds=0, hidden_width=8))
     z = encoder(graph, agent_location=2, observation=observation)
-    assert z[-1].item() == 0.0
+    assert z[-1].item() == pytest.approx(observation.congestion)
 
 
 def test_gradients_flow_through_message_passing_rounds():
@@ -183,9 +186,7 @@ def _padded_tensors_from_observation(
         message_features = torch.zeros(1, 1, MESSAGE_FEATURE_DIM)
         message_mask = torch.zeros(1, 1)
 
-    congestion = torch.tensor(
-        [observation.congestion if observation.congestion is not None else 0.0]
-    )
+    congestion = torch.tensor([observation.congestion])
 
     return (
         node_features,
