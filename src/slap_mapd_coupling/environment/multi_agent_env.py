@@ -399,10 +399,11 @@ class WarehouseMAPDEnv:
         return new_tasks
 
     def _advance_task_lifecycle(self, next_t: int) -> list[Task]:
-        """Marks pickup_time/completion_time (p_j/d_j) against the
-        REALISED (post-resolution) locations at next_t. eq:lifecycle's
-        Q_t/B_t/C_t themselves are untouched by p_j (core/tasks.py's own
-        invariant) -- only current_goal (q_i(t)) depends on it."""
+        """Marks pickup_time/finish_time (t_j^pickup/t_j^finish) against
+        the REALISED (post-resolution) locations at next_t. The task
+        stages' Q_t/B_t/C_t themselves are untouched by t_j^pickup
+        (core/tasks.py's own invariant) -- only current_goal (q_i(t))
+        depends on it."""
         locations = self.fleet.locations()
         updated: list[Task] = []
         for task in self.tasks:
@@ -476,8 +477,7 @@ class WarehouseMAPDEnv:
                 task_now is not None
                 and task_now.assigned_agent == agent_id
                 and any(
-                    t.task_id == task_now.task_id and t.completion_time == next_t
-                    for t in self.tasks
+                    t.task_id == task_now.task_id and t.finish_time == next_t for t in self.tasks
                 )
             )
             rewards[agent_id] = compute_agent_reward(

@@ -128,7 +128,7 @@ def test_every_released_task_has_exactly_one_lifecycle_status_at_every_t(seed: i
             assert status in ("waiting", "active", "completed")
             # Cross-check directly against the timestamps, independent
             # of Task.status()'s own implementation.
-            if task.completion_time is not None and now >= task.completion_time:
+            if task.finish_time is not None and now >= task.finish_time:
                 assert status == "completed"
             elif task.assignment_time is not None and now >= task.assignment_time:
                 assert status == "active"
@@ -153,7 +153,7 @@ def test_replay_is_bit_for_bit_deterministic_under_a_fixed_seed(seed: int):
                 )
             )
         task_snapshot = tuple(
-            (t.task_id, t.release_time, t.assignment_time, t.pickup_time, t.completion_time)
+            (t.task_id, t.release_time, t.assignment_time, t.pickup_time, t.finish_time)
             for t in sorted(env.tasks, key=lambda t: t.task_id)
         )
         return trace, task_snapshot, env.log.edge_traversals, env.log.total_movement_cost
@@ -181,4 +181,4 @@ def test_all_four_invariants_hold_simultaneously_on_one_longer_run():
                 assert task.status(now) in ("waiting", "active", "completed")
         before = env.fleet
     assert env.tasks  # sanity: the run actually generated tasks
-    assert any(task.completion_time is not None for task in env.tasks)  # and completed some
+    assert any(task.finish_time is not None for task in env.tasks)  # and completed some

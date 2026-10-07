@@ -189,7 +189,7 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
         )
         obs, _ = env.reset()
         before_fleet = env._env.fleet
-        completed_before = sum(1 for t in env._env.tasks if t.completion_time is not None)
+        completed_before = sum(1 for t in env._env.tasks if t.finish_time is not None)
 
         for _ in range(config.horizon):
             batch, agent_ids = _to_batch(obs)
@@ -208,7 +208,7 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
             if truncated["__all__"] or terminated["__all__"]:
                 break
 
-        completed_after = sum(1 for t in env._env.tasks if t.completion_time is not None)
+        completed_after = sum(1 for t in env._env.tasks if t.finish_time is not None)
         print(
             f"  episode {episode_idx + 1}/{num_episodes}: "
             f"tasks completed = {completed_after - completed_before}, "

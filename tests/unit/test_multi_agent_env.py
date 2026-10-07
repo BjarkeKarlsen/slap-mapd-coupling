@@ -150,7 +150,7 @@ def test_completed_tasks_stay_completed():
     completed_ids: set[int] = set()
     for t in range(40):
         env.step()
-        now_completed = {task.task_id for task in env.tasks if task.completion_time is not None}
+        now_completed = {task.task_id for task in env.tasks if task.finish_time is not None}
         assert completed_ids <= now_completed  # monotonic: never un-completes
         completed_ids = now_completed
     assert completed_ids  # sanity: at least one task actually completed in 40 steps

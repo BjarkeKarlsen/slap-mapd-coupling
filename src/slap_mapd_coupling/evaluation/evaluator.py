@@ -39,7 +39,7 @@ def run_episode(
 
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
     horizon = config.horizon
-    completed = [task for task in env.tasks if task.completion_time is not None]
+    completed = [task for task in env.tasks if task.finish_time is not None]
     num_completed = len(completed)
 
     # Keeping up, eq:throughput.
@@ -63,10 +63,10 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         waits, travels, blocks = [], [], []
         for task in completed:
             # by construction: a completed task was assigned first (core/tasks.py)
-            assert task.completion_time is not None and task.assignment_time is not None
+            assert task.finish_time is not None and task.assignment_time is not None
             blocked = env.log.blocked_ticks_by_task.get(task.task_id, 0)
             waits.append(task.assignment_time - task.release_time)
-            travels.append(task.completion_time - task.assignment_time - blocked)
+            travels.append(task.finish_time - task.assignment_time - blocked)
             blocks.append(blocked)
         mean_wait = sum(waits) / num_completed
         mean_travel = sum(travels) / num_completed

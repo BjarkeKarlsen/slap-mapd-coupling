@@ -2,7 +2,7 @@
 
 Identical across all three controller architectures: at every timestep,
 free agents (eq:free) are matched to tasks in Q_t (released, not yet
-assigned, eq:lifecycle) ordered by r_j ascending, each task greedily
+assigned, eq:lifecycle) ordered by t_j^released ascending, each task greedily
 matched to the free agent minimising d_G(l_i(t), s_j), removing that agent
 from the free pool before the next task is considered. A greedy heuristic
 for bipartite matching, not the Hungarian algorithm's optimum
@@ -37,7 +37,7 @@ def assign_tasks(
     eq:assignmentrule's argmin is set-valued on ties, which would make
     replay non-deterministic (AGENTS.md's replay invariant); this isn't
     pinned down upstream, so ties are broken here, explicitly: by
-    task_id ascending among tasks sharing r_j, and by agent_id ascending
+    task_id ascending among tasks sharing t_j^released, and by agent_id ascending
     among free agents sharing d_G(l_i(t), s_j).
     """
     waiting = sorted(
