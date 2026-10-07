@@ -14,6 +14,7 @@ from slap_mapd_coupling.core.storage_state import SkuType, is_feasible
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
+from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
@@ -89,11 +90,24 @@ def test_set_active_decentralised_controller_wires_get_controller():
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
     module = _build_module(graph, enc_config)
     config = _decentralised_config()
-    controller = decentralised.DecentralisedController(module, enc_config, config, seed=0)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    controller.reset(episode_seed=0)
 
     decentralised.set_active_decentralised_controller(controller)
 
     assert get_controller("decentralised") is controller
+
+
+def test_route_before_reset_raises():
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    module = _build_module(graph, enc_config)
+    config = _decentralised_config(num_agents=2)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    fleet = FleetState(agents={1: AgentState(agent_id=1, location=0)})
+
+    with pytest.raises(RuntimeError, match="reset"):
+        controller.route(graph, fleet, [], t=0)
 
 
 def test_route_only_ever_produces_legal_actions():
@@ -101,7 +115,8 @@ def test_route_only_ever_produces_legal_actions():
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
     module = _build_module(graph, enc_config)
     config = _decentralised_config(num_agents=2)
-    controller = decentralised.DecentralisedController(module, enc_config, config, seed=0)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    controller.reset(episode_seed=0)
 
     fleet = FleetState(
         agents={1: AgentState(agent_id=1, location=0), 2: AgentState(agent_id=2, location=5)}
@@ -114,7 +129,9 @@ def test_route_only_ever_produces_legal_actions():
             assert action in legal, f"illegal action {action} at vertex {location}, t={t}"
 
 
-def test_route_is_deterministic_for_a_fixed_seed():
+def test_route_is_deterministic_for_a_fixed_episode_seed():
+    """The same episode seed replays bit for bit, however many episodes
+    the same controller instance has already run through reset()."""
     graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
     module = _build_module(graph, enc_config)
@@ -123,16 +140,30 @@ def test_route_is_deterministic_for_a_fixed_seed():
         agents={1: AgentState(agent_id=1, location=0), 2: AgentState(agent_id=2, location=5)}
     )
 
-    controller_a = decentralised.DecentralisedController(module, enc_config, config, seed=42)
-    controller_b = decentralised.DecentralisedController(module, enc_config, config, seed=42)
+    controller_a = decentralised.DecentralisedController(module, enc_config, config)
+    controller_b = decentralised.DecentralisedController(module, enc_config, config)
+    controller_a.reset(episode_seed=42)
+    controller_b.reset(episode_seed=42)
 
     for t in (0, 1, 7):
         assert controller_a.route(graph, fleet, [], t=t) == controller_b.route(
             graph, fleet, [], t=t
         )
 
+    # Re-resetting the SAME instance to a later, unrelated episode and
+    # then back to 42 must replay identically too -- the stream comes
+    # from reset()'s argument, not from how many episodes came before.
+    controller_a.reset(episode_seed=999)
+    controller_a.route(graph, fleet, [], t=0)
+    controller_a.reset(episode_seed=42)
+    assert controller_a.route(graph, fleet, [], t=0) == controller_b.route(graph, fleet, [], t=0)
 
-def test_route_can_differ_across_seeds():
+
+def test_route_can_differ_across_episode_seeds_for_the_same_logits():
+    """Different episode seeds sample different actions from the same
+    trained module (same weights, same state -> same logits every time),
+    so the difference can only come from the sampling stream reset()
+    seeds."""
     graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
     module = _build_module(graph, enc_config)
@@ -140,10 +171,11 @@ def test_route_can_differ_across_seeds():
     fleet = FleetState(
         agents={1: AgentState(agent_id=1, location=0), 2: AgentState(agent_id=2, location=5)}
     )
+    controller = decentralised.DecentralisedController(module, enc_config, config)
 
     seen = set()
     for seed in range(10):
-        controller = decentralised.DecentralisedController(module, enc_config, config, seed=seed)
+        controller.reset(episode_seed=seed)
         actions = controller.route(graph, fleet, [], t=0)
         seen.add(tuple(sorted((aid, a.kind, a.target) for aid, a in actions.items())))
     assert len(seen) > 1  # different seeds actually produce different draws sometimes
@@ -158,7 +190,7 @@ def test_sample_legal_slot_never_picks_a_masked_out_slot():
         assert mask[slot] == 1.0
 
 
-def test_full_episode_via_registry_resolved_controller_respects_correctness_invariants():
+def _small_instance():
     params = GeneratorParams(
         num_aisles=3,
         aisle_length=4,
@@ -175,11 +207,16 @@ def test_full_episode_via_registry_resolved_controller_respects_correctness_inva
     skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
     capacities = {v: 20.0 for v in storage_vertices}
     counts = {"tea": {storage_vertices[0]: 8, storage_vertices[1]: 8}}
+    return graph, skus, capacities, counts
 
+
+def test_full_episode_via_registry_resolved_controller_respects_correctness_invariants():
+    graph, skus, capacities, counts = _small_instance()
     config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
     module = _build_module(graph, enc_config)
-    controller = decentralised.DecentralisedController(module, enc_config, config, seed=config.seed)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    controller.reset(episode_seed=config.seed)
     decentralised.set_active_decentralised_controller(controller)
 
     env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
@@ -190,3 +227,33 @@ def test_full_episode_via_registry_resolved_controller_respects_correctness_inva
         assert is_collision_free(before, env.fleet), f"collision at t={t}"
         assert is_feasible(env.storage), f"infeasible storage at t={t}"
         before = env.fleet
+
+
+def test_run_episode_resets_the_controller_so_route_never_raises():
+    """evaluation.evaluator.run_episode must reset the registered
+    controller to config.seed itself: this test never calls
+    controller.reset(), so it would hit DecentralisedController.route()'s
+    own "called before reset()" RuntimeError if run_episode didn't."""
+    graph, skus, capacities, counts = _small_instance()
+    config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    module = _build_module(graph, enc_config)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    decentralised.set_active_decentralised_controller(controller)
+
+    run_episode(graph, skus, counts, capacities, config)  # would raise if not reset internally
+
+
+def test_run_episode_is_deterministic_for_the_same_config_seed():
+    graph, skus, capacities, counts = _small_instance()
+    config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    module = _build_module(graph, enc_config)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    decentralised.set_active_decentralised_controller(controller)
+
+    first = run_episode(graph, skus, counts, capacities, config)
+    second = run_episode(graph, skus, counts, capacities, config)
+    # mean_decision_runtime_seconds is wall-clock timing, not part of replay.
+    exclude = {"mean_decision_runtime_seconds"}
+    assert first.model_dump(exclude=exclude) == second.model_dump(exclude=exclude)

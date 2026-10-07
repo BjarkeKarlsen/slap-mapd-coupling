@@ -62,6 +62,10 @@ class CentralisedController:
       timing a route.
     """
 
+    def reset(self, episode_seed: int) -> None:
+        """No-op: a pure function of (graph, fleet, tasks, t), with no
+        randomness of its own to seed (see class docstring)."""
+
     def route(
         self,
         graph: WarehouseGraph,

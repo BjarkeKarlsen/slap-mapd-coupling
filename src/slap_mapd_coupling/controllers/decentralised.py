@@ -75,11 +75,17 @@ class DecentralisedController:
     silently picked.
 
     Determinism (AGENTS.md's non-negotiable replay invariant): each
-    route() call derives its OWN sampling RNG from (seed, t, agent_id),
-    not a single mutable RNG advanced across calls -- reproducible
-    regardless of how many times or in what order route() is invoked,
-    matching the "seeded separately, offset from the episode seed"
-    convention every other random stream in this repo already follows.
+    route() call derives its OWN sampling RNG from (episode_seed, t,
+    agent_id), not a single mutable RNG advanced across calls --
+    reproducible regardless of how many times or in what order route()
+    is invoked, matching the "seeded separately, offset from the episode
+    seed" convention every other random stream in this repo already
+    follows. episode_seed itself comes from reset(), not from
+    construction: the controller is registered once per process (module
+    docstring), so a constructor-time seed would give every episode the
+    same sampling stream regardless of its own seed. Callers must call
+    reset(episode_seed) before the first route() of an episode; route()
+    raises clearly if that hasn't happened yet.
     """
 
     def __init__(
@@ -87,12 +93,16 @@ class DecentralisedController:
         module: RLModule,
         encoding_config: LocalSubgraphEncodingConfig,
         experiment_config: ExperimentConfig,
-        seed: int,
     ) -> None:
         self._module = module
         self._encoding_config = encoding_config
         self._experiment_config = experiment_config
-        self._seed = seed
+        self._episode_seed: int | None = None
+
+    def reset(self, episode_seed: int) -> None:
+        """Primes the action-sampling stream for a new episode -- see
+        class docstring."""
+        self._episode_seed = episode_seed
 
     def route(
         self,
@@ -101,6 +111,12 @@ class DecentralisedController:
         tasks: Sequence[Task],
         t: int,
     ) -> dict[AgentId, Action]:
+        if self._episode_seed is None:
+            raise RuntimeError(
+                "DecentralisedController.route() called before reset(episode_seed); "
+                "see class docstring. evaluation/evaluator.py calls reset() at the "
+                "start of every episode for a correctly configured run."
+            )
         d_max = max_out_degree(graph)
         locations = fleet.locations()
         actions: dict[AgentId, Action] = {}
@@ -114,7 +130,9 @@ class DecentralisedController:
             out = self._module.forward_inference(_single_agent_batch(encoded))
             logits = out[Columns.ACTION_DIST_INPUTS][0].detach().numpy()
 
-            rng = np.random.default_rng((self._seed + _ACTION_SAMPLING_SEED_OFFSET, t, agent_id))
+            rng = np.random.default_rng(
+                (self._episode_seed + _ACTION_SAMPLING_SEED_OFFSET, t, agent_id)
+            )
             slot = _sample_legal_slot(logits, encoded.action_mask, rng)
             actions[agent_id] = action_for_slot(graph, location, slot)
         return actions
