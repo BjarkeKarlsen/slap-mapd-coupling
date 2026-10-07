@@ -12,6 +12,7 @@ regardless, returning x_prev unchanged is still exactly correct.
 
 from __future__ import annotations
 
+from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import StorageState
 from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate
 from slap_mapd_coupling.storage.registry import register_storage_rule
@@ -20,6 +21,8 @@ from slap_mapd_coupling.storage.registry import register_storage_rule
 @register_storage_rule("fixed")
 def f_fix(
     x_prev: StorageState,
+    graph: WarehouseGraph,
+    reassignment_cap: int | None,
     demand_estimate: DemandEstimate,
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,

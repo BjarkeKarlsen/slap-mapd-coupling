@@ -317,7 +317,9 @@ class WarehouseMAPDEnv:
             # a placeholder for any other rule registered under this
             # config -- flagged here, not silently assumed correct for
             # rules that actually read them.
-            self.storage = self._storage_rule(self.storage, {}, {}, {})
+            self.storage = self._storage_rule(
+                self.storage, self.graph, self.config.reassignment_cap, {}, {}, {}
+            )
 
         rewards = self._compute_rewards(
             before_locations, active_tasks_by_agent, result.overridden, next_t
