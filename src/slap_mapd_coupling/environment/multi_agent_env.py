@@ -311,14 +311,22 @@ class WarehouseMAPDEnv:
         delta = self.config.storage_epoch_length
         if delta is not None and next_t % delta == 0:
             # rho_hat_t/mu_hat_t/w_hat_t (demand/traversal/waiting
-            # estimates): computing these online is F_dem/F_cng's own
-            # scope (M3, #19/#20), not built yet. Empty estimates are
-            # exactly correct for F_fix (which ignores them outright) and
-            # a placeholder for any other rule registered under this
-            # config -- flagged here, not silently assumed correct for
-            # rules that actually read them.
+            # estimates): online accumulation of these isn't built yet
+            # (no per-timestep demand/traffic estimator exists in this
+            # repo). Empty estimates are exactly correct for F_fix (which
+            # ignores them outright) but a real placeholder for F_dem/
+            # F_cng, which DO read demand_estimate/traversal_estimate/
+            # waiting_estimate -- flagged here, not silently assumed
+            # correct, since those rules will currently only ever see an
+            # empty rho_hat_t (i.e. rank every SKU as equally undemanded).
             self.storage = self._storage_rule(
-                self.storage, self.graph, self.config.reassignment_cap, {}, {}, {}
+                self.storage,
+                self.graph,
+                self.config.reassignment_cap,
+                self.config.congestion_weight,
+                {},
+                {},
+                {},
             )
 
         rewards = self._compute_rewards(

@@ -23,6 +23,7 @@ def f_fix(
     x_prev: StorageState,
     graph: WarehouseGraph,
     reassignment_cap: int | None,
+    congestion_weight: float | None,
     demand_estimate: DemandEstimate,
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,
