@@ -1,8 +1,11 @@
 """Compare F_fix / F_dem / F_cng against the same centralised controller and instance.
 
 The M3 milestone's own acceptance test: swapping storage_mode is the
-*only* thing that changes between the three runs below -- same graph,
-same initial storage, same controller, same seed. Requires zero changes
+only thing chosen directly between the three runs below -- same graph,
+same initial storage, same controller, same seed. congestion_sensitive
+follows that choice (set to storage_mode == "congestion"), since the
+thesis's congestion-sensitivity switch is meant to track the congestion-
+aware storage rule, not an independent condition. Requires zero changes
 to environment/ (that's the point of the storage registry built in M2,
 docs/storage_rule_integration.md).
 
@@ -27,6 +30,12 @@ from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
 
 FLEET_SIZE = 6
+
+# Illustrative demo values. Delta, nu and beta (tab:storageparams) are all
+# TBD by sweep, tracked in #85.
+ILLUSTRATIVE_STORAGE_EPOCH_LENGTH = 25  # Delta
+ILLUSTRATIVE_REASSIGNMENT_CAP = 10  # nu
+ILLUSTRATIVE_CONGESTION_WEIGHT = 1.0  # beta
 
 
 def build_instance() -> WarehouseGraph:
@@ -79,13 +88,16 @@ def build_config(storage_mode: StorageMode, seed: int) -> ExperimentConfig:
         return ExperimentConfig(storage_mode="fixed", **common)
     if storage_mode == "demand":
         return ExperimentConfig(
-            storage_mode="demand", storage_epoch_length=25, reassignment_cap=10, **common
+            storage_mode="demand",
+            storage_epoch_length=ILLUSTRATIVE_STORAGE_EPOCH_LENGTH,
+            reassignment_cap=ILLUSTRATIVE_REASSIGNMENT_CAP,
+            **common,
         )
     return ExperimentConfig(
         storage_mode="congestion",
-        storage_epoch_length=25,
-        reassignment_cap=10,
-        congestion_weight=1.0,
+        storage_epoch_length=ILLUSTRATIVE_STORAGE_EPOCH_LENGTH,
+        reassignment_cap=ILLUSTRATIVE_REASSIGNMENT_CAP,
+        congestion_weight=ILLUSTRATIVE_CONGESTION_WEIGHT,
         **common,
     )
 

@@ -32,6 +32,12 @@ from slap_mapd_coupling.instances.generator import (
 
 FLEET_SIZE = 6
 
+# Illustrative demo values. The thesis leaves both TBD: T (evaluation
+# horizon) is a sweep parameter tracked in #85, and the order stream's
+# rate lambda_task waits on the demand model of #94.
+ILLUSTRATIVE_HORIZON = 150
+ILLUSTRATIVE_ARRIVAL_RATE = 0.1
+
 
 def _instance_params() -> GeneratorParams:
     return GeneratorParams(
@@ -97,9 +103,9 @@ def build_config(seed: int) -> ExperimentConfig:
         # modest here so the demo actually shows completed tasks rather
         # than a saturated queue; see #55 and the class docstring in
         # controllers/centralised.py for the full story.
-        arrival_rate=0.1,
+        arrival_rate=ILLUSTRATIVE_ARRIVAL_RATE,
         seed=seed,
-        horizon=150,
+        horizon=ILLUSTRATIVE_HORIZON,
         wait_cost=0.5,
     )
 
