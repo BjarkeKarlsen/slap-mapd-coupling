@@ -73,6 +73,7 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
         train_batch_size=60,
+        credit_signal="per_agent",
     )
     defaults.update(overrides)
     return PPOHyperparameters(**defaults)
@@ -110,6 +111,27 @@ def test_build_ppo_config_rejects_mismatched_num_actions():
             gnn_config,
             wrong_head_config,
             _ppo_hp(),
+        )
+
+
+def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8)
+    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+
+    with pytest.raises(ValueError, match="credit_signal"):
+        build_ppo_config(
+            graph,
+            skus,
+            counts,
+            capacities,
+            _config(),
+            enc_config,
+            gnn_config,
+            head_config,
+            _ppo_hp(credit_signal="team_mean"),
         )
 
 
