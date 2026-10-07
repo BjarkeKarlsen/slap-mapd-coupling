@@ -114,6 +114,32 @@ def test_build_ppo_config_rejects_mismatched_num_actions():
         )
 
 
+def test_build_ppo_config_rejects_missing_discount():
+    """ExperimentConfig itself already requires discount for
+    controller='decentralised', so model_construct (which skips that
+    validator) stands in for a caller bug that slips a config through
+    some other path."""
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    config = _config().model_construct(**{**_config().model_dump(), "discount": None})
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8)
+    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+
+    with pytest.raises(ValueError, match="discount"):
+        build_ppo_config(
+            graph,
+            skus,
+            counts,
+            capacities,
+            config,
+            enc_config,
+            gnn_config,
+            head_config,
+            _ppo_hp(),
+        )
+
+
 def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
@@ -157,6 +183,7 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
         num_env_runners=0,
     )
 
+    assert ppo_config.gamma == pytest.approx(0.99)
     assert ppo_config.lr == pytest.approx(3e-4)
     assert ppo_config.clip_param == pytest.approx(0.2)
     assert ppo_config.rollout_fragment_length == 20
