@@ -79,6 +79,12 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
     return PPOHyperparameters(**defaults)
 
 
+def _seed_split(**overrides) -> SeedSplitConfig:
+    defaults = dict(base_seed=100, train_seed_count=5, eval_seed_count=3)
+    defaults.update(overrides)
+    return SeedSplitConfig(**defaults)
+
+
 def test_split_seeds_produces_disjoint_contiguous_ranges():
     config = SeedSplitConfig(base_seed=100, train_seed_count=5, eval_seed_count=3)
     train_seeds, eval_seeds = split_seeds(config)
@@ -111,6 +117,7 @@ def test_build_ppo_config_rejects_mismatched_num_actions():
             gnn_config,
             wrong_head_config,
             _ppo_hp(),
+            _seed_split(),
         )
 
 
@@ -137,6 +144,7 @@ def test_build_ppo_config_rejects_missing_discount():
             gnn_config,
             head_config,
             _ppo_hp(),
+            _seed_split(),
         )
 
 
@@ -158,6 +166,7 @@ def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
             gnn_config,
             head_config,
             _ppo_hp(credit_signal="team_mean"),
+            _seed_split(),
         )
 
 
@@ -180,6 +189,7 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
         gnn_config,
         head_config,
         _ppo_hp(),
+        _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
         num_env_runners=0,
     )
 
@@ -187,3 +197,4 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     assert ppo_config.lr == pytest.approx(3e-4)
     assert ppo_config.clip_param == pytest.approx(0.2)
     assert ppo_config.rollout_fragment_length == 20
+    assert ppo_config.seed == 42
