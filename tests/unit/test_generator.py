@@ -96,3 +96,23 @@ def test_single_aisle_delivery_and_endpoint_vertices_stay_single_bridge():
     for v in leaf_vertices:
         out_degree = len({e.target for e in graph.edges if e.source == v})
         assert out_degree == 1
+
+
+def _storage_vertices(graph: WarehouseGraph) -> set[int]:
+    return {v for v, vertex in graph.vertices.items() if vertex.role.storage}
+
+
+def test_storage_vertices_are_a_seeded_random_subset_of_aisle_cells():
+    # Issue #75: storage placement used to be "the first num_storage_vertices
+    # aisle cells in generation order", identical across every seed. It's now
+    # a seeded random sample, so different seeds give different placements
+    # (same count, still all real aisle cells) -- and the same seed still
+    # gives the same placement, per test_generator_is_deterministic_given_seed.
+    graph_a = generate_warehouse_graph(_params(one_way_fraction=0.0, seed=1))
+    graph_b = generate_warehouse_graph(_params(one_way_fraction=0.0, seed=2))
+    storage_a = _storage_vertices(graph_a)
+    storage_b = _storage_vertices(graph_b)
+
+    assert len(storage_a) == 6
+    assert len(storage_b) == 6
+    assert storage_a != storage_b

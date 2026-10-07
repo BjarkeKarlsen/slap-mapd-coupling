@@ -1,6 +1,6 @@
 """Unit tests for slap_mapd_coupling.controllers.centralised."""
 
-from slap_mapd_coupling.controllers.centralised import CentralisedController
+from slap_mapd_coupling.controllers.centralised import CentralisedController, _reserve
 from slap_mapd_coupling.core.agents import AgentState, FleetState, is_collision_free
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
@@ -124,6 +124,27 @@ def test_routed_actions_are_already_collision_free_without_resolution_overrides(
 
     assert is_collision_free(before, result.fleet)
     assert result.overridden == frozenset()
+
+
+def test_reserve_extends_a_not_moving_agents_vertex_across_the_window():
+    # A length-1 path means the agent isn't moving this call at all
+    # (genuinely free, or a failed search falling back to waiting) --
+    # its vertex must stay reserved for more than just this one tick,
+    # or a later-planned agent could wrongly assume it'll have vacated
+    # by the very next offset.
+    reserved_vertices: dict[int, set[int]] = {}
+    reserved_edges: dict[int, set[tuple[int, int]]] = {}
+    _reserve((5,), reserved_vertices, reserved_edges, stationary_window=4)
+    assert all(5 in reserved_vertices.get(offset, set()) for offset in range(4))
+    assert reserved_edges == {}
+
+
+def test_reserve_moving_path_only_reserves_its_own_offsets():
+    reserved_vertices: dict[int, set[int]] = {}
+    reserved_edges: dict[int, set[tuple[int, int]]] = {}
+    _reserve((0, 1, 2), reserved_vertices, reserved_edges, stationary_window=10)
+    assert reserved_vertices == {0: {0}, 1: {1}, 2: {2}}
+    assert reserved_edges == {1: {(0, 1)}, 2: {(1, 2)}}
 
 
 def test_full_multi_step_run_stays_collision_free():

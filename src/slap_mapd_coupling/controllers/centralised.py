@@ -76,13 +76,17 @@ class CentralisedController:
         reserved_vertices: dict[int, set[VertexId]] = {}
         reserved_edges: dict[int, set[tuple[VertexId, VertexId]]] = {}
         actions: dict[AgentId, Action] = {}
+        # A generous, deterministic bound on how many offsets a
+        # not-moving agent's vertex needs to stay reserved for -- see
+        # _reserve's docstring for why this matters at all.
+        stationary_window = len(graph.vertices)
 
         for agent_id in order:
             start = locations[agent_id]
             task = active_by_agent.get(agent_id)
             goal = task.current_goal if task is not None else start
             path = _plan(graph, start, goal, reserved_vertices, reserved_edges)
-            _reserve(path, reserved_vertices, reserved_edges)
+            _reserve(path, reserved_vertices, reserved_edges, stationary_window)
             actions[agent_id] = _first_action(start, path)
 
         return actions
@@ -213,7 +217,26 @@ def _reserve(
     path: Path,
     reserved_vertices: dict[int, set[VertexId]],
     reserved_edges: dict[int, set[tuple[VertexId, VertexId]]],
+    stationary_window: int,
 ) -> None:
+    """Register `path` in the shared reservation tables.
+
+    A length-1 path means this agent isn't moving during this planning
+    call at all (genuinely free with nowhere to go, or a failed search
+    falling back to waiting) -- reserving only offset 0 for it would let
+    a later agent's search treat its vertex as free again one step
+    later, which it demonstrably is not: nothing in this call gives that
+    agent any reason to move between now and the next replanning call.
+    Reserved across `stationary_window` offsets instead, so a
+    not-moving agent reliably blocks other plans from routing through
+    it, not just for the very first tick.
+    """
+    if len(path) == 1:
+        vertex = path[0]
+        for offset in range(stationary_window):
+            reserved_vertices.setdefault(offset, set()).add(vertex)
+        return
+
     for offset, vertex in enumerate(path):
         reserved_vertices.setdefault(offset, set()).add(vertex)
     for offset in range(1, len(path)):
