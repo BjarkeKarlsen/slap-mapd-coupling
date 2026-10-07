@@ -1,15 +1,15 @@
 """pi_theta(.|o_i(t)) and V_theta(o_i(t)) (sec:method:model, issue #28):
-fully connected layers with ReLU activations over z_i (eq:readout).
+fully connected layers with ReLU activations over z_i (the readout).
 
 Scoped to the issue's literal text -- "fully connected layers with ReLU
-activations over z_i ... masked per eq:mask before the softmax" -- as
-the policy/value heads over the encoder's output. Masking itself is
-NOT applied here: #26's ActionMaskingTorchRLModule already owns
+activations over z_i ... masked per the action mask before the softmax"
+-- as the policy/value heads over the encoder's output. Masking itself
+is NOT applied here: #26's ActionMaskingTorchRLModule already owns
 "masked ... before the softmax" as RLlib infrastructure (it adds -inf
 to raw action logits before they reach the action distribution).
-Re-masking here would double-apply eq:mask, so this module hands back
-raw (unmasked) logits plus a scalar value -- exactly the pair #26
-expects to receive.
+Re-masking here would double-apply the action mask, so this module
+hands back raw (unmasked) logits plus a scalar value -- exactly the
+pair #26 expects to receive.
 
 The issue's own text calls this a "TorchModelV2 wrapper," which is
 stale relative to RLlib's actual current API (see models/gnn_encoder.py
@@ -41,7 +41,7 @@ class PolicyValueHeadConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     hidden_width: PositiveInt
-    num_actions: PositiveInt  # d_max + 1 (eq:mask), environment/spaces.py::action_space
+    num_actions: PositiveInt  # d_max + 1 (the action mask), environment/spaces.py::action_space
 
 
 class PolicyValueHead(nn.Module):
@@ -66,8 +66,10 @@ class PolicyValueHead(nn.Module):
 
 
 class GNNPolicyValueModel(nn.Module):
-    """The full pi_theta/V_theta pipeline, o_i(t) -> (raw logits, value)
-    (sec:method:model): GNNEncoder.forward_padded (#27) -> PolicyValueHead.
+    """The full pi_theta/V_theta pipeline (sec:method:model):
+    GNNEncoder.forward_padded (#27) -> PolicyValueHead. The decentralised
+    policy reads o_i(t) and the received messages, not o_i(t) alone, so
+    the pipeline maps (o_i(t), received messages) -> (raw logits, value).
     Batched only (mirrors forward_padded); RLlib wiring is #29/#30's job,
     see module docstring."""
 

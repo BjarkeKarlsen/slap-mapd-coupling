@@ -1,57 +1,35 @@
 """Multi-round message-passing encoder over the local observation graph
-G_i^(d)(t) (sec:method:model, eq:msgpass/eq:readout).
+G_i^(d_obs)(t) (sec:method:model, the message-passing step / the readout).
 
-h_v^(0) = f(v,t) (eq:features); for r = 1..L:
-  m_v^(r) = phi_r(h_v^(r-1), {h_w^(r-1) : w in G_i^(d)(t), (w,v) or (v,w) in E})
+h_v^(0) = f(v,t) (the vertex features); for r = 1..L:
+  m_v^(r) = phi_r(h_v^(r-1), {h_w^(r-1) : w in G_i^(d_obs)(t), (w,v) or (v,w) in E})
   h_v^(r) = psi_r(h_v^(r-1), m_v^(r))
 z_i = h_{l_i(t)}^(L) || AGG(messages from a_j : (a_i,a_j) in E^A_t) || delta_i(t)
 
-This is the "one level further" step from Knippenberg (2021)'s single GCN
-pass to explicit multi-round message passing, so information travels more
-than one hop within G_i^(d)(t) per decision.
+phi_r/psi_r's internal form isn't pinned down beyond this signature.
+Realised here as a standard MPNN pair: phi_r is a per-neighbour-pair MLP
+(concat(h_v, h_w)) mean-pooled over the neighbour set, and psi_r is a
+second MLP over concat(h_v, m_v). AGG for incoming messages is mean, as
+the readout's own parenthetical suggests ("e.g. mean").
 
-Flagged, not literally specified: phi_r/psi_r's internal form is never
-pinned down beyond their (input) -> (output) signature, which
-eq:msgpass/eq:readout already fixes. Realised here as the standard MPNN
-pair matching that exact signature: phi_r is a per-neighbour-pair MLP
-(concat(h_v, h_w)) mean-pooled over the neighbour set (the conventional,
-order-invariant "message" step for a set-valued second argument --
-GraphSAGE's own realisation of the same signature), and psi_r is a
-second MLP over concat(h_v, m_v) (the conventional "update" step). AGG
-for incoming messages is mean, exactly as eq:readout's own parenthetical
-suggests ("e.g. mean"). Both are the standard textbook choices for these
-two roles, not an arbitrary architecture pick.
+L and hidden width (tab:modelparams) are TBD-by-sweep, so they live in
+GNNEncoderConfig here, not ExperimentConfig, the same "parameters local
+to the module they configure" pattern instances/generator.py's own
+GeneratorParams follows.
 
-L and hidden width (tab:modelparams) are TBD-by-sweep, so they're a named
-GNNEncoderConfig here -- not ExperimentConfig, and not hard-coded.
-ExperimentConfig is specifically "the five independent variables of the
-study" (storage mode, controller, congestion sensitivity, communication,
-load) plus what one concrete episode needs; L/hidden width are model
-architecture hyperparameters used only by this encoder, the same
-"parameters local to the module they configure" pattern
-instances/generator.py's own GeneratorParams already follows rather than
-folding into an unrelated shared config.
+L=0 collapses the message-passing step to raw node features, with no
+propagation within the field of view. Communication has its own switch
+(ExperimentConfig.communication): the message mean at L=0 is unchanged,
+so the structural ablation and the communication ablation are separate
+(4.Implementation.tex:379-382).
 
-L=0 is a real, supported ablation (tab:modelparams: "TBD (sweep, incl.
-L=0)"), collapsing z_i to raw node/message features with no propagation
-at all -- ablating both local structural aggregation and inter-agent
-communication together. The thesis explicitly notes that isolating the
-two would need two independent round-counts instead of one L, calling
-that an "open refinement, not yet adopted" -- this encoder does NOT
-implement that split, since doing so would be inventing a decision the
-thesis text explicitly says hasn't been made.
-
-`forward` (below) is the unbatched path: one Observation, in, one z_i
-out -- used directly by anything that isn't RLlib's own tensor-batched
-training loop (e.g. #29's Controller wrapper). `forward_padded` is a
-second, batched entry point over already-padded/masked tensors (see
-models/local_subgraph_encoding.py, #28), needed because G_i^(d)(t) has a
-variable vertex count RLlib's fixed-shape batch pipeline can't carry
-directly -- discussed and agreed before implementing (pad to a fixed
-max_local_nodes cap). Both paths share the exact same phi/psi weights;
-forward_padded is a vectorised (dense, mask-weighted) reformulation of
-the identical eq:msgpass computation, not a second model -- verified
-directly in tests by checking the two agree on the same input.
+`forward` is the unbatched path: one Observation in, one z_i out.
+`forward_padded` is the batched entry point over already-padded/masked
+tensors (models/local_subgraph_encoding.py), needed because
+G_i^(d_obs)(t) has a variable vertex count RLlib's fixed-shape pipeline
+can't carry directly. Both paths share the same phi/psi weights and
+compute the same message-passing step, just vectorised; tests check
+they agree on the same input.
 """
 
 from __future__ import annotations
@@ -65,8 +43,8 @@ from torch import nn
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.environment.observation import Observation, VertexFeatures
 
-NODE_FEATURE_DIM = 6  # storage, delivery, endpoint, transit, eta, occupied (eq:features)
-MESSAGE_FEATURE_DIM = 2  # (distance, eta) per eq:observation's message content
+NODE_FEATURE_DIM = 6  # storage, delivery, endpoint, transit, eta, occupied (the vertex features)
+MESSAGE_FEATURE_DIM = 2  # hand-built (distance, eta) messages, until #91's learned message
 
 
 class GNNEncoderConfig(BaseModel):
@@ -75,7 +53,7 @@ class GNNEncoderConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    num_rounds: NonNegativeInt  # L, eq:msgpass -- L=0 is a valid, real ablation
+    num_rounds: NonNegativeInt  # L, the message-passing step -- L=0 is a valid, real ablation
     hidden_width: PositiveInt  # phi_r/psi_r layer width, tab:modelparams
 
 
@@ -93,9 +71,10 @@ def _node_feature_vector(features: VertexFeatures) -> list[float]:
 def _local_undirected_neighbours(
     graph: WarehouseGraph, visible: Sequence[VertexId]
 ) -> dict[VertexId, set[VertexId]]:
-    """{v: {w : (w,v) in E or (v,w) in E, w in G_i^(d)(t)}} -- eq:msgpass's
-    neighbour set is explicitly "or," so a one-way edge in either
-    direction still counts, restricted to the visible vertex set."""
+    """{v: {w : (w,v) in E or (v,w) in E, w in G_i^(d_obs)(t)}} -- the
+    message-passing step's neighbour set is explicitly "or," so a
+    one-way edge in either direction still counts, restricted to the
+    visible vertex set."""
     visible_set = set(visible)
     neighbours: dict[VertexId, set[VertexId]] = {v: set() for v in visible}
     for edge in graph.edges:
@@ -106,8 +85,8 @@ def _local_undirected_neighbours(
 
 
 class GNNEncoder(nn.Module):
-    """z_i (eq:readout), via L rounds of message passing (eq:msgpass) over
-    G_i^(d)(t). See module docstring for phi_r/psi_r's realisation and
+    """z_i (the readout), via L rounds of the message-passing step over
+    G_i^(d_obs)(t). See module docstring for phi_r/psi_r's realisation and
     the L=0 ablation. Weights are shared across all agents (parameter
     sharing, sec:pf:controllers) -- one GNNEncoder instance, called once
     per agent per decision, not one instance per agent.
@@ -169,7 +148,7 @@ class GNNEncoder(nn.Module):
         else:
             aggregated = torch.zeros(MESSAGE_FEATURE_DIM)
 
-        # eq:readout always includes delta_i(t); Observation.congestion is
+        # the readout always includes delta_i(t); Observation.congestion is
         # None specifically when observation_depth (d_obs) isn't configured
         # (environment/observation.py) -- falls back to 0.0 here, since
         # the encoder needs a concrete scalar regardless of whether the
@@ -190,7 +169,7 @@ class GNNEncoder(nn.Module):
         message_mask: torch.Tensor,
         congestion: torch.Tensor,
     ) -> torch.Tensor:
-        """Batched z_i (eq:readout) over already-padded/masked tensors --
+        """Batched z_i (the readout) over already-padded/masked tensors --
         see class docstring. Shapes, with B the batch size, N
         max_local_nodes, M max_messages (models/local_subgraph_encoding.py):
 
