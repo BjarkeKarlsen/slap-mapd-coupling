@@ -47,8 +47,8 @@ class ExperimentConfig(BaseModel):
     # communication graph (eq:commgraph) and the congestion feature
     # (eq:congestion), so there are no separate radii (issue #88).
     observation_depth: PositiveInt | None = None
-    # f_up, keep-up threshold in eq:throughput (tab:evalparams, TBD, #85).
-    # Optional until the evaluator uses it (#93).
+    # f_up in the keep-up check (eq:throughput, tab:evalparams), TBD (#85).
+    # None leaves RunMetrics.keeps_up unset.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
 
     # eq:reward / eq:objective (tab:rlparams, sec:method:rl): required only

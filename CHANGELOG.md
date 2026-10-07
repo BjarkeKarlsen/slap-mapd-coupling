@@ -58,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExperimentConfig.keep_up_threshold` f_up, left unset because its value
   is still TBD), mean service time split into `mean_wait_for_agent`,
   `mean_travel_time` and `mean_blocked_time` (validated to add up),
-  `mean_crowding` (the mean of delta_i(t), now computed every timestep
-  over `congestion_radius`), and relocations per storage update. The new
+  `mean_crowding` (the mean of delta_i(t), computed every timestep
+  over the field of view `observation_depth`), and relocations per storage update. The new
   `evaluation/comparison.py` implements eq:rqformal as a paired t-test
   over seeds. Traffic entropy/concentration and movement cost per task are
   no longer reported, though the episode log still records traversals and

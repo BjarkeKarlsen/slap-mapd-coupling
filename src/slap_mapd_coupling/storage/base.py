@@ -1,4 +1,4 @@
-"""StorageRule protocol: x_t = F(x_{t-Delta}, rho_hat_t, mu_hat_t, w_hat_t)."""
+"""StorageRule protocol for F in the storage update (eq:storageupdate)."""
 
 from __future__ import annotations
 
@@ -14,36 +14,20 @@ TrafficEstimate = dict[EdgeKey, float]  # mu_hat_t(e) or w_hat_t(e); same shape,
 
 @runtime_checkable
 class StorageRule(Protocol):
-    """F in eq:storageupdate: x_t = F(x_{t-Delta}, rho_hat_t, mu_hat_t, w_hat_t).
+    """F in the storage update (eq:storageupdate),
+    x_t = F(x_{t-Delta}, rho_hat_t, mu_hat_t, w_hat_t).
 
-    A plain callable, not an object with a named method -- matching
-    docs/storage_rule_integration.md's usage
-    (`rule = get_storage_rule(name); x_t = rule(x_prev, ...)`), and eq:F's
-    own characterisation as "every admissible way of turning a prior
-    configuration and the three estimates into a new feasible one." All
-    three estimates are causal (computed only from data available before
-    the current epoch, sec:pf:storage) -- that is the caller's
-    responsibility to uphold, not something this Protocol can enforce
-    structurally. Implementations must return a StorageState satisfying
-    eq:feasiblestorage; StorageState's own validator already rejects an
-    infeasible result at construction time, so a rule that overfills a
-    vertex fails loudly rather than silently.
+    A plain callable, used as `rule = get_storage_rule(name); x_t = rule(x_prev, ...)`
+    (docs/storage_rule_integration.md). The result must satisfy the
+    capacity constraint (eq:feasiblestorage), which StorageState's own
+    validator enforces. Keeping the three estimates causal is the
+    caller's job.
 
-    `graph`, `reassignment_cap` and `congestion_weight` were added after
-    F_fix (which needs none of them): F_dem/F_cng need d_G (via `graph`)
-    to rank storage vertices by access distance, nu (via
-    `reassignment_cap`) for the shared relocation cap
-    (storage/relocation.py), and F_cng specifically needs beta (via
-    `congestion_weight`) to weigh eq:storagegreedy's congestion term
-    against access distance. Every other pure function in this repo
-    (resolution, assignment, the centralised controller) takes graph
-    explicitly as a per-call argument for the same reason: the graph is
-    static per episode but this Protocol has no construction step to
-    bind it at, unlike Controller's registry -- storage's own registry
-    stores the rule itself, not a factory
-    (docs/storage_rule_integration.md). `reassignment_cap` and
-    `congestion_weight` are None for rules that ignore them, matching
-    ExperimentConfig's own optionality for storage_mode="fixed"/"demand".
+    The signature has three arguments that F does not have in the storage
+    update. They are plumbing, not part of the model: `graph` gives d_G,
+    `reassignment_cap` is nu (sec:method:storage, storage/relocation.py),
+    and `congestion_weight` is beta in the congestion-aware score
+    (eq:storagegreedy). Rules that ignore one receive None.
     """
 
     def __call__(

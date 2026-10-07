@@ -7,7 +7,7 @@ processed in sigma order: each one's proposed successor is tentatively
 accepted unless it violates eq:vertexconflict or eq:swapconflict against
 the already-finalised successors of higher-priority agents, in which case
 it is overridden to `wait` (always legal, eq:actions) and its override
-flag for t is set. That flag feeds R_i(t)'s -r_blk term (eq:reward) and is
+flag for t is set. That flag feeds the -n_blocked term of the reward (eq:reward) and is
 what defines omega_j(t) (eq:waiting); see sec:impl:logging -- log it once,
 here, rather than re-deriving it at either call site.
 
