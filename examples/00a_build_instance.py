@@ -51,12 +51,14 @@ def main() -> None:
     print(f"  accepted: {report.accepted}")
     print(f"  connectivity.ok: {report.connectivity.ok}")
 
+    num_movable = sum(1 for v in graph.vertices.values() if v.role.movable)
     num_storage = sum(1 for v in graph.vertices.values() if v.role.storage)
     num_delivery = sum(1 for v in graph.vertices.values() if v.role.delivery)
     num_endpoint = sum(1 for v in graph.vertices.values() if v.role.endpoint)
 
     print("\nAccepted instance:")
-    print(f"  |V_mov| = {len(graph.vertices)}")
+    print(f"  |V|     = {len(graph.vertices)}")
+    print(f"  |V_mov| = {num_movable}")
     print(f"  |V_str| = {num_storage}")
     print(f"  |V_del| = {num_delivery}")
     print(f"  |V_ep|  = {num_endpoint}")
@@ -69,13 +71,17 @@ def main() -> None:
         f"endpoints checked: {well_formedness.num_endpoints}  "
         f"failure_rate: {well_formedness.failure_rate:.3f}"
     )
+    conclusion = (
+        "well-formed here"
+        if well_formedness.ok
+        else f"still not well-formed (failure_rate={well_formedness.failure_rate:.3f})"
+    )
     print(
-        "  Result: still not well-formed, at a similar failure rate to "
-        "00_build_instance.py's small default -- more cross-aisles relative "
-        "to storage vertices does NOT fix well-formedness by itself here. "
-        "Confirms 00_build_instance.py's own note (issue #5) empirically: "
-        "the single-file aisle-stack topology is the limiting factor, not "
-        "instance size or density within that topology. See issue #74."
+        f"  Result: {conclusion}. This is issue #74's empirical check of whether "
+        "density alone (more cross-aisles relative to storage vertices, within "
+        "this generator's single-file aisle-stack topology) gets closer to "
+        "well-formedness -- see 00_build_instance.py's own note (issue #5) for "
+        "the small-instance comparison."
     )
 
     instance = generate_instance(params)
