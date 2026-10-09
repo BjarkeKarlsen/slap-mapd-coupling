@@ -13,9 +13,9 @@ from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 def _graph():
     params = GeneratorParams(
-        num_aisles=3,
-        aisle_length=4,
-        num_cross_aisles=2,
+        max_num_aisles=6,
+        max_aisle_length=6,
+        max_num_cross_aisles=5,
         one_way_fraction=0.0,
         wait_cost=0.0,
         num_storage_vertices=6,

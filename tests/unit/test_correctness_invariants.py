@@ -50,9 +50,9 @@ def _graph(num_endpoints: int, seed: int) -> WarehouseGraph:
     # already-valid instance, matching the convention every other
     # environment-level test in this repo already uses.
     params = GeneratorParams(
-        num_aisles=3,
-        aisle_length=4,
-        num_cross_aisles=2,
+        max_num_aisles=6,
+        max_aisle_length=6,
+        max_num_cross_aisles=5,
         one_way_fraction=0.0,
         wait_cost=0.5,
         num_storage_vertices=6,

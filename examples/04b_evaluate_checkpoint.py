@@ -69,16 +69,16 @@ CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_c
 
 def _instance_params() -> GeneratorParams:
     return GeneratorParams(
-        num_aisles=12,
-        aisle_length=12,
+        num_aisles=7,
+        aisle_length=9,
         num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
+        wait_cost=5,
         num_storage_vertices=10,
         num_delivery_vertices=6,
         num_endpoints=FLEET_SIZE,
-        seed=1,
+        seed=42,
     )
 
 
@@ -120,7 +120,7 @@ def build_config(seed: int) -> ExperimentConfig:
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
-        arrival_rate=0.3,
+        arrival_rate=1.0,
         seed=seed,
         horizon=300,
         wait_cost=0.5,

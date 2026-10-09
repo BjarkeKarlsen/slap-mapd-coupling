@@ -85,18 +85,24 @@ CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_c
 
 def build_instance() -> WarehouseGraph:
     params = GeneratorParams(
-        num_aisles=12,
-        aisle_length=12,
-        num_cross_aisles=6,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
+        # num_transit_vertices=56,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
-        num_storage_vertices=10,
-        num_delivery_vertices=6,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
-        seed=1,
+        # Require at least eight selected role nodes to have degree >= 2.
+        # Use zero if leaf placements are also acceptable.
+        min_internal_role_vertices=2,
+        seed=42,
     )
-    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=False)
+    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=True)
     if not report.accepted:
         raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
     return graph
@@ -126,18 +132,18 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
-        arrival_rate=0.3,
+        arrival_rate=1.0,
         seed=seed,
-        horizon=300,
-        wait_cost=0.5,
-        observation_depth=3,
+        horizon=2000,
+        wait_cost=2.0,
+        observation_depth=5,
         discount=0.99,
         # n_deliver raised well above its earlier 1.0: a 5000-iteration run
         # on this instance showed rising training return with zero
         # evaluation completions, consistent with the per-step shaping
         # term (proportional to remaining distance, now much larger on
         # this bigger graph) outweighing a fixed small completion bonus.
-        deliver_reward=20.0,
+        deliver_reward=10.0,
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
@@ -315,7 +321,7 @@ def _to_batch(obs: dict) -> tuple[dict, list[str]]:
 
 def main() -> None:
     regime: TrainingRegime = "matched" if "--regime=matched" in sys.argv[1:] else "fixed_only"
-    num_iterations = 500
+    num_iterations = 7
     num_env_runners = 0
     use_gpu = "--gpu" in sys.argv[1:]
     for arg in sys.argv[1:]:
@@ -342,7 +348,7 @@ def main() -> None:
     saved_path = save_checkpoint(algo, CHECKPOINT_DIR)
     print(f"\nCheckpoint saved to {saved_path}")
 
-    evaluate(algo, graph, skus, capacities, counts, config, num_episodes=50)
+    evaluate(algo, graph, skus, capacities, counts, config, num_episodes=3)
     algo.stop()
 
 

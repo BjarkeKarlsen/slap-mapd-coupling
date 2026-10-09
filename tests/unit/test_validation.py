@@ -1,5 +1,7 @@
 """Unit tests for slap_mapd_coupling.instances.validation."""
 
+import pytest
+
 from slap_mapd_coupling.core.graph import Edge, Vertex, VertexRole, WarehouseGraph
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
 
@@ -35,7 +37,8 @@ def _line_graph(ids: list[int]) -> WarehouseGraph:
     for i in range(1, len(ids)):
         edges.append(Edge(source=ids[i - 1], target=ids[i], cost=1.0))
         edges.append(Edge(source=ids[i], target=ids[i - 1], cost=1.0))
-    return WarehouseGraph(vertices=vertices, edges=tuple(edges), wait_cost=0.0)
+    # Built without validation, so that graphs that are not well-formed can be checked.
+    return WarehouseGraph.model_construct(vertices=vertices, edges=tuple(edges), wait_cost=0.0)
 
 
 def test_well_formedness_fails_on_too_few_endpoints():
@@ -64,3 +67,11 @@ def test_well_formedness_passes_on_figure_a_analogue():
     graph = WarehouseGraph(vertices=vertices, edges=tuple(edges), wait_cost=0.0)
     report = check_well_formedness(graph, fleet_size=2)
     assert report.ok is True
+
+
+def test_a_graph_with_a_blocking_third_endpoint_cannot_be_constructed():
+    # WarehouseGraph itself rejects what check_well_formedness reports.
+    vertices = {i: Vertex(id=i, role=VertexRole(movable=True, endpoint=True)) for i in (1, 2, 3)}
+    edges = tuple(Edge(source=a, target=b, cost=1.0) for a, b in ((1, 2), (2, 1), (2, 3), (3, 2)))
+    with pytest.raises(ValueError, match="not endpoint-safe"):
+        WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)

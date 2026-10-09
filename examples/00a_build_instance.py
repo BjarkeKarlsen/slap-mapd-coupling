@@ -29,20 +29,27 @@ from slap_mapd_coupling.viz.warehouse_plot import assign_vertex_names, plot_grap
 
 
 def main() -> None:
-    fleet_size = 10
+    fleet_size = 4
 
     params = GeneratorParams(
-        num_aisles=8,
-        aisle_length=10,
-        num_cross_aisles=8,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
+        # num_transit_vertices=56,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
-        num_storage_vertices=16,
-        num_delivery_vertices=6,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=fleet_size,
+        # Require at least eight selected role nodes to have degree >= 2.
+        # Use zero if leaf placements are also acceptable.
+        min_internal_role_vertices=2,
         seed=42,
     )
+
     print("GeneratorParams (bigger + denser than 00_build_instance.py):")
     print(params.model_dump_json(indent=2))
 

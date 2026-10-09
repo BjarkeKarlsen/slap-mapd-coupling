@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 
@@ -66,6 +66,8 @@ class InstanceGenerationReport(BaseModel):
     accepted: bool
     connectivity: ConnectivityReport
     well_formedness: WellFormednessReport | None  # None if not requested
+    # Topologies sampled for this seed. attempts - 1 were discarded.
+    topology_attempts: PositiveInt = 1
 
 
 def _reachable_avoiding(

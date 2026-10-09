@@ -24,7 +24,8 @@ def _line_graph() -> WarehouseGraph:
     edges = tuple(
         Edge(source=a, target=b, cost=1.0) for i in range(3) for a, b in ((i, i + 1), (i + 1, i))
     )
-    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    # Built without validation. The test needs a graph that is not endpoint-safe.
+    return WarehouseGraph.model_construct(vertices=vertices, edges=edges, wait_cost=0.0)
 
 
 def _skus() -> dict[str, SkuType]:
@@ -107,7 +108,8 @@ def _branching_graph() -> WarehouseGraph:
         Edge(source=0, target=2, cost=1.0),
         Edge(source=2, target=0, cost=1.0),
     )
-    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    # Built without validation. The test needs a graph that is not endpoint-safe.
+    return WarehouseGraph.model_construct(vertices=vertices, edges=edges, wait_cost=0.0)
 
 
 def test_f_cng_prefers_the_less_congested_branch_when_distances_tie():
