@@ -46,6 +46,7 @@ class VertexRole(BaseModel):
     def is_task_endpoint(self) -> bool:
         return self.storage or self.delivery or self.endpoint
 
+
 class Vertex(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -131,14 +132,17 @@ class WarehouseGraph(BaseModel):
             pairs.add(pair)
             if edge.source not in self.vertices or edge.target not in self.vertices:
                 raise ValueError(f"Edge {pair} references an unknown vertex")
-            if not self.vertices[edge.source].role.movable or not self.vertices[edge.target].role.movable:
+            if (
+                not self.vertices[edge.source].role.movable
+                or not self.vertices[edge.target].role.movable
+            ):
                 raise ValueError(f"Edge {pair} touches a non-movable vertex")
         self._assert_endpoint_safe(pairs)
         return self
 
     def _assert_endpoint_safe(self, pairs: set[tuple[VertexId, VertexId]]) -> None:
         endpoints = {v for v, item in self.vertices.items() if item.role.is_task_endpoint}
-        adjacency = {v: [] for v in self.vertices}
+        adjacency: dict[VertexId, list[VertexId]] = {v: [] for v in self.vertices}
         for source, target in pairs:
             adjacency[source].append(target)
         for source in endpoints:
@@ -171,7 +175,7 @@ class WarehouseGraph(BaseModel):
         self._dist = self._all_pairs_shortest_paths()
 
     def _all_pairs_shortest_paths(self) -> dict[tuple[VertexId, VertexId], float]:
-        # Dijkstra's algorithm from each source in V_mov, O(|V_mov| * (|E| + |V_mov| log |V_mov|)) time.
+        # Dijkstra from each source in V_mov, O(|V_mov| * (|E| + |V_mov| log |V_mov|)) time.
         # D_G moves only over V_mov, so we can ignore any edges touching non-movable vertices.
         distances: dict[tuple[VertexId, VertexId], float] = {}
         movable = [v for v, item in self.vertices.items() if item.role.movable]

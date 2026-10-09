@@ -88,22 +88,18 @@ def build_instance() -> WarehouseGraph:
         max_num_aisles=7,
         max_aisle_length=7,
         max_num_cross_aisles=6,
-        #num_transit_vertices=56,
-
+        # num_transit_vertices=56,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
         random_edge_costs=True,
         edge_cost_range=(0.5, 2.0),
         wait_cost=5.0,
-
         num_storage_vertices=4,
         num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
-
         # Require at least eight selected role nodes to have degree >= 2.
         # Use zero if leaf placements are also acceptable.
         min_internal_role_vertices=2,
-
         seed=42,
     )
     graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=True)

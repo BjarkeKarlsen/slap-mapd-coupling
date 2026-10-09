@@ -59,7 +59,9 @@ from pathlib import Path
 import numpy as np
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
-from slap_mapd_coupling.controllers.decentralised import _sample_legal_slot  # noqa: F401 -- registers "centralised"
+from slap_mapd_coupling.controllers.decentralised import (
+    _sample_legal_slot,
+)  # noqa: F401 -- registers "centralised"
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph

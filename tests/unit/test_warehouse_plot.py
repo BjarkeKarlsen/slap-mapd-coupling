@@ -121,7 +121,8 @@ def _mixed_role_graph() -> WarehouseGraph:
         5: Vertex(id=5, role=VertexRole(movable=True, delivery=True)),
         6: Vertex(id=6, role=VertexRole(movable=True)),
     }
-    return WarehouseGraph(vertices=vertices, edges=(), wait_cost=0.0)
+    # Built without validation. The test needs a graph that is not endpoint-safe.
+    return WarehouseGraph.model_construct(vertices=vertices, edges=(), wait_cost=0.0)
 
 
 def test_assign_vertex_names_covers_storage_delivery_endpoint_and_plain():
