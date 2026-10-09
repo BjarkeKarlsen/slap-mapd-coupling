@@ -153,6 +153,9 @@ class GeneratedInstance(BaseModel):
     aisle_lengths: tuple[PositiveInt, ...]
     cross_aisle_rows: tuple[PositiveInt, ...]
     num_transit_vertices: PositiveInt
+    # Topologies sampled before this one was accepted. The discard rate over
+    # a batch of seeds follows from it (sec:impl:instances).
+    topology_attempts: PositiveInt = 1
 
     @property
     def num_aisles(self) -> int:
@@ -282,7 +285,8 @@ def generate_and_validate(
     require_well_formed: bool = True,
 ) -> tuple[WarehouseGraph, InstanceGenerationReport]:
     """Compatibility API for diagnostics and batch reports."""
-    graph = generate_warehouse_graph(params)
+    instance = generate_instance(params)
+    graph = instance.graph
     connectivity = check_connectivity(graph)
     well_formedness = check_well_formedness(graph, fleet_size) if require_well_formed else None
 
@@ -292,6 +296,7 @@ def generate_and_validate(
         accepted=accepted,
         connectivity=connectivity,
         well_formedness=well_formedness,
+        topology_attempts=instance.topology_attempts,
     )
     return graph, report
 
@@ -302,18 +307,56 @@ def generate_and_validate(
 
 
 def _build(params: GeneratorParams) -> GeneratedInstance:
-    """Generate one topology, then place roles without changing its shape."""
+    """Generate a well-formed instance, discarding topologies that admit none.
 
-    shape_rng = random.Random(f"{params.seed}:shape")
-    direction_rng = random.Random(f"{params.seed}:directions")
-    role_rng = random.Random(f"{params.seed}:roles")
-    cost_rng = random.Random(f"{params.seed}:costs")
+    Every instance must be well-formed, so a sampled topology that no role
+    assignment can make well-formed (for example a near-tree with too few
+    cycles) is discarded and the next one is sampled. Attempt ``k`` draws
+    from streams derived from ``(seed, k)``, so the same seed always gives
+    the same instance and distinct seeds never share a stream. Attempt 0
+    uses the streams a single-attempt build would, so a seed that succeeds
+    first time is unchanged. ``GeneratedInstance.topology_attempts`` records
+    how many topologies were sampled, which gives the discard rate.
+    """
+    last_reason = ""
+    for attempt in range(_MAX_TOPOLOGY_ATTEMPTS):
+        instance, last_reason = _try_build(params, attempt)
+        if instance is not None:
+            return instance
 
-    # The topology is sampled exactly once.
-    shape = _sample_shape(
-        params=params,
-        rng=shape_rng,
+    raise InstanceGenerationError(
+        f"Seed {params.seed}: none of {_MAX_TOPOLOGY_ATTEMPTS} sampled "
+        f"topologies admitted a well-formed role assignment (last: "
+        f"{last_reason}). The parameters are probably infeasible. Increase "
+        "max_num_cross_aisles, max_num_aisles or max_aisle_length, or reduce "
+        "the role count or min_internal_role_vertices."
     )
+
+
+def _attempt_rng(params: GeneratorParams, attempt: int, stream: str) -> random.Random:
+    """Random stream for one build attempt, independent per attempt and per use."""
+    if attempt == 0:
+        return random.Random(f"{params.seed}:{stream}")
+    return random.Random(f"{params.seed}:{attempt}:{stream}")
+
+
+def _try_build(
+    params: GeneratorParams,
+    attempt: int,
+) -> tuple[GeneratedInstance | None, str]:
+    """Sample one topology and place roles on it, or say why it was discarded."""
+    try:
+        shape = _sample_shape(
+            params=params,
+            rng=_attempt_rng(params, attempt, "shape"),
+        )
+    except InstanceGenerationError as error:
+        # A size drawn at random can have no irregular shape. A fixed size
+        # that has none is a parameter error and no resampling fixes it.
+        if params.num_transit_vertices is not None:
+            raise
+        return None, str(error)
+    description = f"aisle_lengths={shape.aisle_lengths}, cross_aisle_rows={shape.cross_aisle_rows}"
 
     topology = _create_plain_topology(shape)
 
@@ -322,13 +365,17 @@ def _build(params: GeneratorParams) -> GeneratedInstance:
         shape=shape,
     )
 
-    directed_edges = _orient_transit_segments(
-        segments=segments,
-        vertices=set(topology.vertices),
-        one_way_fraction=params.one_way_fraction,
-        rng=direction_rng,
-    )
+    try:
+        directed_edges = _orient_transit_segments(
+            segments=segments,
+            vertices=set(topology.vertices),
+            one_way_fraction=params.one_way_fraction,
+            rng=_attempt_rng(params, attempt, "directions"),
+        )
+    except InstanceGenerationError:
+        return None, f"{description}, one_way_fraction not realisable"
 
+    role_rng = _attempt_rng(params, attempt, "roles")
     role_vertices = _sample_well_formed_role_vertices(
         vertex_ids=set(topology.vertices),
         directed_edges=directed_edges,
@@ -336,16 +383,8 @@ def _build(params: GeneratorParams) -> GeneratedInstance:
         min_internal_vertices=params.min_internal_role_vertices,
         rng=role_rng,
     )
-
     if role_vertices is None:
-        raise InstanceGenerationError(
-            f"Seed {params.seed} produced the fixed topology "
-            f"aisle_lengths={shape.aisle_lengths}, "
-            f"cross_aisle_rows={shape.cross_aisle_rows}, but no "
-            "well-formed role assignment could be found. The topology "
-            "was not replaced. Use another seed, increase connectivity, "
-            "increase the number of vertices, or reduce the role count."
-        )
+        return None, f"{description}, no well-formed role assignment"
 
     topology.vertices = _assign_roles(
         plain_vertices=topology.vertices,
@@ -358,16 +397,18 @@ def _build(params: GeneratorParams) -> GeneratedInstance:
         vertices=topology.vertices,
         directed_edges=directed_edges,
         params=params,
-        cost_rng=cost_rng,
+        cost_rng=_attempt_rng(params, attempt, "costs"),
     )
 
-    return GeneratedInstance(
+    instance = GeneratedInstance(
         graph=graph,
         positions=topology.positions,
         aisle_lengths=shape.aisle_lengths,
         cross_aisle_rows=shape.cross_aisle_rows,
         num_transit_vertices=shape.num_vertices,
+        topology_attempts=attempt + 1,
     )
+    return instance, ""
 
 
 # ---------------------------------------------------------------------------
