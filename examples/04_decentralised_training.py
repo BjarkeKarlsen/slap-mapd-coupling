@@ -132,7 +132,12 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
         wait_cost=0.5,
         observation_depth=3,
         discount=0.99,
-        deliver_reward=1.0,
+        # n_deliver raised well above its earlier 1.0: a 5000-iteration run
+        # on this instance showed rising training return with zero
+        # evaluation completions, consistent with the per-step shaping
+        # term (proportional to remaining distance, now much larger on
+        # this bigger graph) outweighing a fixed small completion bonus.
+        deliver_reward=20.0,
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
@@ -310,7 +315,7 @@ def _to_batch(obs: dict) -> tuple[dict, list[str]]:
 
 def main() -> None:
     regime: TrainingRegime = "matched" if "--regime=matched" in sys.argv[1:] else "fixed_only"
-    num_iterations = 5000
+    num_iterations = 500
     num_env_runners = 0
     use_gpu = "--gpu" in sys.argv[1:]
     for arg in sys.argv[1:]:
@@ -337,7 +342,7 @@ def main() -> None:
     saved_path = save_checkpoint(algo, CHECKPOINT_DIR)
     print(f"\nCheckpoint saved to {saved_path}")
 
-    evaluate(algo, graph, skus, capacities, counts, config, num_episodes=3)
+    evaluate(algo, graph, skus, capacities, counts, config, num_episodes=50)
     algo.stop()
 
 

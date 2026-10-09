@@ -32,11 +32,18 @@ build_config exactly: the checkpoint's RLModule was built against that
 graph's action/observation spaces (d_max, encoded tensor shapes), and
 loading it against a different instance would silently produce
 nonsense actions rather than a clean error.
+
+Pass --render for a live pygame preview of one episode (requires the
+[viz] extra and a real display) instead of the default headless
+multi-episode summary -- same WarehouseRenderer and loop shape as
+examples/00b_pygame_preview.py, driven by the loaded checkpoint's
+sampled actions instead of a uniformly random step.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +54,12 @@ from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, is_feasible
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
+from slap_mapd_coupling.instances.generator import (
+    GeneratedInstance,
+    GeneratorParams,
+    generate_and_validate,
+    generate_instance,
+)
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
@@ -55,25 +67,37 @@ FLEET_SIZE = 3
 CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_checkpoint"
 
 
-def build_instance() -> WarehouseGraph:
-    # Must match 04_decentralised_training.py::build_instance exactly --
-    # see module docstring.
-    params = GeneratorParams(
-        num_aisles=3,
-        aisle_length=4,
-        num_cross_aisles=2,
+def _instance_params() -> GeneratorParams:
+    return GeneratorParams(
+        num_aisles=12,
+        aisle_length=12,
+        num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
         wait_cost=0.5,
-        num_storage_vertices=6,
-        num_delivery_vertices=2,
+        num_storage_vertices=10,
+        num_delivery_vertices=6,
         num_endpoints=FLEET_SIZE,
         seed=1,
     )
+
+
+def build_instance() -> WarehouseGraph:
+    params = _instance_params()
     graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=False)
     if not report.accepted:
         raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
     return graph
+
+
+def build_instance_with_positions() -> GeneratedInstance:
+    # generate_instance and generate_and_validate share the same private
+    # _build (see examples/01_baseline_fixed_centralised.py's own
+    # build_instance_with_positions), so calling both on the same params
+    # is safe -- this one is only needed when rendering, to place each
+    # vertex on screen (viz.pygame_renderer.WarehouseRenderer).
+    build_instance()  # re-validates; raises the same way if rejected
+    return generate_instance(_instance_params())
 
 
 def build_storage(
@@ -102,7 +126,7 @@ def build_config(seed: int) -> ExperimentConfig:
         wait_cost=0.5,
         observation_depth=3,
         discount=0.99,
-        deliver_reward=1.0,
+        deliver_reward=20.0,
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
@@ -154,6 +178,58 @@ def evaluate(module, graph, skus, capacities, counts, config, num_episodes: int)
         )
 
 
+def render_episode(
+    module,
+    graph: WarehouseGraph,
+    positions: dict[VertexId, tuple[float, float]],
+    skus: dict[SkuId, SkuType],
+    capacities: dict[VertexId, float],
+    counts: dict[SkuId, dict[VertexId, int]],
+    config: ExperimentConfig,
+    delay: float = 0.15,
+) -> None:
+    """Live pygame preview of one episode driven by the loaded
+    checkpoint's sampled actions -- same WarehouseRenderer and loop
+    shape as examples/00b_pygame_preview.py's _random_step loop, just
+    stepping the real decentralised policy instead of a uniformly
+    random action. Requires a real display and the [viz] extra; run
+    with --render. Close the window (or Ctrl+C) to stop early."""
+    from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
+
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    rng = np.random.default_rng(config.seed + 2000)
+    env = WarehouseMAPDMultiAgentEnv(
+        graph, skus, counts, capacities, config, enc_config, (config.seed,)
+    )
+    obs, _ = env.reset()
+    completed_before = sum(1 for t in env._env.tasks if t.finish_time is not None)
+
+    renderer = WarehouseRenderer(graph, positions)
+    try:
+        running = renderer.render(env._env.fleet, storage=env._env.storage)
+        time.sleep(delay)
+        for _ in range(config.horizon):
+            if not running:
+                break
+            batch, agent_ids = _to_batch(obs)
+            fwd_out = module.forward_inference(batch)
+            logits = fwd_out["action_dist_inputs"]
+            actions = {}
+            for i, aid in enumerate(agent_ids):
+                mask = obs[aid]["action_mask"]
+                actions[aid] = _sample_legal_slot(logits[i].detach().numpy(), mask, rng)
+            obs, rewards, terminated, truncated, infos = env.step(actions)
+            running = renderer.render(env._env.fleet, storage=env._env.storage)
+            time.sleep(delay)
+            if truncated["__all__"] or terminated["__all__"]:
+                break
+    finally:
+        renderer.close()
+
+    completed_after = sum(1 for t in env._env.tasks if t.finish_time is not None)
+    print(f"\nRendered episode finished: tasks completed = {completed_after - completed_before}")
+
+
 def _to_batch(obs: dict) -> tuple[dict, list[str]]:
     # Identical to 04_decentralised_training.py::_to_batch.
     import torch
@@ -185,6 +261,7 @@ def load_rl_module(checkpoint_dir: Path, policy_id: str = "shared_policy"):
 def main() -> None:
     checkpoint_dir = CHECKPOINT_DIR
     num_episodes = 3
+    render = "--render" in sys.argv[1:]
     for arg in sys.argv[1:]:
         if arg.startswith("--checkpoint="):
             checkpoint_dir = Path(arg.split("=", 1)[1])
@@ -197,14 +274,19 @@ def main() -> None:
             "or pass --checkpoint=<path> to an existing one."
         )
 
-    graph = build_instance()
-    skus, capacities, counts = build_storage(graph)
     config = build_config(seed=0)
 
     print(f"Loading checkpoint from {checkpoint_dir}")
     module = load_rl_module(checkpoint_dir)
 
-    evaluate(module, graph, skus, capacities, counts, config, num_episodes=num_episodes)
+    if render:
+        instance = build_instance_with_positions()
+        skus, capacities, counts = build_storage(instance.graph)
+        render_episode(module, instance.graph, instance.positions, skus, capacities, counts, config)
+    else:
+        graph = build_instance()
+        skus, capacities, counts = build_storage(graph)
+        evaluate(module, graph, skus, capacities, counts, config, num_episodes=num_episodes)
 
 
 if __name__ == "__main__":
