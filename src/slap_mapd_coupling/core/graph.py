@@ -1,7 +1,7 @@
 """Warehouse graph G=(V,E): vertex roles (V_mov/V_str/V_del/V_ep) and shortest-path distances."""
 
 from __future__ import annotations
-
+from collections import deque
 import heapq
 from typing import Literal
 
@@ -42,6 +42,9 @@ class VertexRole(BaseModel):
             )
         return self
 
+    @property
+    def is_task_endpoint(self) -> bool:
+        return self.storage or self.delivery or self.endpoint
 
 class Vertex(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -115,39 +118,77 @@ class WarehouseGraph(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _validate_topology(self) -> "WarehouseGraph":
+        for key, vertex in self.vertices.items():
+            if key != vertex.id:
+                raise ValueError(f"vertices key {key} does not match Vertex.id {vertex.id}")
+        pairs: set[tuple[VertexId, VertexId]] = set()
+        for edge in self.edges:
+            pair = (edge.source, edge.target)
+            if pair in pairs:
+                raise ValueError(f"Duplicate directed edge {pair}")
+            pairs.add(pair)
+            if edge.source not in self.vertices or edge.target not in self.vertices:
+                raise ValueError(f"Edge {pair} references an unknown vertex")
+            if not self.vertices[edge.source].role.movable or not self.vertices[edge.target].role.movable:
+                raise ValueError(f"Edge {pair} touches a non-movable vertex")
+        self._assert_endpoint_safe(pairs)
+        return self
+
+    def _assert_endpoint_safe(self, pairs: set[tuple[VertexId, VertexId]]) -> None:
+        endpoints = {v for v, item in self.vertices.items() if item.role.is_task_endpoint}
+        adjacency = {v: [] for v in self.vertices}
+        for source, target in pairs:
+            adjacency[source].append(target)
+        for source in endpoints:
+            visited = {source}
+            queue = deque([source])
+            while queue:
+                current = queue.popleft()
+                for target in adjacency[current]:
+                    if target in visited:
+                        continue
+                    visited.add(target)
+                    if target not in endpoints:
+                        queue.append(target)
+            missing = sorted(endpoints - visited)
+            if missing:
+                raise ValueError(
+                    f"Warehouse graph is not endpoint-safe: {source} cannot reach "
+                    f"{missing} without another task endpoint"
+                )
+
     def model_post_init(self, __context: object) -> None:
         out: dict[VertexId, list[Edge]] = {v: [] for v in self.vertices}
-        for e in self.edges:
-            out[e.source].append(e)
-        self._out = {v: tuple(es) for v, es in out.items()}
-
-        legal_actions: dict[VertexId, tuple[Action, ...]] = {}
-        for v, es in self._out.items():
-            moves = tuple(Action(kind="move", target=e.target) for e in es)
-            legal_actions[v] = (Action(kind="wait"),) + moves
-        self._legal_actions = legal_actions
-
+        for edge in self.edges:
+            out[edge.source].append(edge)
+        self._out = {v: tuple(sorted(items, key=lambda e: e.target)) for v, items in out.items()}
+        self._legal_actions = {
+            v: (Action(kind="wait"),) + tuple(Action(kind="move", target=e.target) for e in items)
+            for v, items in self._out.items()
+        }
         self._dist = self._all_pairs_shortest_paths()
 
     def _all_pairs_shortest_paths(self) -> dict[tuple[VertexId, VertexId], float]:
-        """Dijkstra per source over G[V_mov] (c(e) > 0 rules out negative weights)."""
-        movable = [v for v, vertex in self.vertices.items() if vertex.role.movable]
-        dist: dict[tuple[VertexId, VertexId], float] = {}
+        # Dijkstra's algorithm from each source in V_mov, O(|V_mov| * (|E| + |V_mov| log |V_mov|)) time.
+        # D_G moves only over V_mov, so we can ignore any edges touching non-movable vertices.
+        distances: dict[tuple[VertexId, VertexId], float] = {}
+        movable = [v for v, item in self.vertices.items() if item.role.movable]
         for source in movable:
-            best: dict[VertexId, float] = {source: 0.0}
-            frontier: list[tuple[float, VertexId]] = [(0.0, source)]
+            best = {source: 0.0}
+            frontier = [(0.0, source)]
             while frontier:
-                d, v = heapq.heappop(frontier)
-                if d > best.get(v, float("inf")):
+                distance, current = heapq.heappop(frontier)
+                if distance > best.get(current, float("inf")):
                     continue
-                for e in self._out.get(v, ()):
-                    nd = d + e.cost
-                    if nd < best.get(e.target, float("inf")):
-                        best[e.target] = nd
-                        heapq.heappush(frontier, (nd, e.target))
-            for target, d in best.items():
-                dist[(source, target)] = d
-        return dist
+                for edge in self._out.get(current, ()):
+                    candidate = distance + edge.cost
+                    if candidate < best.get(edge.target, float("inf")):
+                        best[edge.target] = candidate
+                        heapq.heappush(frontier, (candidate, edge.target))
+            distances.update({(source, target): value for target, value in best.items()})
+        return distances
 
     def out_neighbours(self, v: VertexId) -> tuple[VertexId, ...]:
         """N+(v): movable successors of v (eq:actions)."""

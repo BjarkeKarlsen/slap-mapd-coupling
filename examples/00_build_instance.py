@@ -12,20 +12,32 @@ from slap_mapd_coupling.viz.warehouse_plot import assign_vertex_names, plot_grap
 
 
 def main() -> None:
-    fleet_size = 6
+    fleet_size = 2
 
     params = GeneratorParams(
-        num_aisles=5,
-        aisle_length=4,
-        num_cross_aisles=3,
-        one_way_fraction=0.05,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
+        #num_transit_vertices=56,
+
+        one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
-        num_storage_vertices=8,
-        num_delivery_vertices=3,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=fleet_size,
-        seed=1,
+
+        # Require at least eight selected role nodes to have degree >= 2.
+        # Use zero if leaf placements are also acceptable.
+        min_internal_role_vertices=2,
+
+        seed=664,
     )
+
+    
     print("GeneratorParams:")
     print(params.model_dump_json(indent=2))
 
@@ -34,7 +46,7 @@ def main() -> None:
     # it (sec:pf:env), so it is NOT part of acceptance here -- see the
     # separate check below, which reports it without gating on it.
     accepted_params = params
-    graph, report = generate_and_validate(params, fleet_size=fleet_size, require_well_formed=False)
+    graph, report = generate_and_validate(params, fleet_size=fleet_size, require_well_formed=True)
     print("\nInstanceGenerationReport (seed=1, connectivity only):")
     print(f"  accepted: {report.accepted}")
     conn = report.connectivity
@@ -48,7 +60,7 @@ def main() -> None:
             attempts += 1
             retry_params = params.model_copy(update={"seed": seed})
             graph, retry_report = generate_and_validate(
-                retry_params, fleet_size=fleet_size, require_well_formed=False
+                retry_params, fleet_size=fleet_size, require_well_formed=True
             )
             if not retry_report.accepted:
                 rejections += 1

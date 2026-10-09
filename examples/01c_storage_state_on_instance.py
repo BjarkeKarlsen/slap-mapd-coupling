@@ -65,16 +65,26 @@ def build_storage_state(storage_vertices: list[VertexId]) -> StorageState:
 
 def main() -> None:
     params = GeneratorParams(
-        num_aisles=4,
-        aisle_length=4,
-        num_cross_aisles=3,
-        one_way_fraction=0.05,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
+        #num_transit_vertices=56,
+
+        one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
-        num_storage_vertices=6,
-        num_delivery_vertices=3,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=4,
-        seed=1,
+
+        # Require at least eight selected role nodes to have degree >= 2.
+        # Use zero if leaf placements are also acceptable.
+        min_internal_role_vertices=2,
+
+        seed=42,
     )
     instance = generate_instance(params)
     names = assign_vertex_names(instance.graph)
