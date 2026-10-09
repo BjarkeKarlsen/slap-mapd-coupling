@@ -94,11 +94,7 @@ class GeneratorParams(BaseModel):
     @property
     def num_role_vertices(self) -> int:
         """Number of vertices treated as endpoints by well-formedness."""
-        return (
-            self.num_storage_vertices
-            + self.num_delivery_vertices
-            + self.num_endpoints
-        )
+        return self.num_storage_vertices + self.num_delivery_vertices + self.num_endpoints
 
     @property
     def max_num_vertices(self) -> int:
@@ -109,14 +105,10 @@ class GeneratorParams(BaseModel):
         """Reject impossible settings instead of silently clamping them."""
         minimum_cost, maximum_cost = self.edge_cost_range
         if minimum_cost > maximum_cost:
-            raise ValueError(
-                "edge_cost_range must be ordered as (minimum, maximum)."
-            )
+            raise ValueError("edge_cost_range must be ordered as (minimum, maximum).")
 
         if self.max_num_cross_aisles > self.max_aisle_length:
-            raise ValueError(
-                "max_num_cross_aisles cannot exceed max_aisle_length."
-            )
+            raise ValueError("max_num_cross_aisles cannot exceed max_aisle_length.")
 
         # This implementation deliberately leaves at least one plain vertex
         # from which endpoint-avoiding paths can be formed.
@@ -169,23 +161,14 @@ class GeneratedInstance(BaseModel):
     @model_validator(mode="after")
     def _metadata_must_match_graph(self) -> "GeneratedInstance":
         if set(self.positions) != set(self.graph.vertices):
-            raise ValueError(
-                "Position keys must exactly match graph vertex IDs."
-            )
+            raise ValueError("Position keys must exactly match graph vertex IDs.")
 
         if len(set(self.positions.values())) != len(self.positions):
-            raise ValueError(
-                "Every graph vertex must have a unique display position."
-            )
+            raise ValueError("Every graph vertex must have a unique display position.")
 
-        expected_vertices = sum(
-            aisle_length + 1
-            for aisle_length in self.aisle_lengths
-        )
+        expected_vertices = sum(aisle_length + 1 for aisle_length in self.aisle_lengths)
         if expected_vertices != self.num_transit_vertices:
-            raise ValueError(
-                "aisle_lengths do not match num_transit_vertices."
-            )
+            raise ValueError("aisle_lengths do not match num_transit_vertices.")
 
         if len(self.graph.vertices) != self.num_transit_vertices:
             raise ValueError(
@@ -301,15 +284,9 @@ def generate_and_validate(
     """Compatibility API for diagnostics and batch reports."""
     graph = generate_warehouse_graph(params)
     connectivity = check_connectivity(graph)
-    well_formedness = (
-        check_well_formedness(graph, fleet_size)
-        if require_well_formed
-        else None
-    )
+    well_formedness = check_well_formedness(graph, fleet_size) if require_well_formed else None
 
-    accepted = connectivity.ok and (
-        well_formedness is None or well_formedness.ok
-    )
+    accepted = connectivity.ok and (well_formedness is None or well_formedness.ok)
     report = InstanceGenerationReport(
         seed=params.seed,
         accepted=accepted,
@@ -322,6 +299,7 @@ def generate_and_validate(
 # ---------------------------------------------------------------------------
 # Main construction pipeline
 # ---------------------------------------------------------------------------
+
 
 def _build(params: GeneratorParams) -> GeneratedInstance:
     """Generate one topology, then place roles without changing its shape."""
@@ -511,24 +489,11 @@ def _sample_aisle_lengths(
 
     # These assertions describe generator invariants rather than user input.
     if sum(length + 1 for length in result) != target_vertices:
-        raise AssertionError(
-            "Aisle sampler changed the requested total vertex count."
-        )
-    if any(
-        length < 1 or length > max_aisle_length
-        for length in result
-    ):
-        raise AssertionError(
-            "Aisle sampler produced a length outside its configured bounds."
-        )
-    if (
-        require_irregular_shape
-        and len(result) > 1
-        and len(set(result)) == 1
-    ):
-        raise AssertionError(
-            "Aisle sampler failed to construct an irregular shape."
-        )
+        raise AssertionError("Aisle sampler changed the requested total vertex count.")
+    if any(length < 1 or length > max_aisle_length for length in result):
+        raise AssertionError("Aisle sampler produced a length outside its configured bounds.")
+    if require_irregular_shape and len(result) > 1 and len(set(result)) == 1:
+        raise AssertionError("Aisle sampler failed to construct an irregular shape.")
 
     return result
 
@@ -606,20 +571,10 @@ def _make_lengths_unequal(
 ) -> list[int]:
     """Preserve the sum while changing an all-equal vector to unequal."""
     if len(lengths) < 2:
-        raise InstanceGenerationError(
-            "At least two aisles are required for unequal aisle lengths."
-        )
+        raise InstanceGenerationError("At least two aisles are required for unequal aisle lengths.")
 
-    donor_candidates = [
-        index
-        for index, length in enumerate(lengths)
-        if length > 1
-    ]
-    receiver_candidates = [
-        index
-        for index, length in enumerate(lengths)
-        if length < maximum
-    ]
+    donor_candidates = [index for index, length in enumerate(lengths) if length > 1]
+    receiver_candidates = [index for index, length in enumerate(lengths) if length < maximum]
 
     valid_pairs = [
         (donor, receiver)
@@ -638,6 +593,7 @@ def _make_lengths_unequal(
     result[donor] -= 1
     result[receiver] += 1
     return result
+
 
 def _sample_cross_aisle_rows(
     *,
@@ -666,9 +622,7 @@ def _sample_cross_aisle_rows(
     # still contain only one horizontal segment; invalid sparse topologies are
     # naturally rejected later by constrained role placement.
     num_cross_aisles = rng.randint(1, maximum)
-    return tuple(
-        sorted(rng.sample(feasible_rows, num_cross_aisles))
-    )
+    return tuple(sorted(rng.sample(feasible_rows, num_cross_aisles)))
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:
@@ -700,9 +654,7 @@ def _create_transit_segments(
 
     for column, aisle_length in enumerate(shape.aisle_lengths):
         for row in range(aisle_length):
-            segments.append(
-                (grid[(row, column)], grid[(row + 1, column)])
-            )
+            segments.append((grid[(row, column)], grid[(row + 1, column)]))
 
     for row in (0,) + shape.cross_aisle_rows:
         for column in range(shape.num_aisles - 1):
@@ -710,9 +662,7 @@ def _create_transit_segments(
             right_cell = (row, column + 1)
 
             if left_cell in grid and right_cell in grid:
-                segments.append(
-                    (grid[left_cell], grid[right_cell])
-                )
+                segments.append((grid[left_cell], grid[right_cell]))
 
     return segments
 
@@ -731,9 +681,7 @@ def _orient_transit_segments(
 ) -> set[DirectedEdge]:
     """Make selected segments one-way while preserving strong connectivity."""
     directed_edges = {
-        edge
-        for first, second in segments
-        for edge in ((first, second), (second, first))
+        edge for first, second in segments for edge in ((first, second), (second, first))
     }
 
     requested_one_way = round(len(segments) * one_way_fraction)
@@ -797,19 +745,13 @@ def _sample_well_formed_role_vertices(
     outgoing, incoming = _adjacency_tables(vertex_ids, directed_edges)
 
     undirected_neighbours = {
-        vertex: set(outgoing[vertex]) | set(incoming[vertex])
-        for vertex in vertex_ids
+        vertex: set(outgoing[vertex]) | set(incoming[vertex]) for vertex in vertex_ids
     }
 
     for _attempt in range(_MAX_ROLE_ATTEMPTS):
-        selected = set(
-            rng.sample(ordered_vertices, num_role_vertices)
-        )
+        selected = set(rng.sample(ordered_vertices, num_role_vertices))
 
-        internal_count = sum(
-            len(undirected_neighbours[vertex]) >= 2
-            for vertex in selected
-        )
+        internal_count = sum(len(undirected_neighbours[vertex]) >= 2 for vertex in selected)
         if internal_count < min_internal_vertices:
             continue
 
@@ -859,14 +801,8 @@ def _roles_share_plain_backbone(
         return False
 
     for endpoint in role_vertices:
-        can_leave_for_plain = any(
-            neighbour in plain_vertices
-            for neighbour in outgoing[endpoint]
-        )
-        can_arrive_from_plain = any(
-            neighbour in plain_vertices
-            for neighbour in incoming[endpoint]
-        )
+        can_leave_for_plain = any(neighbour in plain_vertices for neighbour in outgoing[endpoint])
+        can_arrive_from_plain = any(neighbour in plain_vertices for neighbour in incoming[endpoint])
 
         if not can_leave_for_plain or not can_arrive_from_plain:
             return False
@@ -964,8 +900,8 @@ def _adjacency_tables(
     vertices: set[VertexId],
     directed_edges: set[DirectedEdge],
 ) -> tuple[Adjacency, Adjacency]:
-    outgoing = {vertex: [] for vertex in vertices}
-    incoming = {vertex: [] for vertex in vertices}
+    outgoing: Adjacency = {vertex: [] for vertex in vertices}
+    incoming: Adjacency = {vertex: [] for vertex in vertices}
 
     for source, target in directed_edges:
         outgoing[source].append(target)
