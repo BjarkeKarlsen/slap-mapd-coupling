@@ -33,3 +33,15 @@ class Controller(Protocol):
         using whichever state Table tab:information permits this
         architecture to see."""
         ...
+
+    def reset(self, episode_seed: int) -> None:
+        """Primes this controller for a new episode drawn with
+        episode_seed, the same seed the priority order and the order
+        generator derive their own streams from (4.Implementation.tex:
+        450-452, sec:impl:instances). A no-op for a controller with no
+        randomness of its own (centralised.py, the future section_based.py);
+        DecentralisedController derives its action-sampling stream from
+        this seed rather than a constructor-time one, so bit-for-bit
+        replay under a fixed seed holds regardless of how many episodes
+        the same controller instance has already run."""
+        ...
