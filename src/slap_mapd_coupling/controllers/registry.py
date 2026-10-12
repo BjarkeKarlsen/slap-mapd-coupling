@@ -32,9 +32,7 @@ def register_controller(
 
 def get_controller(name: str) -> Controller:
     if name == "centralised":
-        raise NotImplementedError(
-            "The learned centralised arm is not implemented yet (#86)."
-        )
+        raise NotImplementedError("The learned centralised arm is not implemented yet (#86).")
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown controller {name!r}; registered: {registered_controllers()}. "

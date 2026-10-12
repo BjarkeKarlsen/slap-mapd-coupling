@@ -91,6 +91,13 @@ class ExperimentConfig(BaseModel):
             raise ValueError("Set exactly one of controller and planner.")
         return self
 
+    @property
+    def router_name(self) -> ControllerArchitecture | PlannerName:
+        """The controller or planner this run uses, whichever one is set."""
+        name = self.controller if self.controller is not None else self.planner
+        assert name is not None  # the validator above guarantees one of the two
+        return name
+
     @model_validator(mode="after")
     def _controller_parameters(self) -> "ExperimentConfig":
         if self.controller == "decentralised":

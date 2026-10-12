@@ -1,4 +1,4 @@
-"""Prioritised planning with space-time A* (the reference planner, outside the three controllers)."""
+"""Prioritised space-time A* planning, the reference planner outside the three controllers."""
 
 from __future__ import annotations
 
