@@ -1,19 +1,23 @@
-"""Shared greedy task assignment pi_assign (eq:assignmentrule, sec:method:controllers).
+"""Shared greedy task assignment pi_assign (the assignment rule, sec:method:controllers).
 
-Identical across all three controller architectures: at every timestep,
-free agents (eq:free) are matched to tasks in Q_t (released, not yet
-assigned, eq:lifecycle) ordered by t_j^released ascending, each task greedily
-matched to the free agent minimising d_G(l_i(t), s_j), removing that agent
-from the free pool before the next task is considered. A greedy heuristic
-for bipartite matching, not the Hungarian algorithm's optimum
-(sec:method:controllers) -- swapping in an optimal matcher is a one-line
-ablation, not a change to Pi, which is exactly why this is its own
-function rather than inlined into any one controller.
+Identical across all three controller architectures. At every timestep the
+free agents (the free-agent condition) are matched to the tasks in Q_t
+(released and not yet assigned, see the task stages) ordered by
+t_j^released ascending. Each task is matched greedily to the free agent
+minimising d_G(l_i(t), s_j), and that agent leaves the free pool before the
+next task is considered. This is a greedy heuristic for bipartite matching,
+not the Hungarian algorithm's optimum, so swapping in an optimal matcher
+changes this function and nothing in Pi.
+
+Ties keep the rule a function of the state. Tasks released in the same
+timestep are taken by task index, and free agents at equal distance are
+ranked by the episode's priority order of the conflict resolution operator
+(sec:method:resolution), earlier agent first.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import WarehouseGraph
@@ -25,21 +29,21 @@ def assign_tasks(
     fleet: FleetState,
     tasks: Iterable[Task],
     t: int,
+    priority: Sequence[AgentId],
 ) -> dict[TaskId, AgentId]:
     """pi_assign: task_id -> agent_id for every task matched this timestep.
 
-    Only tasks in Q_t (task.status(t) == "waiting") are candidates; tasks
+    Only tasks in Q_t (task.status(t) == "waiting") are candidates. Tasks
     already assigned or completed are untouched (Task enforces "no
-    re-tasking," core/tasks.py). The caller applies the returned mapping
-    via Task.assign(agent_id, t) -- this function only decides who goes
-    where, it does not mutate any Task.
+    re-tasking", core/tasks.py). The caller applies the returned mapping via
+    Task.assign(agent_id, t), and this function does not mutate any Task.
 
-    eq:assignmentrule's argmin is set-valued on ties, which would make
-    replay non-deterministic (AGENTS.md's replay invariant); this isn't
-    pinned down upstream, so ties are broken here, explicitly: by
-    task_id ascending among tasks sharing t_j^released, and by agent_id ascending
-    among free agents sharing d_G(l_i(t), s_j).
+    Tasks released in the same timestep are taken by task index. Free agents
+    at equal distance to a pickup are ranked by priority, the episode's
+    priority order of the conflict resolution operator, so the earlier agent
+    wins. Every free agent must appear in priority, as in resolve_conflicts.
     """
+    rank = {agent_id: k for k, agent_id in enumerate(priority)}
     waiting = sorted(
         (task for task in tasks if task.status(t) == "waiting"),
         key=lambda task: (task.release_time, task.task_id),
@@ -55,7 +59,7 @@ def assign_tasks(
             free,
             key=lambda agent_id: (
                 graph.distance(locations[agent_id], task.pickup_vertex),
-                agent_id,
+                rank[agent_id],
             ),
         )
         assignments[task.task_id] = best_agent

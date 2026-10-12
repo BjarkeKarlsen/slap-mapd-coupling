@@ -243,7 +243,7 @@ class WarehouseMAPDEnv:
 
         # Stage 2: shared greedy task assignment (pi_assign).
         assign_start = time.perf_counter()
-        assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t)
+        assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
         self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
         if assignments:
             self.tasks = [

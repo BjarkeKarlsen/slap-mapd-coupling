@@ -5,6 +5,8 @@ from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
 
+_ORDER = (1, 2)
+
 
 def _line_graph(n: int) -> WarehouseGraph:
     """A path 0-1-2-...-(n-1), bidirectional, unit edge costs."""
@@ -38,7 +40,7 @@ def test_nearest_free_agent_is_assigned():
     fleet = _fleet({1: 0, 2: 5})
     task = _task(task_id=1, release_time=0, pickup=4)
 
-    result = assign_tasks(graph, fleet, [task], t=0)
+    result = assign_tasks(graph, fleet, [task], t=0, priority=_ORDER)
     assert result == {1: 2}  # agent 2 (at 5) is closer to pickup 4 than agent 1 (at 0)
 
 
@@ -50,7 +52,7 @@ def test_matched_agent_removed_from_free_pool_for_next_task():
         _task(task_id=2, release_time=1, pickup=1),
     ]
 
-    result = assign_tasks(graph, fleet, tasks, t=1)
+    result = assign_tasks(graph, fleet, tasks, t=1, priority=_ORDER)
     assert result == {1: 1, 2: 2}
 
 
@@ -62,7 +64,7 @@ def test_tasks_processed_oldest_release_time_first():
         _task(task_id=20, release_time=0, pickup=9),
     ]
 
-    result = assign_tasks(graph, fleet, tasks, t=2)
+    result = assign_tasks(graph, fleet, tasks, t=2, priority=_ORDER)
     assert result == {20: 1}  # older task (release_time=0) wins the only free agent
 
 
@@ -72,7 +74,7 @@ def test_no_free_agents_leaves_tasks_unassigned():
     active = _task(task_id=1, release_time=0, pickup=1).assign(agent_id=1, t=0)
     waiting = _task(task_id=2, release_time=0, pickup=2)
 
-    result = assign_tasks(graph, fleet, [active, waiting], t=0)
+    result = assign_tasks(graph, fleet, [active, waiting], t=0, priority=_ORDER)
     assert result == {}  # agent 1 is busy with task 1, no one free for task 2
 
 
@@ -87,14 +89,23 @@ def test_already_assigned_and_completed_tasks_are_not_reassigned():
     )
     waiting = _task(task_id=2, release_time=1, pickup=2)
 
-    result = assign_tasks(graph, fleet, [completed, waiting], t=1)
+    result = assign_tasks(graph, fleet, [completed, waiting], t=1, priority=_ORDER)
     assert result == {2: 1}
 
 
-def test_tie_broken_by_agent_id_ascending():
+def test_tie_broken_by_earlier_agent_in_priority_order():
     graph = _line_graph(5)
-    fleet = _fleet({2: 0, 1: 0})  # both agents equidistant from the pickup
+    fleet = _fleet({1: 0, 2: 0})  # both agents equidistant from the pickup
     task = _task(task_id=1, release_time=0, pickup=1)
 
-    result = assign_tasks(graph, fleet, [task], t=0)
-    assert result == {1: 1}
+    assert assign_tasks(graph, fleet, [task], t=0, priority=(1, 2)) == {1: 1}
+    assert assign_tasks(graph, fleet, [task], t=0, priority=(2, 1)) == {1: 2}
+
+
+def test_priority_order_does_not_override_distance():
+    graph = _line_graph(10)
+    fleet = _fleet({1: 0, 2: 5})
+    task = _task(task_id=1, release_time=0, pickup=4)
+
+    result = assign_tasks(graph, fleet, [task], t=0, priority=(1, 2))
+    assert result == {1: 2}  # agent 2 is nearer, so it wins although agent 1 ranks first
