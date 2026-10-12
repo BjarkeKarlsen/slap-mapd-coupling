@@ -20,7 +20,7 @@ def show_experiment_configs() -> None:
     # by sweep (tab:rlparams), tracked in #85.
     illustrative_observation_depth = 2
     common = dict(
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=10,
@@ -95,7 +95,7 @@ def show_run_metrics_shape() -> None:
     print("\n=== RunMetrics: the shape of one results-table row ===")
     row = RunMetrics(
         storage_mode="fixed",
-        controller="centralised",
+        controller="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=10,

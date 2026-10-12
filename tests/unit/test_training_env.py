@@ -71,7 +71,7 @@ def test_rejects_non_decentralised_controller():
     # unlike the reward fields below, which stay None for a non-learned one.
     with pytest.raises(ValueError, match="decentralised"):
         _env(
-            controller="centralised",
+            controller="section",
             discount=None,
             deliver_reward=None,
             override_penalty=None,

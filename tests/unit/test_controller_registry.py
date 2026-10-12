@@ -47,3 +47,9 @@ def test_double_registration_raises():
     register_controller("test-dummy-double")(_DummyController)
     with pytest.raises(ValueError):
         register_controller("test-dummy-double")(_DummyController)
+
+
+def test_centralised_is_reserved_for_the_learned_arm():
+    with pytest.raises(NotImplementedError, match="#86") as excinfo:
+        get_controller("centralised")
+    assert "reference" not in str(excinfo.value)

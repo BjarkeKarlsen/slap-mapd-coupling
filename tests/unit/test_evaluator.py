@@ -1,6 +1,5 @@
 """Unit tests for slap_mapd_coupling.evaluation.evaluator."""
 
-import slap_mapd_coupling.controllers.centralised  # noqa: F401 -- registers "centralised"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -29,7 +28,7 @@ def _graph(num_endpoints: int = 4, seed: int = 0) -> WarehouseGraph:
 def _config(**overrides) -> ExperimentConfig:
     defaults = dict(
         storage_mode="fixed",
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=4,
@@ -55,7 +54,7 @@ def test_run_episode_identifying_fields_match_config():
     config = _config()
     metrics = _run(_graph(), config)
     assert metrics.storage_mode == config.storage_mode
-    assert metrics.controller == config.controller
+    assert metrics.controller == config.planner
     assert metrics.num_agents == config.num_agents
     assert metrics.arrival_rate == config.arrival_rate
     assert metrics.seed == config.seed
@@ -108,11 +107,11 @@ def test_keeps_up_compares_throughput_with_the_threshold():
     assert metrics.keeps_up == (metrics.throughput >= 0.5 * config.arrival_rate)
 
 
-def test_crowding_is_a_fraction_for_the_centralised_controller():
+def test_crowding_is_a_fraction_for_the_reference_planner():
     """d_obs is required for every controller (sec:pf:env,
-    sec:pf:controllers), so a centralised (planner) run reports a
+    sec:pf:controllers), so a reference planner run reports a
     numeric mean_crowding too, not just the decentralised arm."""
-    metrics = _run(_graph(), _config(horizon=20, controller="centralised"))
+    metrics = _run(_graph(), _config(horizon=20))
     assert metrics.mean_crowding is not None
     assert 0.0 <= metrics.mean_crowding <= 1.0
 

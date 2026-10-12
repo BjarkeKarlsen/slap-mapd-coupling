@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `planners/` package (`Planner` protocol, `PrioritisedAStarPlanner`). The A*
+  planner moved out of `controllers/centralised.py`. It is a reference
+  planner outside the three controllers, chosen with the new
+  `ExperimentConfig.planner` field (exactly one of `controller` and
+  `planner` is set) and run through `PlannerRouter` and `get_router`.
+  `"centralised"` stays a controller name for the learned arm and raises
+  until #86 lands (#98).
 - `LICENSE` (MIT).
 - `docs/storage_rule_integration.md` and `docs/controller_integration.md`,
   documenting the two extensibility points (mirrors the existing

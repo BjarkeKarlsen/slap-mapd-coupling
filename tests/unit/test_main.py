@@ -26,21 +26,30 @@ def test_simulate_rejects_checkpoint_for_non_decentralised(tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.write_text("x")
     result = CliRunner().invoke(
-        cli, ["simulate", "--controller", "centralised", "--checkpoint", str(checkpoint)]
+        cli, ["simulate", "--planner", "prioritised_astar", "--checkpoint", str(checkpoint)]
     )
     assert result.exit_code != 0
     assert "--checkpoint only applies" in result.output
 
 
 def test_simulate_rejects_communication_for_non_decentralised():
-    result = CliRunner().invoke(cli, ["simulate", "--controller", "centralised", "--communication"])
+    result = CliRunner().invoke(cli, ["simulate", "--planner", "prioritised_astar", "--communication"])
     assert result.exit_code != 0
     assert "--communication only applies" in result.output
 
 
 def test_simulate_reaches_not_implemented_once_validation_passes():
-    result = CliRunner().invoke(cli, ["simulate", "--controller", "centralised"])
+    result = CliRunner().invoke(cli, ["simulate", "--planner", "prioritised_astar"])
     assert isinstance(result.exception, NotImplementedError)
+
+
+def test_simulate_requires_exactly_one_of_controller_and_planner():
+    neither = CliRunner().invoke(cli, ["simulate"])
+    both = CliRunner().invoke(
+        cli, ["simulate", "--controller", "section", "--planner", "prioritised_astar"]
+    )
+    assert neither.exit_code != 0 and "exactly one" in neither.output
+    assert both.exit_code != 0 and "exactly one" in both.output
 
 
 def test_train_reaches_not_implemented_once_validation_passes():

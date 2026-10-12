@@ -6,6 +6,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, NonNegativeInt, model_validator
 
 from slap_mapd_coupling.core.experiment_config import ControllerArchitecture, StorageMode
+from slap_mapd_coupling.planners.registry import PlannerName
 
 # The three parts of service time are integer counts averaged over the
 # same tasks, so they add up to mean_service_time up to float rounding only.
@@ -28,7 +29,8 @@ class RunMetrics(BaseModel):
 
     # --- identifying the run, so a CSV row is self-describing ---
     storage_mode: StorageMode
-    controller: ControllerArchitecture
+    # Whichever of ExperimentConfig.controller and .planner is set.
+    controller: ControllerArchitecture | PlannerName
     congestion_sensitive: bool
     communication: bool
     num_agents: NonNegativeInt

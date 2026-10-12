@@ -3,8 +3,9 @@
 Simulation and RL controllers for the coupled storage-assignment (SLAP) /
 multi-agent pickup-and-delivery (MAPD) system studied in the thesis: a
 warehouse graph where a periodic storage rule `F` and a routing controller
-`pi` (centralised, section-based, or decentralised-learned) act on the same
-graph and the same observed traffic state.
+`pi` (centralised, section-based, or decentralised) act on the same
+graph and the same observed traffic state. A non-learned reference planner
+(prioritised A*) runs alongside them, outside the three controllers.
 
 **Thesis document (read-only, live compiled PDF via Overleaf):**
 https://overleaf.trit.au.dk/read/gjzcpzsxbnpr#67ffc6
@@ -28,6 +29,8 @@ for real bugs found and fixed along the way.
 - `resolution/` — the conflict-resolution operator
 - `controllers/` — shared task assignment + swappable routing
   (centralised / section-based / decentralised) behind a registry
+- `planners/` — non-learned reference planners (prioritised A*), outside
+  the three controllers
 - `environment/` — the RLlib `MultiAgentEnv`, spaces/masking, reward
 - `models/` — the GNN encoder and policy/value heads
 - `training/` — PPO wiring, seeding, training regimes
@@ -59,7 +62,7 @@ decentralised controller):
 
 ```bash
 # Run one (storage rule, controller, load) configuration
-slap-mapd simulate --storage-rule fixed --controller centralised --num-agents 10
+slap-mapd simulate --storage-rule fixed --planner prioritised_astar --num-agents 10
 
 # Train the decentralised controller only - the other two need no training
 slap-mapd train --storage-rule fixed --num-iterations 500

@@ -4,7 +4,7 @@ environment/multi_agent_env.py's own module docstring names this
 module's job explicitly: "Wiring [WarehouseMAPDEnv] to RLlib's actual
 MultiAgentEnv base class is M5 scope (training/)" -- kept out of
 environment/ so importing ray (a heavy RL dependency) is never required
-for a baseline (centralised/section-based) run.
+for a baseline (reference planner or section-based) run.
 
 This adapter does NOT reimplement the six-stage loop: it constructs one
 WarehouseMAPDEnv per episode and drives it entirely through the

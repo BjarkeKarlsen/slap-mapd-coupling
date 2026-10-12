@@ -1,4 +1,4 @@
-"""Run the baseline: fixed storage (F_fix) + the centralised controller, no learning.
+"""Run the reference planner with fixed storage (F_fix), no learning.
 
 The M2 milestone's worked example. Demonstrates the milestone's own "done
 when" criteria directly -- one episode runs end-to-end through the real
@@ -6,8 +6,8 @@ six-stage loop (environment/multi_agent_env.py) with zero collisions,
 feasible storage, correct task-set disjointness, and bit-for-bit
 deterministic replay -- not just a RunMetrics row at the end.
 
-Run with `--render` for a live pygame preview of the real centralised
-controller routing agents (requires the `[viz]` extra and a real
+Run with `--render` for a live pygame preview of the real reference
+planner routing agents (requires the `[viz]` extra and a real
 display) -- unlike examples/00b_pygame_preview.py, which could only show
 a uniformly-random stepper because no controller existed yet when it was
 written.
@@ -15,7 +15,6 @@ written.
 
 import sys
 
-import slap_mapd_coupling.controllers.centralised  # noqa: F401 -- registers "centralised"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.agents import FleetState, is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -93,18 +92,15 @@ def build_storage(
 def build_config(seed: int) -> ExperimentConfig:
     return ExperimentConfig(
         storage_mode="fixed",
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
         # A naive prioritised planner (no deadlock detection/backtracking
         # -- sec:method:controllers describes nothing beyond "each agent
         # plans around already-reserved cells") can still occasionally
-        # livelock two agents facing off over a single narrow vertex,
-        # even after #55's fix for delivery/endpoint dead-ends. Kept
-        # modest here so the demo actually shows completed tasks rather
-        # than a saturated queue; see #55 and the class docstring in
-        # controllers/centralised.py for the full story.
+        # livelock two agents facing off over a single narrow vertex
+        # (#55). Kept modest here so the demo shows completed tasks.
         arrival_rate=ILLUSTRATIVE_ARRIVAL_RATE,
         seed=seed,
         horizon=ILLUSTRATIVE_HORIZON,
@@ -185,7 +181,7 @@ def render_live(
     *,
     delay_seconds: float = 0.15,
 ) -> None:
-    """Watch the real centralised controller route agents live via
+    """Watch the reference planner route agents live via
     viz.pygame_renderer.WarehouseRenderer. Local import: pygame is an
     optional [viz] extra, not a hard dependency of running this example
     for its metrics/invariants (the default `main()` path)."""
