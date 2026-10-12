@@ -2,6 +2,8 @@
 
 import numpy as np
 import pytest
+import torch
+from ray.rllib.core.columns import Columns
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 
 import slap_mapd_coupling.controllers.decentralised as decentralised
@@ -13,11 +15,12 @@ from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, is_feasible
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
-from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_for_slot, action_space, max_out_degree
 from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
+    encode_all_observations,
     encoded_observation_space,
 )
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
@@ -64,16 +67,22 @@ def _decentralised_config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig):
+def _build_module(
+    graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig, communication: bool = False
+):
     d_max = max_out_degree(graph)
-    base_space = encoded_observation_space(enc_config, d_max)
+    base_space = encoded_observation_space(enc_config, d_max, communication)
     obs_space = masked_observation_space(base_space, d_max + 1)
     spec = RLModuleSpec(
         module_class=GNNActionMaskingRLModule,
         observation_space=obs_space,
         action_space=action_space(graph),
         model_config={
-            "gnn_encoder_config": {"num_rounds": 1, "hidden_width": 8},
+            "gnn_encoder_config": {
+                "num_rounds": 1,
+                "hidden_width": 8,
+                "communication": communication,
+            },
             "policy_value_head_config": {"hidden_width": 8, "num_actions": d_max + 1},
         },
     )
@@ -210,11 +219,14 @@ def _small_instance():
     return graph, skus, capacities, counts
 
 
-def test_full_episode_via_registry_resolved_controller_respects_correctness_invariants():
+@pytest.mark.parametrize("communication", [False, True])
+def test_full_episode_via_the_registry_respects_the_correctness_invariants(communication):
     graph, skus, capacities, counts = _small_instance()
-    config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
+    config = _decentralised_config(
+        num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
+    )
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    module = _build_module(graph, enc_config)
+    module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     controller.reset(episode_seed=config.seed)
     decentralised.set_active_decentralised_controller(controller)
@@ -229,26 +241,32 @@ def test_full_episode_via_registry_resolved_controller_respects_correctness_inva
         before = env.fleet
 
 
-def test_run_episode_resets_the_controller_so_route_never_raises():
+@pytest.mark.parametrize("communication", [False, True])
+def test_run_episode_resets_the_controller_so_route_never_raises(communication):
     """evaluation.evaluator.run_episode must reset the registered
     controller to config.seed itself: this test never calls
     controller.reset(), so it would hit DecentralisedController.route()'s
     own "called before reset()" RuntimeError if run_episode didn't."""
     graph, skus, capacities, counts = _small_instance()
-    config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
+    config = _decentralised_config(
+        num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
+    )
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    module = _build_module(graph, enc_config)
+    module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     decentralised.set_active_decentralised_controller(controller)
 
     run_episode(graph, skus, counts, capacities, config)  # would raise if not reset internally
 
 
-def test_run_episode_is_deterministic_for_the_same_config_seed():
+@pytest.mark.parametrize("communication", [False, True])
+def test_run_episode_is_deterministic_for_the_same_config_seed(communication):
     graph, skus, capacities, counts = _small_instance()
-    config = _decentralised_config(num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5)
+    config = _decentralised_config(
+        num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
+    )
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    module = _build_module(graph, enc_config)
+    module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     decentralised.set_active_decentralised_controller(controller)
 
@@ -257,3 +275,131 @@ def test_run_episode_is_deterministic_for_the_same_config_seed():
     # mean_decision_runtime_seconds is wall-clock timing, not part of replay.
     exclude = {"mean_decision_runtime_seconds"}
     assert first.model_dump(exclude=exclude) == second.model_dump(exclude=exclude)
+
+
+class _CountingModule:
+    """Wraps an RLModule and records the batch size of every forward_inference call."""
+
+    def __init__(self, module):
+        self._module = module
+        self.batch_sizes: list[int] = []
+
+    def forward_inference(self, batch):
+        self.batch_sizes.append(batch[Columns.OBS]["action_mask"].shape[0])
+        return self._module.forward_inference(batch)
+
+
+def _per_agent_actions(module, graph, fleet, config, enc_config, t, episode_seed):
+    """The actions of one timestep from one module call per agent, drawn from the
+    same (episode_seed + offset, t, agent_id) streams as DecentralisedController."""
+    encoded = encode_all_observations(
+        graph, fleet, [], t, config, enc_config, max_out_degree(graph)
+    )
+    offset = decentralised._ACTION_SAMPLING_SEED_OFFSET
+    actions = {}
+    for agent_id, item in encoded.items():
+        out = module.forward_inference(decentralised._batch([item]))
+        logits = out[Columns.ACTION_DIST_INPUTS][0].detach().numpy()
+        rng = np.random.default_rng((episode_seed + offset, t, agent_id))
+        slot = decentralised._sample_legal_slot(logits, item.action_mask, rng)
+        actions[agent_id] = action_for_slot(graph, fleet.locations()[agent_id], slot)
+    return actions
+
+
+def _three_robots():
+    # robots 1 and 2 hear each other, robot 3 hears robot 2, within d_obs = 3
+    return FleetState(
+        agents={
+            1: AgentState(agent_id=1, location=0),
+            2: AgentState(agent_id=2, location=1),
+            3: AgentState(agent_id=3, location=4),
+        }
+    )
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_route_makes_one_module_call_for_all_robots(communication):
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    counting = _CountingModule(_build_module(graph, enc_config, communication))
+    config = _decentralised_config(num_agents=3, communication=communication)
+    controller = decentralised.DecentralisedController(counting, enc_config, config)
+    controller.reset(episode_seed=3)
+
+    for t in range(4):
+        controller.route(graph, _three_robots(), [], t=t)
+
+    assert counting.batch_sizes == [3, 3, 3, 3]
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_route_actions_equal_those_from_one_module_call_per_agent(communication):
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    module = _build_module(graph, enc_config, communication)
+    config = _decentralised_config(num_agents=3, communication=communication)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    controller.reset(episode_seed=3)
+    fleet = _three_robots()
+
+    for t in range(10):
+        expected = _per_agent_actions(module, graph, fleet, config, enc_config, t, 3)
+        assert controller.route(graph, fleet, [], t=t) == expected
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_batched_logits_equal_the_per_agent_logits(communication):
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    module = _build_module(graph, enc_config, communication)
+    config = _decentralised_config(num_agents=3, communication=communication)
+    encoded = encode_all_observations(
+        graph, _three_robots(), [], 0, config, enc_config, max_out_degree(graph)
+    )
+
+    with torch.no_grad():
+        together = module.forward_inference(decentralised._batch(list(encoded.values())))
+        for row, item in enumerate(encoded.values()):
+            alone = module.forward_inference(decentralised._batch([item]))
+            assert torch.allclose(
+                together[Columns.ACTION_DIST_INPUTS][row],
+                alone[Columns.ACTION_DIST_INPUTS][0],
+                atol=1e-5,
+            )
+
+
+def test_constructing_a_controller_with_communication_and_no_room_for_a_sender_is_rejected():
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=0)
+    config = _decentralised_config(num_agents=2, communication=True)
+
+    with pytest.raises(ValueError, match="max_messages"):
+        decentralised.DecentralisedController(object(), enc_config, config)
+
+
+def test_the_realised_trace_replays_bit_for_bit_with_communication_on():
+    """Correctness check 4 for the learned controller. Every robot's action comes
+    from its own (episode_seed, t, agent_id) stream, so the trace of one seed is
+    the same on every run."""
+    graph, skus, capacities, counts = _small_instance()
+    config = _decentralised_config(
+        num_agents=3, horizon=20, arrival_rate=0.3, wait_cost=0.5, communication=True
+    )
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    module = _build_module(graph, enc_config, communication=True)
+    controller = decentralised.DecentralisedController(module, enc_config, config)
+    decentralised.set_active_decentralised_controller(controller)
+
+    def run() -> list:
+        controller.reset(config.seed)
+        env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+        env.reset()
+        trace = []
+        for _ in range(config.horizon):
+            env.step()
+            trace.append(tuple(sorted(env.fleet.locations().items())))
+        return trace
+
+    first = run()
+    assert first == run()
+    assert len(set(first)) > 1  # the robots actually move

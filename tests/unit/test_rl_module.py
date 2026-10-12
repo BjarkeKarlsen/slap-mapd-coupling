@@ -1,18 +1,19 @@
 """Unit tests for slap_mapd_coupling.models.rl_module."""
 
+import pytest
 import torch
 from ray.rllib.core.columns import Columns
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
-from slap_mapd_coupling.environment.spaces import action_space, legality_mask, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
 from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
-from slap_mapd_coupling.environment.observation import build_observation
+from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
-    encode_observation,
+    encode_all_observations,
     encoded_observation_space,
 )
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
@@ -28,34 +29,42 @@ def _line_graph(n: int) -> WarehouseGraph:
     return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
 
 
-def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig):
+def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig, communication):
     d_max = max_out_degree(graph)
-    base_space = encoded_observation_space(enc_config, d_max)
+    base_space = encoded_observation_space(enc_config, d_max, communication)
     obs_space = masked_observation_space(base_space, d_max + 1)
     spec = RLModuleSpec(
         module_class=GNNActionMaskingRLModule,
         observation_space=obs_space,
         action_space=action_space(graph),
         model_config={
-            "gnn_encoder_config": {"num_rounds": 2, "hidden_width": 8},
+            "gnn_encoder_config": {
+                "num_rounds": 2,
+                "hidden_width": 8,
+                "communication": communication,
+            },
             "policy_value_head_config": {"hidden_width": 8, "num_actions": d_max + 1},
         },
     )
     return spec.build(), d_max
 
 
-def test_gnn_action_masking_module_builds_and_masks_illegal_logits():
+@pytest.mark.parametrize("communication", [False, True])
+def test_gnn_action_masking_module_builds_and_masks_illegal_logits(communication):
     graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
-    module, d_max = _build_module(graph, enc_config)
+    module, d_max = _build_module(graph, enc_config, communication)
 
-    fleet = FleetState(agents={1: AgentState(agent_id=1, location=0)})  # endpoint, degree 1
+    # vertex 0 is an endpoint of the line graph with degree 1
+    fleet = FleetState(
+        agents={1: AgentState(agent_id=1, location=0), 2: AgentState(agent_id=2, location=1)}
+    )
     config = ExperimentConfig(
         storage_mode="fixed",
         controller="decentralised",
         congestion_sensitive=False,
-        communication=False,
-        num_agents=1,
+        communication=communication,
+        num_agents=2,
         arrival_rate=1.0,
         seed=0,
         horizon=10,
@@ -66,10 +75,9 @@ def test_gnn_action_masking_module_builds_and_masks_illegal_logits():
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
-    observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
-    mask = legality_mask(graph, vertex=0, d_max=d_max)
-    encoded = encode_observation(graph, 0, observation, mask, enc_config)
-    rllib_obs = encoded.as_rllib_dict()
+    encoded = encode_all_observations(graph, fleet, [], 0, config, enc_config, d_max)
+    rllib_obs = encoded[1].as_rllib_dict()
+    assert (set(SENDER_KEYS) <= set(rllib_obs["observations"])) == communication
 
     def to_batch(value):
         if isinstance(value, dict):

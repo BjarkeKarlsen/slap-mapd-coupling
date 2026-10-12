@@ -1,22 +1,29 @@
 """Multi-round message-passing encoder over the field of view G_i^(d_obs)(t)
-(sec:method:model, the message-passing step and the readout).
+(sec:method:model, the message-passing step, the message and the readout).
 
 phi_r is a per-neighbour MLP over concat(h_v, h_w), averaged over the
 neighbour set, and psi_r is an MLP over concat(h_v, m_v). The thesis
-leaves their internal form open. AGG for incoming messages is the mean.
-L and the hidden width (tab:modelparams) live in GNNEncoderConfig, local
-to this module like GeneratorParams in instances/generator.py.
+leaves their internal form open. L and the hidden width (tab:modelparams)
+live in GNNEncoderConfig, local to this module like GeneratorParams in
+instances/generator.py.
 
-`forward` is the unbatched oracle, one Observation in, one z_i out.
-`forward_padded` is the batched path over the padded tensors of
-models/local_subgraph_encoding.py. It passes messages over an undirected
-edge list, so its cost grows with the number of edges (issue #86). Tests
-check that both paths agree.
+The message of a sender is its own final-layer embedding at its own vertex,
+computed from its own field of view with the shared weights and sent as it
+is. The receiver takes the mean over its senders. With communication on, a
+receiver's input therefore carries the padded views of its senders, and the
+embeddings are recomputed with the current weights, so the receiver's loss
+reaches the sender's embedding through the shared encoder (issue #91).
+`forward_padded` embeds the receivers and their senders in one pass.
+
+`forward` is the unbatched oracle, one Observation (and its senders'
+Observations) in, one z_i out. `forward_padded` is the batched path over the
+padded tensors of models/local_subgraph_encoding.py. Tests check that both
+paths agree.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
@@ -26,16 +33,29 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.environment.observation import Observation, VertexFeatures
 
 NODE_FEATURE_DIM = 6  # storage, delivery, endpoint, transit, eta, occupied (the vertex features)
-MESSAGE_FEATURE_DIM = 2  # hand-built (distance, eta) messages, until #91's learned message
+
+# The keys of the senders' padded views in an encoded observation. They are
+# present exactly when GNNEncoderConfig.communication is on.
+SENDER_KEYS = (
+    "sender_node_features",
+    "sender_node_mask",
+    "sender_edge_index",
+    "sender_edge_mask",
+    "sender_own_index",
+    "sender_mask",
+)
 
 
 class GNNEncoderConfig(BaseModel):
-    """L and hidden width (tab:modelparams)."""
+    """L, the hidden width (tab:modelparams) and the communication switch."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    num_rounds: NonNegativeInt  # L, the message-passing step -- L=0 is a valid, real ablation
+    num_rounds: NonNegativeInt  # L, the message-passing step. L=0 is a valid, real ablation
     hidden_width: PositiveInt  # phi_r/psi_r layer width, tab:modelparams
+    # No default. It must equal ExperimentConfig.communication, which
+    # training/config.py::build_ppo_config checks.
+    communication: bool
 
 
 def _node_feature_vector(features: VertexFeatures) -> list[float]:
@@ -65,7 +85,9 @@ def _local_undirected_neighbours(
 
 class GNNEncoder(nn.Module):
     """z_i (the readout), via L rounds of the message-passing step over
-    the field of view. L = 0 gives the raw node features. Weights are
+    the field of view. L = 0 skips the rounds, so the embedding is the raw
+    vertex features. Communication has its own switch, so at L = 0 with
+    communication on a message is the sender's raw features. Weights are
     shared across all agents (sec:pf:controllers).
     """
 
@@ -86,15 +108,22 @@ class GNNEncoder(nn.Module):
         self._node_embedding_dim = prev_dim
 
     @property
-    def output_dim(self) -> int:
-        """z_i's dimension: the final node embedding width (NODE_FEATURE_DIM
-        itself when L=0, hidden_width otherwise) plus the message
-        aggregate and the congestion scalar."""
-        return self._node_embedding_dim + MESSAGE_FEATURE_DIM + 1
+    def embedding_dim(self) -> int:
+        """The width of h^(L) at a vertex, and so of a message. It is
+        NODE_FEATURE_DIM when L=0 and hidden_width otherwise."""
+        return self._node_embedding_dim
 
-    def forward(
-        self, graph: WarehouseGraph, agent_location: VertexId, observation: Observation
+    @property
+    def output_dim(self) -> int:
+        """z_i's dimension: the own embedding, the mean of the messages
+        (only with communication on) and the congestion scalar."""
+        message_dim = self._node_embedding_dim if self.config.communication else 0
+        return self._node_embedding_dim + message_dim + 1
+
+    def _embed_view(
+        self, graph: WarehouseGraph, location: VertexId, observation: Observation
     ) -> torch.Tensor:
+        """h^(L) at `location`, from the field of view in `observation`."""
         visible = observation.visible_vertices
         index = {v: i for i, v in enumerate(visible)}
         h = torch.tensor(
@@ -115,23 +144,81 @@ class GNNEncoder(nn.Module):
                     messages[i] = phi_r(pairwise).mean(dim=0)
                 h = psi_r(torch.cat([h, messages], dim=-1))
 
-        own_embedding = h[index[agent_location]]
+        return h[index[location]]
 
-        if observation.messages:
-            message_tensor = torch.tensor(
-                [[m.distance, m.eta] for m in observation.messages], dtype=torch.float32
-            )
-            aggregated = message_tensor.mean(dim=0)
-        else:
-            aggregated = torch.zeros(MESSAGE_FEATURE_DIM)
+    def forward(
+        self,
+        graph: WarehouseGraph,
+        agent_location: VertexId,
+        observation: Observation,
+        senders: Sequence[tuple[VertexId, Observation]] = (),
+    ) -> torch.Tensor:
+        """z_i for one agent. `senders` holds the vertex and the own
+        Observation of each agent it hears, and must stay empty with
+        communication off."""
+        if senders and not self.config.communication:
+            raise ValueError("senders were given but the encoder has communication off")
+        parts = [self._embed_view(graph, agent_location, observation)]
+
+        if self.config.communication:
+            if senders:
+                messages = torch.stack(
+                    [self._embed_view(graph, location, view) for location, view in senders]
+                )
+                parts.append(messages.mean(dim=0))
+            else:
+                parts.append(torch.zeros(self._node_embedding_dim))
 
         # the readout always includes delta_i(t); Observation.congestion is
         # always a concrete scalar (environment/observation.py), whether or
         # not the policy is meant to condition on it (the "sensitivity"
         # toggle governs training/interpretation, not tensor shape).
-        congestion_tensor = torch.tensor([observation.congestion], dtype=torch.float32)
+        parts.append(torch.tensor([observation.congestion], dtype=torch.float32))
+        return torch.cat(parts, dim=-1)
 
-        return torch.cat([own_embedding, aggregated, congestion_tensor], dim=-1)
+    def _embed_padded(
+        self,
+        node_features: torch.Tensor,
+        node_mask: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_mask: torch.Tensor,
+        own_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """h^(L) at the own vertex of each of R padded views, [R, D]. Each
+        edge gives both directions, phi_r runs once per directed edge, and
+        the results are summed per receiving vertex and divided by its masked
+        degree (minimum 1). This equals the mean over each vertex's neighbour
+        set in `_embed_view`. Padded edges and vertices carry zero weight."""
+        h = node_features
+        num_views, max_nodes, _ = h.shape
+
+        if self.config.num_rounds > 0:
+            offsets = (torch.arange(num_views, device=h.device) * max_nodes).unsqueeze(1)
+            first = edge_index[..., 0]  # [R,E]
+            second = edge_index[..., 1]  # [R,E]
+            edge_weight = edge_mask * node_mask.gather(1, first) * node_mask.gather(1, second)
+            weight = edge_weight.reshape(-1)
+            receivers = torch.cat([(first + offsets).reshape(-1), (second + offsets).reshape(-1)])
+            sources = torch.cat([(second + offsets).reshape(-1), (first + offsets).reshape(-1)])
+            weight = torch.cat([weight, weight])  # [2*R*E], one entry per directed edge
+            degree = torch.zeros(num_views * max_nodes, dtype=h.dtype, device=h.device)
+            degree.index_add_(0, receivers, weight)
+            degree = degree.clamp(min=1.0).unsqueeze(-1)  # [R*N,1]
+
+            for phi_r, psi_r in zip(self.phi, self.psi):
+                flat = h.reshape(num_views * max_nodes, -1)
+                edge_messages = phi_r(torch.cat([flat[receivers], flat[sources]], dim=-1))
+                summed = torch.zeros(
+                    num_views * max_nodes,
+                    edge_messages.shape[-1],
+                    dtype=edge_messages.dtype,
+                    device=h.device,
+                )
+                summed.index_add_(0, receivers, edge_messages * weight.unsqueeze(-1))
+                m = (summed / degree).reshape(num_views, max_nodes, -1)
+                h = psi_r(torch.cat([h, m], dim=-1))
+
+        return h[torch.arange(num_views, device=h.device), own_index]
 
     def forward_padded(
         self,
@@ -140,9 +227,13 @@ class GNNEncoder(nn.Module):
         edge_index: torch.Tensor,
         edge_mask: torch.Tensor,
         own_index: torch.Tensor,
-        message_features: torch.Tensor,
-        message_mask: torch.Tensor,
         congestion: torch.Tensor,
+        sender_node_features: Optional[torch.Tensor] = None,
+        sender_node_mask: Optional[torch.Tensor] = None,
+        sender_edge_index: Optional[torch.Tensor] = None,
+        sender_edge_mask: Optional[torch.Tensor] = None,
+        sender_own_index: Optional[torch.Tensor] = None,
+        sender_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Batched z_i (the readout) over padded tensors. B is the batch
         size, N max_local_nodes, E the edge list length, M max_messages.
@@ -150,50 +241,56 @@ class GNNEncoder(nn.Module):
         node_features [B,N,NODE_FEATURE_DIM], node_mask [B,N], edge_index
         [B,E,2] (int64, one row per undirected pair, padded rows point at
         vertex 0), edge_mask [B,E] (1 valid / 0 pad), own_index [B] (int64),
-        message_features [B,M,MESSAGE_FEATURE_DIM], message_mask [B,M],
         congestion [B].
 
-        The batch is flattened to B*N vertices. Each edge gives both
-        directions, phi_r runs once per directed edge, and the results are
-        summed per receiving vertex and divided by its masked degree
-        (minimum 1). This equals `forward`'s mean over each vertex's
-        neighbour set. Padded edges and vertices carry zero weight.
+        The six sender tensors are the senders' own views in the same layout
+        with an extra axis M ([B,M,N,NODE_FEATURE_DIM], [B,M,N], [B,M,E,2],
+        [B,M,E], [B,M], and sender_mask [B,M] with 1 for a real sender). They
+        are given exactly when communication is on. The B receivers and the
+        B*M senders share one embedding pass. A message is the sender's
+        embedding as it is, and the receiver takes the mean over its masked
+        senders, zero when there are none.
         """
-        h = node_features
-        batch_size, max_nodes, _ = h.shape
+        sender_tensors = (
+            sender_node_features,
+            sender_node_mask,
+            sender_edge_index,
+            sender_edge_mask,
+            sender_own_index,
+            sender_mask,
+        )
+        batch_size = node_features.shape[0]
 
-        if self.config.num_rounds > 0:
-            offsets = (torch.arange(batch_size, device=h.device) * max_nodes).unsqueeze(1)
-            first = edge_index[..., 0]  # [B,E]
-            second = edge_index[..., 1]  # [B,E]
-            edge_weight = edge_mask * node_mask.gather(1, first) * node_mask.gather(1, second)
-            weight = edge_weight.reshape(-1)
-            receivers = torch.cat([(first + offsets).reshape(-1), (second + offsets).reshape(-1)])
-            senders = torch.cat([(second + offsets).reshape(-1), (first + offsets).reshape(-1)])
-            weight = torch.cat([weight, weight])  # [2*B*E], one entry per directed edge
-            degree = torch.zeros(batch_size * max_nodes, dtype=h.dtype, device=h.device)
-            degree.index_add_(0, receivers, weight)
-            degree = degree.clamp(min=1.0).unsqueeze(-1)  # [B*N,1]
+        if not self.config.communication:
+            if any(tensor is not None for tensor in sender_tensors):
+                raise ValueError("sender tensors were given but the encoder has communication off")
+            own_embedding = self._embed_padded(
+                node_features, node_mask, edge_index, edge_mask, own_index
+            )
+            return torch.cat([own_embedding, congestion.unsqueeze(-1)], dim=-1)
 
-            for phi_r, psi_r in zip(self.phi, self.psi):
-                flat = h.reshape(batch_size * max_nodes, -1)
-                edge_messages = phi_r(torch.cat([flat[receivers], flat[senders]], dim=-1))
-                summed = torch.zeros(
-                    batch_size * max_nodes,
-                    edge_messages.shape[-1],
-                    dtype=edge_messages.dtype,
-                    device=h.device,
-                )
-                summed.index_add_(0, receivers, edge_messages * weight.unsqueeze(-1))
-                m = (summed / degree).reshape(batch_size, max_nodes, -1)
-                h = psi_r(torch.cat([h, m], dim=-1))
+        if (
+            sender_node_features is None
+            or sender_node_mask is None
+            or sender_edge_index is None
+            or sender_edge_mask is None
+            or sender_own_index is None
+            or sender_mask is None
+        ):
+            raise ValueError(f"communication is on, so all of {SENDER_KEYS} are required")
 
-        own_embedding = h[torch.arange(batch_size), own_index]  # [B, node_dim]
+        num_senders = sender_mask.shape[1]
+        embeddings = self._embed_padded(
+            torch.cat([node_features, sender_node_features.flatten(0, 1)]),
+            torch.cat([node_mask, sender_node_mask.flatten(0, 1)]),
+            torch.cat([edge_index, sender_edge_index.flatten(0, 1)]),
+            torch.cat([edge_mask, sender_edge_mask.flatten(0, 1)]),
+            torch.cat([own_index, sender_own_index.flatten()]),
+        )
+        own_embedding = embeddings[:batch_size]
+        messages = embeddings[batch_size:].reshape(batch_size, num_senders, -1)  # [B,M,D]
 
-        message_weight = message_mask.unsqueeze(-1)  # [B,M,1]
-        message_count = message_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
-        aggregated = (message_features * message_weight).sum(
-            dim=1
-        ) / message_count  # [B,MESSAGE_FEATURE_DIM]
+        count = sender_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
+        mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
 
-        return torch.cat([own_embedding, aggregated, congestion.unsqueeze(-1)], dim=-1)
+        return torch.cat([own_embedding, mean_message, congestion.unsqueeze(-1)], dim=-1)

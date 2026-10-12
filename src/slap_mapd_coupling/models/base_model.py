@@ -1,5 +1,6 @@
-"""pi_theta(.|o_i(t)) and V_theta(o_i(t)) (sec:method:model): fully
-connected layers with ReLU activations over z_i (the readout).
+"""The policy and value heads (sec:method:model): fully connected layers
+with ReLU activations over z_i (the readout), which is built from o_i(t)
+and, with communication on, the messages received.
 
 The heads return raw logits and a scalar value. The action mask is applied
 afterwards by ActionMaskingTorchRLModule (environment/action_masking.py),
@@ -62,19 +63,19 @@ class GNNPolicyValueModel(nn.Module):
         edge_index: torch.Tensor,
         edge_mask: torch.Tensor,
         own_index: torch.Tensor,
-        message_features: torch.Tensor,
-        message_mask: torch.Tensor,
         congestion: torch.Tensor,
+        **sender_blocks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`sender_blocks` are the GNNEncoder.forward_padded sender tensors,
+        given exactly when communication is on."""
         z = self.encoder.forward_padded(
             node_features,
             node_mask,
             edge_index,
             edge_mask,
             own_index,
-            message_features,
-            message_mask,
             congestion,
+            **sender_blocks,
         )
         logits, value = self.head(z)
         return logits, value

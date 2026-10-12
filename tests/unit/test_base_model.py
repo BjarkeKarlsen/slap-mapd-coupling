@@ -1,5 +1,6 @@
 """Unit tests for slap_mapd_coupling.models.base_model."""
 
+import pytest
 import torch
 
 from slap_mapd_coupling.models.base_model import (
@@ -7,12 +8,7 @@ from slap_mapd_coupling.models.base_model import (
     PolicyValueHead,
     PolicyValueHeadConfig,
 )
-from slap_mapd_coupling.models.gnn_encoder import (
-    GNNEncoder,
-    GNNEncoderConfig,
-    MESSAGE_FEATURE_DIM,
-    NODE_FEATURE_DIM,
-)
+from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, GNNEncoder, GNNEncoderConfig
 
 
 def test_policy_value_head_output_shapes():
@@ -33,62 +29,53 @@ def test_policy_value_head_gradients_flow():
     assert all(p.grad is not None and torch.any(p.grad != 0) for p in head.parameters())
 
 
-def test_gnn_policy_value_model_end_to_end_shapes():
-    encoder = GNNEncoder(GNNEncoderConfig(num_rounds=2, hidden_width=8))
+@pytest.mark.parametrize("communication", [False, True])
+def test_gnn_policy_value_model_end_to_end_shapes(communication):
+    config = GNNEncoderConfig(num_rounds=2, hidden_width=8, communication=communication)
     model = GNNPolicyValueModel(
-        encoder, head_config=PolicyValueHeadConfig(hidden_width=8, num_actions=4)
+        GNNEncoder(config), head_config=PolicyValueHeadConfig(hidden_width=8, num_actions=4)
     )
 
     batch_size, n, m = 2, 5, 3
-    node_features = torch.randn(batch_size, n, NODE_FEATURE_DIM)
-    node_mask = torch.ones(batch_size, n)
-    edge_index = torch.zeros(batch_size, 2, 2, dtype=torch.long)
-    edge_mask = torch.zeros(batch_size, 2)
-    own_index = torch.zeros(batch_size, dtype=torch.long)
-    message_features = torch.randn(batch_size, m, MESSAGE_FEATURE_DIM)
-    message_mask = torch.ones(batch_size, m)
-    congestion = torch.zeros(batch_size)
+    senders = {}
+    if communication:
+        senders = dict(
+            sender_node_features=torch.randn(batch_size, m, n, NODE_FEATURE_DIM),
+            sender_node_mask=torch.ones(batch_size, m, n),
+            sender_edge_index=torch.zeros(batch_size, m, 2, 2, dtype=torch.long),
+            sender_edge_mask=torch.zeros(batch_size, m, 2),
+            sender_own_index=torch.zeros(batch_size, m, dtype=torch.long),
+            sender_mask=torch.ones(batch_size, m),
+        )
 
     logits, value = model(
-        node_features,
-        node_mask,
-        edge_index,
-        edge_mask,
-        own_index,
-        message_features,
-        message_mask,
-        congestion,
+        torch.randn(batch_size, n, NODE_FEATURE_DIM),
+        torch.ones(batch_size, n),
+        torch.zeros(batch_size, 2, 2, dtype=torch.long),
+        torch.zeros(batch_size, 2),
+        torch.zeros(batch_size, dtype=torch.long),
+        torch.zeros(batch_size),
+        **senders,
     )
     assert logits.shape == (batch_size, 4)
     assert value.shape == (batch_size,)
 
 
 def test_gnn_policy_value_model_logits_are_unmasked_raw_values():
-    """#28's heads must NOT apply eq:mask themselves -- #26's
+    """#28's heads must NOT apply the action mask themselves -- #26's
     ActionMaskingTorchRLModule owns that -- so nothing here should ever
     force a logit to -inf on its own."""
-    encoder = GNNEncoder(GNNEncoderConfig(num_rounds=0, hidden_width=8))
+    config = GNNEncoderConfig(num_rounds=0, hidden_width=8, communication=False)
     model = GNNPolicyValueModel(
-        encoder, head_config=PolicyValueHeadConfig(hidden_width=8, num_actions=3)
+        GNNEncoder(config), head_config=PolicyValueHeadConfig(hidden_width=8, num_actions=3)
     )
 
-    node_features = torch.randn(1, 2, NODE_FEATURE_DIM)
-    node_mask = torch.ones(1, 2)
-    edge_index = torch.zeros(1, 2, 2, dtype=torch.long)
-    edge_mask = torch.zeros(1, 2)
-    own_index = torch.zeros(1, dtype=torch.long)
-    message_features = torch.zeros(1, 1, MESSAGE_FEATURE_DIM)
-    message_mask = torch.zeros(1, 1)
-    congestion = torch.zeros(1)
-
     logits, _ = model(
-        node_features,
-        node_mask,
-        edge_index,
-        edge_mask,
-        own_index,
-        message_features,
-        message_mask,
-        congestion,
+        torch.randn(1, 2, NODE_FEATURE_DIM),
+        torch.ones(1, 2),
+        torch.zeros(1, 2, 2, dtype=torch.long),
+        torch.zeros(1, 2),
+        torch.zeros(1, dtype=torch.long),
+        torch.zeros(1),
     )
     assert torch.isfinite(logits).all()

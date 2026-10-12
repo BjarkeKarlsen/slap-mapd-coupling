@@ -42,7 +42,10 @@ from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.spaces import max_out_degree
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
-from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
+from slap_mapd_coupling.models.local_subgraph_encoding import (
+    LocalSubgraphEncodingConfig,
+    check_communication_caps,
+)
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
@@ -132,7 +135,8 @@ def build_ppo_config(
     models/rl_module.py's GNN architecture in as the RLModule instead of
     RLlib's Catalog-built default -- see module docstring for what's
     TBD vs fixed here. `experiment_config.controller` must already be
-    "decentralised" (WarehouseMAPDMultiAgentEnv enforces this itself).
+    "decentralised" (WarehouseMAPDMultiAgentEnv enforces this itself), and
+    its `communication` must equal `gnn_encoder_config.communication`.
 
     `seed_split` feeds the adapter its training seeds (training/env.py
     cycles through them, see that module's docstring) and sets RLlib's
@@ -162,13 +166,20 @@ def build_ppo_config(
             "PPOConfig; ExperimentConfig already enforces this for controller='decentralised', "
             "so this indicates a caller bug."
         )
+    if experiment_config.communication != gnn_encoder_config.communication:
+        raise ValueError(
+            f"experiment_config.communication={experiment_config.communication} != "
+            f"gnn_encoder_config.communication={gnn_encoder_config.communication}; the "
+            "environment and the encoder must agree on whether messages are used."
+        )
+    check_communication_caps(encoding_config, experiment_config.communication)
     d_max = max_out_degree(graph)
     expected_num_actions = d_max + 1
     if policy_value_head_config.num_actions != expected_num_actions:
         raise ValueError(
             f"policy_value_head_config.num_actions={policy_value_head_config.num_actions} "
-            f"!= max_out_degree(graph)+1={expected_num_actions} (eq:mask); the policy head's "
-            "action count must match this instance's actual d_max, not an unrelated value."
+            f"!= max_out_degree(graph)+1={expected_num_actions} (the action mask); the policy "
+            "head's action count must match this instance's actual d_max, not an unrelated value."
         )
 
     train_seeds, _ = split_seeds(seed_split)
@@ -207,8 +218,8 @@ def build_ppo_config(
         PPOConfig()
         # disable_env_checking: RLlib's generic multi-agent env pre-check
         # samples straight from action_space.sample(), ignoring
-        # action_mask entirely -- it isn't mask-aware, and eq:mask's
-        # whole point is that an illegal slot IS an error (env.step()
+        # action_mask entirely -- it isn't mask-aware, and the action
+        # mask's whole point is that an illegal slot IS an error (env.step()
         # legitimately raises for one, see environment/spaces.py::
         # action_for_slot). Real rollouts never hit this: the RLModule
         # masks illegal logits to -inf before sampling (#26), so the

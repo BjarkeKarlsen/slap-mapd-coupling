@@ -1,5 +1,5 @@
-"""Decentralised controller: wraps the learned policy pi_theta(.|o_i(t))
-(sec:method:rl/sec:method:model, #27/#28/#30) behind the same Controller
+"""Decentralised controller: wraps the learned policy pi_theta (sec:method:rl,
+sec:method:model, #27/#28/#30) behind the same Controller
 Protocol section_based.py implements, so it can be run
 through the identical six-stage loop and evaluator.py machinery as the
 other architectures (sec:method:controllers) -- the whole point of
@@ -40,12 +40,12 @@ from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
-from slap_mapd_coupling.environment.observation import build_observation
-from slap_mapd_coupling.environment.spaces import action_for_slot, legality_mask, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_for_slot, max_out_degree
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     EncodedObservation,
     LocalSubgraphEncodingConfig,
-    encode_observation,
+    check_communication_caps,
+    encode_all_observations,
 )
 
 # sec:impl:instances: every independent random stream in this repo is
@@ -57,35 +57,40 @@ _ACTION_SAMPLING_SEED_OFFSET = 2_000_000_011
 
 
 class DecentralisedController:
-    """pi_theta(.|o_i(t)): builds o_i(t) (#25), encodes it (#28), runs
-    the trained RLModule, and samples an action -- see module docstring
-    for why this can't be zero-arg constructed like the other two
-    controllers.
+    """pi_theta, the learned policy: builds every robot's o_i(t) and its
+    senders' views, runs the trained RLModule once for all robots, and
+    samples an action for each. See module docstring for why this can't be
+    zero-arg constructed like the other two controllers.
 
-    Action selection samples from pi_theta(.|o_i(t)), the masked
-    categorical distribution eq:mask defines, restricted to LEGAL slots
-    only (renormalised over encode_observation's own {0,1} action_mask,
-    not just the raw -inf-stand-in-masked logits) -- so an illegal
-    action can never be sampled even in principle, matching eq:mask's
-    "legal by construction," not "legal with overwhelming probability."
-    Sampling (rather than greedy argmax) is the more literal reading of
-    pi_theta as a distribution, and is what PPO actually trains; argmax
-    is a defensible alternative for a "deterministic evaluation"
-    protocol the thesis doesn't itself specify, flagged here rather than
-    silently picked.
+    One module call per route(), because a message is the sender's
+    embedding and the receiver needs it in the same timestep (the message,
+    sec:method:model). Execution stays decentralised, since each robot's row
+    holds only its own view and the views of the agents it hears.
 
-    Determinism (AGENTS.md's non-negotiable replay invariant): each
-    route() call derives its OWN sampling RNG from (episode_seed, t,
-    agent_id), not a single mutable RNG advanced across calls --
-    reproducible regardless of how many times or in what order route()
-    is invoked, matching the "seeded separately, offset from the episode
-    seed" convention every other random stream in this repo already
-    follows. episode_seed itself comes from reset(), not from
-    construction: the controller is registered once per process (module
-    docstring), so a constructor-time seed would give every episode the
-    same sampling stream regardless of its own seed. Callers must call
-    reset(episode_seed) before the first route() of an episode; route()
-    raises clearly if that hasn't happened yet.
+    Action selection samples from pi_theta, the masked categorical
+    distribution the action mask defines, restricted to LEGAL slots only
+    (renormalised over the {0,1} action_mask of the encoded observation, not
+    just the raw -inf-stand-in-masked logits), so an illegal action can
+    never be sampled even in principle. Sampling (rather than greedy argmax)
+    is the more literal reading of pi_theta as a distribution, and is what
+    PPO actually trains. Argmax is a defensible alternative for a
+    "deterministic evaluation" protocol the thesis doesn't itself specify,
+    flagged here rather than silently picked.
+
+    Determinism (AGENTS.md's non-negotiable replay invariant): each agent's
+    action is drawn from its OWN sampling RNG, derived from (episode_seed,
+    t, agent_id), not a single mutable RNG advanced across calls. That is
+    reproducible regardless of how many times or in what order route() is
+    invoked, matching the "seeded separately, offset from the episode seed"
+    convention every other random stream in this repo follows. episode_seed
+    itself comes from reset(), not from construction: the controller is
+    registered once per process (module docstring), so a constructor-time
+    seed would give every episode the same sampling stream regardless of its
+    own seed. Callers must call reset(episode_seed) before the first route()
+    of an episode; route() raises clearly if that hasn't happened yet.
+
+    Whether messages are used comes from experiment_config.communication,
+    which must equal the communication switch the module was trained with.
     """
 
     def __init__(
@@ -94,6 +99,7 @@ class DecentralisedController:
         encoding_config: LocalSubgraphEncodingConfig,
         experiment_config: ExperimentConfig,
     ) -> None:
+        check_communication_caps(encoding_config, experiment_config.communication)
         self._module = module
         self._encoding_config = encoding_config
         self._experiment_config = experiment_config
@@ -117,44 +123,45 @@ class DecentralisedController:
                 "see class docstring. evaluation/evaluator.py calls reset() at the "
                 "start of every episode for a correctly configured run."
             )
-        d_max = max_out_degree(graph)
+        encoded = encode_all_observations(
+            graph,
+            fleet,
+            tasks,
+            t,
+            self._experiment_config,
+            self._encoding_config,
+            d_max=max_out_degree(graph),
+        )
+        if not encoded:
+            return {}
+
+        agent_ids = list(encoded)
+        out = self._module.forward_inference(_batch([encoded[a] for a in agent_ids]))
+        logits = out[Columns.ACTION_DIST_INPUTS].detach().numpy()
+
         locations = fleet.locations()
         actions: dict[AgentId, Action] = {}
-        for agent_id, location in locations.items():
-            observation = build_observation(
-                graph, fleet, tasks, agent_id, t, self._experiment_config
-            )
-            mask = legality_mask(graph, location, d_max=d_max)
-            encoded = encode_observation(graph, location, observation, mask, self._encoding_config)
-
-            out = self._module.forward_inference(_single_agent_batch(encoded))
-            logits = out[Columns.ACTION_DIST_INPUTS][0].detach().numpy()
-
+        for row, agent_id in enumerate(agent_ids):
             rng = np.random.default_rng(
                 (self._episode_seed + _ACTION_SAMPLING_SEED_OFFSET, t, agent_id)
             )
-            slot = _sample_legal_slot(logits, encoded.action_mask, rng)
-            actions[agent_id] = action_for_slot(graph, location, slot)
+            slot = _sample_legal_slot(logits[row], encoded[agent_id].action_mask, rng)
+            actions[agent_id] = action_for_slot(graph, locations[agent_id], slot)
         return actions
 
 
-def _single_agent_batch(encoded: EncodedObservation) -> dict:
-    def to_tensor(value):
-        return torch.as_tensor(value).unsqueeze(0)
+def _batch(encoded: Sequence[EncodedObservation]) -> dict:
+    """One batch with a row per robot, in the order given."""
+    rows = [item.as_rllib_dict() for item in encoded]
+
+    def stack(key: str, nested: bool) -> torch.Tensor:
+        source = [row["observations"][key] if nested else row[key] for row in rows]
+        return torch.as_tensor(np.stack(source))
 
     return {
         Columns.OBS: {
-            "action_mask": to_tensor(encoded.action_mask),
-            "observations": {
-                "node_features": to_tensor(encoded.node_features),
-                "node_mask": to_tensor(encoded.node_mask),
-                "edge_index": to_tensor(encoded.edge_index),
-                "edge_mask": to_tensor(encoded.edge_mask),
-                "own_index": to_tensor(encoded.own_index),
-                "message_features": to_tensor(encoded.message_features),
-                "message_mask": to_tensor(encoded.message_mask),
-                "congestion": to_tensor(np.float32(encoded.congestion)),
-            },
+            "action_mask": stack("action_mask", nested=False),
+            "observations": {key: stack(key, nested=True) for key in rows[0]["observations"]},
         }
     }
 
@@ -162,18 +169,18 @@ def _single_agent_batch(encoded: EncodedObservation) -> dict:
 def _sample_legal_slot(
     logits: np.ndarray, action_mask: np.ndarray, rng: np.random.Generator
 ) -> int:
-    """Categorical sample over pi_theta(.|o_i(t)): softmax of the RAW
-    logits, with illegal slots zeroed out and the result renormalised --
-    see class docstring for why this, not just trusting the -inf-masked
-    logits' softmax, is what actually guarantees eq:mask's "legal by
-    construction" down to floating point."""
+    """Categorical sample over pi_theta: softmax of the RAW logits, with
+    illegal slots zeroed out and the result renormalised -- see class
+    docstring for why this, not just trusting the -inf-masked logits'
+    softmax, is what guarantees "legal by construction" down to floating
+    point."""
     shifted = logits - logits.max()
     probabilities = np.exp(shifted) * action_mask
     total = probabilities.sum()
     if total <= 0.0:
         raise RuntimeError(
-            "No legal action has positive probability -- eq:mask guarantees slot 0 "
-            "(wait) is always legal, so this indicates a real bug, not a normal outcome."
+            "No legal action has positive probability -- the action mask always leaves slot 0 "
+            "(wait) legal, so this indicates a real bug, not a normal outcome."
         )
     probabilities = probabilities / total
     return int(rng.choice(len(probabilities), p=probabilities))

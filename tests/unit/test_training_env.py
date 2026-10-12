@@ -7,6 +7,7 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
@@ -91,6 +92,28 @@ def test_reset_observations_match_declared_spaces():
     for aid in env.agents:
         assert env.observation_spaces[aid].contains(obs[aid])
         assert infos[aid] == {}
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_observations_carry_the_sender_keys_exactly_when_communication_is_on(communication):
+    env = _env(communication=communication)
+    obs, _ = env.reset()
+    for _ in range(3):
+        for aid in env.agents:
+            keys = set(obs[aid]["observations"])
+            assert (set(SENDER_KEYS) <= keys) == communication
+            assert env.observation_spaces[aid].contains(obs[aid])
+        obs, *_ = env.step({aid: 0 for aid in env.agents})
+
+
+def test_communication_with_no_room_for_a_sender_is_rejected():
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=0)
+    with pytest.raises(ValueError, match="max_messages"):
+        WarehouseMAPDMultiAgentEnv(
+            graph, skus, counts, capacities, _config(communication=True), enc_config, (1,)
+        )
 
 
 def test_step_with_wait_actions_keeps_agents_stationary():

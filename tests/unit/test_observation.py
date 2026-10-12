@@ -1,5 +1,7 @@
 """Unit tests for slap_mapd_coupling.environment.observation."""
 
+import dataclasses
+
 import pytest
 
 from slap_mapd_coupling.core.agents import AgentState, FleetState
@@ -144,25 +146,30 @@ def test_build_observation_congestion_over_field_of_view_when_sensitive():
     assert obs.congestion == pytest.approx(0.5)
 
 
-def test_build_observation_no_messages_when_communication_disabled():
-    graph = _line_graph(5)
-    fleet = _fleet({1: 2, 2: 3})
-    config = _config(observation_depth=2, communication=False)
-    obs = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
-    assert obs.messages == ()
-
-
-def test_build_observation_messages_within_field_of_view():
+def test_observation_is_identical_with_communication_on_and_off():
+    """o_i(t) has three pieces and no messages (sec:pf:observations), so the
+    communication switch does not change it."""
     graph = _line_graph(5)
     fleet = _fleet({1: 0, 2: 1, 3: 4})
     task2 = Task(task_id=2, release_time=0, pickup_vertex=4, delivery_vertex=0, sku="sku-1").assign(
         agent_id=2, t=0
     )
-    config = _config(observation_depth=1, communication=True)
+    on_config = _config(observation_depth=3, communication=True)
+    off_config = _config(observation_depth=3, communication=False)
+    on = build_observation(graph, fleet, [task2], 1, 0, on_config)
+    off = build_observation(graph, fleet, [task2], 1, 0, off_config)
+    assert on == off
+    assert {field.name for field in dataclasses.fields(on)} == {
+        "visible_vertices",
+        "features",
+        "congestion",
+    }
 
-    obs = build_observation(graph, fleet, [task2], agent_id=1, t=0, config=config)
-    senders = {m.sender for m in obs.messages}
-    assert senders == {2}  # agent 3 (at vertex 4) is out of range
-    message = next(m for m in obs.messages if m.sender == 2)
-    assert message.distance == 1  # d_G(0, 1)
-    assert message.eta == 3  # d_G(1, pickup=4)
+
+def test_communication_neighbours_are_ordered_closest_first_with_ties_by_agent_id():
+    graph = _line_graph(10)
+    # distances from agent 1 at vertex 4: agent 5 is 1 away, agents 2 and 3 are 2 away,
+    # agent 4 is 3 away
+    fleet = _fleet({1: 4, 4: 7, 3: 2, 2: 6, 5: 5})
+    heard = communication_neighbours(graph, fleet, agent_id=1, observation_depth=3)
+    assert heard == (5, 2, 3, 4)
