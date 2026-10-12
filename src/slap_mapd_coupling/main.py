@@ -119,7 +119,10 @@ def simulate(
     "--output", type=click.Path(), default="./checkpoints", help="Checkpoint output directory."
 )
 def train(config, storage_rule, num_iterations, num_gpus, seed, output):
-    """Train the decentralised controller (PPO). The other controllers and the reference planner need no training."""
+    """Train the decentralised controller (PPO).
+
+    The other controllers and the reference planner need no training.
+    """
     raise NotImplementedError("Training is not implemented yet.")
 
 

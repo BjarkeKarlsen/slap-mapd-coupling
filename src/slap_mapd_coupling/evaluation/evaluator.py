@@ -103,7 +103,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
 
     return RunMetrics(
         storage_mode=config.storage_mode,
-        controller=config.controller or config.planner,
+        controller=config.router_name,
         congestion_sensitive=config.congestion_sensitive,
         communication=config.communication,
         num_agents=config.num_agents,

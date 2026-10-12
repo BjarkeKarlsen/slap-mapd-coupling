@@ -33,7 +33,9 @@ def test_simulate_rejects_checkpoint_for_non_decentralised(tmp_path):
 
 
 def test_simulate_rejects_communication_for_non_decentralised():
-    result = CliRunner().invoke(cli, ["simulate", "--planner", "prioritised_astar", "--communication"])
+    result = CliRunner().invoke(
+        cli, ["simulate", "--planner", "prioritised_astar", "--communication"]
+    )
     assert result.exit_code != 0
     assert "--communication only applies" in result.output
 
