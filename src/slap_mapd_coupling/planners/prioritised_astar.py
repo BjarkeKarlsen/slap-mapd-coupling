@@ -1,13 +1,10 @@
-"""Centralised controller: prioritised planning (space-time A*) over the full graph
-(sec:method:controllers).
-"""
+"""Prioritised planning with space-time A* (the reference planner, outside the three controllers)."""
 
 from __future__ import annotations
 
 import heapq
 from typing import Sequence
 
-from slap_mapd_coupling.controllers.registry import register_controller
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task, active_tasks_by_agent
@@ -16,57 +13,29 @@ Path = tuple[VertexId, ...]
 State = tuple[VertexId, int]  # (vertex, timesteps elapsed since this call's t)
 
 
-@register_controller("centralised")
-class CentralisedController:
-    """pi^route: prioritised planning (space-time A*) over the full graph
-    (sec:method:controllers). Agents are planned in a fixed order --
-    earliest t_j^assigned first, i.e. whichever active task each agent currently
-    serves was assigned soonest; free agents (no active task) have no
-    task-driven urgency the thesis defines an order for, so they're
-    planned last, ordered by agent_id for determinism. Each agent after
-    the first plans around the space-time cells already reserved by
-    higher-priority agents.
+class PrioritisedAStarPlanner:
+    """Prioritised planning (space-time A*) over the full graph, the reference planner.
 
-    A pure function of (graph, fleet, tasks, t), same as assignment.py
-    and resolution/ -- this controller replans every agent's full route
-    from scratch on every call rather than caching a multi-step plan
-    across timesteps, and only the first action of each plan is actually
-    returned. Downstream, resolution/conflict_resolution.py's operator
-    still runs on the joint action this produces (sec:method:overview's
-    stage 4 always follows stage 3, regardless of which controller is
-    active), so this planner's job is to make that operator's job easy
-    (ideally a no-op), not to be the sole source of collision-freedom.
+    Agents are planned in a fixed order, earliest t_j^assigned first. Free
+    agents come last, ordered by agent_id. Each agent plans around the
+    cells already reserved by higher-priority agents. Every call replans
+    all routes from scratch and returns only the first action of each, so
+    it is a pure function of (graph, fleet, tasks, t). Conflict resolution
+    still runs afterwards, so the reservations make its job easy and are
+    not the only guard against collisions.
 
-    Flagged design choices, neither pinned down by the thesis text:
+    Design choices the thesis leaves open:
 
-    - "The current planning horizon" (sec:method:controllers) is never
-      quantified anywhere in the problem formulation or method sections,
-      and there is no ExperimentConfig field for it. Each agent is
-      planned to its own goal (Task.current_goal, or its own vertex if
-      free -- it simply waits) rather than to a fixed lookahead window;
-      the space-time search per agent is bounded by that agent's
-      unobstructed hop-distance to its goal plus the number of cells
-      currently reserved by higher-priority agents (a standard, generous
-      termination bound for windowed/cooperative A* -- enough slack to
-      wait out any blockage the reservations so far could cause). If a
-      bounded lookahead window turns out to matter for the results, it
-      belongs on ExperimentConfig as its own named parameter, not hidden
-      inside this controller.
-    - "Space-time A*" is read as the standard MAPF sense: minimising
-      timesteps to goal (eq:actions spends exactly one timestep per
-      action, wait or move, regardless of edge cost c(v,w)), not
-      minimising eq:onestepcost's realised movement cost -- that is a
-      separate accounting dimension (sec:impl:cost), not this search's
-      metric, and the thesis's own eq:assignmentrule already uses d_G
-      (cost) for a different purpose (ranking candidate agents), not for
-      timing a route.
+    - The planning horizon is not quantified, so each agent plans to its
+      own goal (Task.current_goal, or its own vertex if free) with the
+      search bounded by its hop distance plus the number of reserved
+      cells. A fixed lookahead would need its own ExperimentConfig
+      field (#103).
+    - Space-time A* minimises timesteps to goal (the action rule spends
+      one timestep per action), not realised movement cost.
     """
 
-    def reset(self, episode_seed: int) -> None:
-        """No-op: a pure function of (graph, fleet, tasks, t), with no
-        randomness of its own to seed (see class docstring)."""
-
-    def route(
+    def plan(
         self,
         graph: WarehouseGraph,
         fleet: FleetState,
@@ -80,9 +49,7 @@ class CentralisedController:
         reserved_vertices: dict[int, set[VertexId]] = {}
         reserved_edges: dict[int, set[tuple[VertexId, VertexId]]] = {}
         actions: dict[AgentId, Action] = {}
-        # A generous, deterministic bound on how many offsets a
-        # not-moving agent's vertex needs to stay reserved for -- see
-        # _reserve's docstring for why this matters at all.
+        # Bound on how many offsets a not-moving agent's vertex stays reserved (see _reserve).
         stationary_window = len(graph.vertices)
 
         for agent_id in order:
@@ -113,8 +80,8 @@ def _priority_order(fleet: FleetState, active_by_agent: dict[AgentId, Task]) -> 
 def _hop_distances_to(graph: WarehouseGraph, goal: VertexId) -> dict[VertexId, int]:
     """Unweighted (timestep) shortest-hop distance from every vertex to
     goal, over the graph reversed -- the admissible/consistent heuristic
-    for the space-time search below. See the class docstring for why
-    this uses hop count, not d_G's edge cost."""
+    for the space-time search below. Hop count, not d_G's edge cost,
+    because the search minimises timesteps."""
     reverse: dict[VertexId, list[VertexId]] = {v: [] for v in graph.vertices}
     for edge in graph.edges:
         reverse[edge.target].append(edge.source)
@@ -142,9 +109,8 @@ def _plan(
     """Space-time A* from `start` to `goal`, avoiding every already-reserved
     (vertex, offset) and the swap conflicts implied by already-reserved
     (from, to, offset) moves. Falls back to a single-state "stay put" path
-    if no route to `goal` is found within the bound (see class docstring);
-    the caller's own reservation of that fallback still keeps later,
-    lower-priority agents' searches honest about where this agent is.
+    if no route to `goal` is found within the bound (see the class
+    docstring).
     """
     if start == goal:
         return (start,)
@@ -185,9 +151,9 @@ def _plan(
             if successor not in hop_dist:
                 continue  # genuinely can't reach goal from here, not worth exploring
             if successor in blocked_vertices:
-                continue  # eq:vertexconflict against an already-planned higher-priority agent
+                continue  # vertex conflict against an already-planned higher-priority agent
             if successor != vertex and (successor, vertex) in blocked_edges:
-                continue  # eq:swapconflict, symmetric case
+                continue  # swap conflict, symmetric case
             next_state: State = (successor, next_offset)
             tentative_g = next_offset
             if tentative_g < g_score.get(next_state, max_offset + 1):

@@ -16,12 +16,12 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
+from slap_mapd_coupling.routing import get_router
 
 
 def run_episode(
@@ -41,7 +41,7 @@ def run_episode(
     fixed seed the same way the order generator and conflict resolution
     already do (4.Implementation.tex:450-452, sec:impl:instances).
     """
-    get_controller(config.controller).reset(config.seed)
+    get_router(config).reset(config.seed)
     env = WarehouseMAPDEnv(graph, skus, initial_storage_counts, storage_capacities, config)
     env.reset()
     for _ in range(config.horizon):
@@ -103,7 +103,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
 
     return RunMetrics(
         storage_mode=config.storage_mode,
-        controller=config.controller,
+        controller=config.controller or config.planner,
         congestion_sensitive=config.congestion_sensitive,
         communication=config.communication,
         num_agents=config.num_agents,

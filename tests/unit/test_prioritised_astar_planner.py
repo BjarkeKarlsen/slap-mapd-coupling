@@ -1,13 +1,23 @@
-"""Unit tests for slap_mapd_coupling.controllers.centralised."""
+"""Unit tests for the reference planner (planners.prioritised_astar, router, registry)."""
 
-from slap_mapd_coupling.controllers.centralised import CentralisedController, _reserve
+import pytest
+
 from slap_mapd_coupling.core.agents import AgentState, FleetState, is_collision_free
+from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
+from slap_mapd_coupling.planners import (
+    Planner,
+    PlannerRouter,
+    PrioritisedAStarPlanner,
+    get_planner,
+)
+from slap_mapd_coupling.planners.prioritised_astar import _reserve
 from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
+from slap_mapd_coupling.routing import get_router
 
 
 def _line_graph(n: int) -> WarehouseGraph:
@@ -38,12 +48,12 @@ def _task(task_id: int, pickup: int, delivery: int, assignment_time: int = 0) ->
 
 
 def test_reset_is_a_no_op_and_does_not_affect_route():
-    """CentralisedController is a pure function of (graph, fleet, tasks,
+    """PlannerRouter is a pure function of (graph, fleet, tasks,
     t) with no randomness of its own (sec:method:controllers); reset()
-    exists only to satisfy the Controller protocol."""
+    exists only because the environment loop calls it."""
     graph = _line_graph(5)
     fleet = _fleet({1: 2})
-    controller = CentralisedController()
+    controller = PlannerRouter(PrioritisedAStarPlanner())
     before = controller.route(graph, fleet, tasks=[], t=0)
     controller.reset(episode_seed=123)
     after = controller.route(graph, fleet, tasks=[], t=0)
@@ -53,7 +63,7 @@ def test_reset_is_a_no_op_and_does_not_affect_route():
 def test_free_agent_with_no_task_waits():
     graph = _line_graph(5)
     fleet = _fleet({1: 2})
-    actions = CentralisedController().route(graph, fleet, tasks=[], t=0)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[], t=0)
     assert actions[1].kind == "wait"
 
 
@@ -63,7 +73,7 @@ def test_agent_heads_towards_pickup_before_pickup():
     task = Task(task_id=1, release_time=0, pickup_vertex=4, delivery_vertex=0, sku="sku-1").assign(
         agent_id=1, t=0
     )
-    actions = CentralisedController().route(graph, fleet, tasks=[task], t=0)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[task], t=0)
     assert actions[1] == graph.legal_actions(0)[1]  # move towards vertex 1, on the way to 4
 
 
@@ -75,7 +85,7 @@ def test_agent_heads_towards_delivery_after_pickup():
         .assign(agent_id=1, t=0)
         .pick_up(t=0)
     )
-    actions = CentralisedController().route(graph, fleet, tasks=[task], t=0)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[task], t=0)
     assert actions[1].kind == "move" and actions[1].target == 3  # towards delivery at 0
 
 
@@ -85,7 +95,7 @@ def test_agent_already_at_goal_waits():
     task = Task(task_id=1, release_time=0, pickup_vertex=4, delivery_vertex=0, sku="sku-1").assign(
         agent_id=1, t=0
     )
-    actions = CentralisedController().route(graph, fleet, tasks=[task], t=0)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[task], t=0)
     assert actions[1].kind == "wait"
 
 
@@ -102,7 +112,7 @@ def test_earlier_assignment_time_has_priority():
     late = Task(task_id=2, release_time=0, pickup_vertex=1, delivery_vertex=1, sku="a").assign(
         agent_id=2, t=5
     )
-    actions = CentralisedController().route(graph, fleet, tasks=[early, late], t=5)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[early, late], t=5)
 
     assert actions[1].kind == "move" and actions[1].target == 1  # early agent moves in directly
     assert actions[2].kind == "wait"  # late agent yields rather than also moving to vertex 1
@@ -114,7 +124,7 @@ def test_free_agents_planned_after_agents_with_tasks_break_ties_by_id():
     task = Task(task_id=1, release_time=0, pickup_vertex=1, delivery_vertex=1, sku="a").assign(
         agent_id=1, t=0
     )
-    actions = CentralisedController().route(graph, fleet, tasks=[task], t=0)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, fleet, tasks=[task], t=0)
     assert actions[1].kind == "move" and actions[1].target == 1
     assert actions[5].kind == "wait"  # free agent has no goal, stays put
 
@@ -130,7 +140,7 @@ def test_routed_actions_are_already_collision_free_without_resolution_overrides(
         _task(task_id=2, pickup=2, delivery=2, assignment_time=1),
     ]
     before = fleet
-    actions = CentralisedController().route(graph, before, tasks, t=1)
+    actions = PlannerRouter(PrioritisedAStarPlanner()).route(graph, before, tasks, t=1)
 
     priority = priority_permutation(seed=0, agent_ids=list(before.agents))
     result = resolve_conflicts(graph, before, actions, priority)
@@ -172,7 +182,7 @@ def test_full_multi_step_run_stays_collision_free():
         _task(task_id=2, pickup=0, delivery=5, assignment_time=1),
         _task(task_id=3, pickup=3, delivery=3, assignment_time=2),
     ]
-    controller = CentralisedController()
+    controller = PlannerRouter(PrioritisedAStarPlanner())
     priority = priority_permutation(seed=7, agent_ids=list(fleet.agents))
 
     state = fleet
@@ -181,3 +191,36 @@ def test_full_multi_step_run_stays_collision_free():
         result = resolve_conflicts(graph, state, proposed, priority)
         assert is_collision_free(state, result.fleet)
         state = result.fleet
+
+
+def test_get_planner_resolves_prioritised_astar():
+    assert isinstance(get_planner("prioritised_astar"), PrioritisedAStarPlanner)
+
+
+def test_get_planner_rejects_an_unknown_name():
+    with pytest.raises(KeyError, match="nope"):
+        get_planner("nope")
+
+
+def test_planner_router_delegates_to_its_planner():
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2})
+    planner = PrioritisedAStarPlanner()
+    assert isinstance(planner, Planner)
+    assert PlannerRouter(planner).route(graph, fleet, [], 0) == planner.plan(graph, fleet, [], 0)
+
+
+def test_get_router_returns_the_planner_router_for_a_planner_config():
+    config = ExperimentConfig(
+        storage_mode="fixed",
+        planner="prioritised_astar",
+        congestion_sensitive=False,
+        communication=False,
+        num_agents=2,
+        arrival_rate=1.0,
+        seed=0,
+        horizon=5,
+        wait_cost=0.0,
+        observation_depth=2,
+    )
+    assert isinstance(get_router(config), PlannerRouter)

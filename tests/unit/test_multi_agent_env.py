@@ -2,7 +2,6 @@
 
 import pytest
 
-import slap_mapd_coupling.controllers.centralised  # noqa: F401 -- registers "centralised"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -30,7 +29,7 @@ def _graph(num_endpoints: int = 4, seed: int = 0) -> WarehouseGraph:
 def _config(**overrides) -> ExperimentConfig:
     defaults = dict(
         storage_mode="fixed",
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=4,

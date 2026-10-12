@@ -19,7 +19,7 @@ _REGISTRY: dict[str, Callable[[], Controller]] = {}
 def register_controller(
     name: str,
 ) -> Callable[[Callable[[], Controller]], Callable[[], Controller]]:
-    """Class/factory decorator: @register_controller("centralised")."""
+    """Class/factory decorator: @register_controller("section")."""
 
     def decorator(factory: Callable[[], Controller]) -> Callable[[], Controller]:
         if name in _REGISTRY:
@@ -31,10 +31,14 @@ def register_controller(
 
 
 def get_controller(name: str) -> Controller:
+    if name == "centralised":
+        raise NotImplementedError(
+            "The learned centralised arm is not implemented yet (#86)."
+        )
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown controller {name!r}; registered: {registered_controllers()}. "
-            "Controllers register themselves on import (e.g. controllers/centralised.py) "
+            "Controllers register themselves on import (e.g. controllers/section_based.py) "
             "-- make sure the module defining it has actually been imported."
         )
     return _REGISTRY[name]()

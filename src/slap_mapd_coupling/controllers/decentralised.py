@@ -1,16 +1,16 @@
 """Decentralised controller: wraps the learned policy pi_theta(.|o_i(t))
 (sec:method:rl/sec:method:model, #27/#28/#30) behind the same Controller
-Protocol centralised.py/section_based.py implement, so it can be run
+Protocol section_based.py implements, so it can be run
 through the identical six-stage loop and evaluator.py machinery as the
-other two architectures (sec:method:controllers) -- the whole point of
+other architectures (sec:method:controllers) -- the whole point of
 one shared Protocol, per docs/controller_integration.md.
 
 Registry mismatch, flagged rather than worked around silently:
-CentralisedController/SectionBasedController register the CLASS itself
-(`@register_controller("centralised")` on the class), since
+SectionBasedController registers the CLASS itself
+(`@register_controller("section")` on the class), since
 `controllers/registry.py`'s contract is a zero-arg `Callable[[],
-Controller]` and both classes are genuinely zero-arg constructible --
-they're pure functions of (graph, fleet, tasks, t), nothing else.
+Controller]` and the class is genuinely zero-arg constructible --
+it is a pure function of (graph, fleet, tasks, t), nothing else.
 DecentralisedController is NOT: it needs a specific trained RLModule (a
 set of already-loaded weights) plus the o_i(t)-encoding config it was
 trained with, and no zero-arg construction can supply either. Rather
@@ -19,8 +19,8 @@ silently produce a Controller that behaves nothing like what "the
 decentralised regime" means), `set_active_decentralised_controller`
 below is the explicit bridge: callers construct a real
 DecentralisedController from a loaded model, register it as THIS
-process's active one, and get_controller("decentralised") (used
-unchanged by environment/multi_agent_env.py and evaluation/evaluator.py)
+process's active one, and get_controller("decentralised") (reached through get_router by
+environment/multi_agent_env.py and evaluation/evaluator.py)
 then returns it. Calling get_controller("decentralised") before that
 raises with this explanation rather than silently returning something
 meaningless.

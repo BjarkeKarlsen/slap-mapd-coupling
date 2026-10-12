@@ -1,4 +1,4 @@
-"""Compare F_fix / F_dem / F_cng against the same centralised controller and instance.
+"""Compare F_fix / F_dem / F_cng against the same reference planner and instance.
 
 The M3 milestone's own acceptance test: swapping storage_mode is the
 only thing chosen directly between the three runs below -- same graph,
@@ -19,7 +19,6 @@ the *registry swap* working end to end, not yet a meaningful behavioural
 difference between the three rules -- that needs #60 first.
 """
 
-import slap_mapd_coupling.controllers.centralised  # noqa: F401 -- registers "centralised"
 import slap_mapd_coupling.storage.congestion  # noqa: F401 -- registers "congestion"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -76,7 +75,7 @@ def build_storage(
 
 def build_config(storage_mode: StorageMode, seed: int) -> ExperimentConfig:
     common = dict(
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=(storage_mode == "congestion"),
         communication=False,
         num_agents=FLEET_SIZE,

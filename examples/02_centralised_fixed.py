@@ -1,5 +1,7 @@
 """Train the centralised GNN+PPO controller and sanity-check it.
 
+Not runnable until the learned centralised arm exists (#86).
+
 The M5 milestone's worked example: builds a small instance, trains the
 GNN-based PPO policy (models/rl_module.py, training/config.py, #30) for
 a handful of iterations, saves a checkpoint, then runs the trained

@@ -9,7 +9,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 def _base(**overrides) -> dict:
     defaults = dict(
         storage_mode="fixed",
-        controller="centralised",
+        planner="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=5,
@@ -50,6 +50,7 @@ def test_observation_depth_required_for_every_controller():
 def _decentralised_reward_kwargs(**overrides) -> dict:
     defaults = dict(
         controller="decentralised",
+        planner=None,
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
@@ -61,7 +62,7 @@ def _decentralised_reward_kwargs(**overrides) -> dict:
 
 def test_decentralised_controller_requires_reward_parameters():
     with pytest.raises(ValidationError, match="discount"):
-        ExperimentConfig(**_base(controller="decentralised"))
+        ExperimentConfig(**_base(controller="decentralised", planner=None))
 
 
 def test_decentralised_controller_with_reward_parameters_is_valid():
@@ -69,9 +70,17 @@ def test_decentralised_controller_with_reward_parameters_is_valid():
     assert config.discount == 0.99
 
 
-def test_centralised_controller_does_not_require_reward_parameters():
+def test_reference_planner_does_not_require_reward_parameters():
     config = ExperimentConfig(**_base())
     assert config.discount is None
+
+
+def test_exactly_one_of_controller_and_planner_is_required():
+    with pytest.raises(ValidationError, match="exactly one"):
+        ExperimentConfig(**_base(controller="section"))
+    with pytest.raises(ValidationError, match="exactly one"):
+        ExperimentConfig(**_base(planner=None))
+    assert ExperimentConfig(**_base(planner=None, controller="section")).planner is None
 
 
 def test_discount_above_one_rejected():

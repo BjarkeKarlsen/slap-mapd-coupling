@@ -10,7 +10,7 @@ from slap_mapd_coupling.evaluation.metrics import RunMetrics
 def _run(seed: int, service_time: float, storage_mode: str = "fixed", **overrides) -> RunMetrics:
     values = dict(
         storage_mode=storage_mode,
-        controller="centralised",
+        controller="prioritised_astar",
         congestion_sensitive=False,
         communication=False,
         num_agents=4,

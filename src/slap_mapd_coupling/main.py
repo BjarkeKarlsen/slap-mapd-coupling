@@ -6,11 +6,11 @@ communication, system load - sec:pd-aim-and-scope) rather than a generic
 train/evaluate/checkpoint workflow that only fits the decentralised
 controller:
 
-  simulate  - run one (storage rule, controller, load) configuration,
-              for any of the three controllers.
+  simulate  - run one (storage rule, controller or reference planner,
+              load) configuration.
   train     - PPO training for the decentralised controller only; the
-              centralised and section-based controllers are deterministic
-              planners and have nothing to train.
+              the section-based controller and the reference planner are
+              deterministic and have nothing to train.
   sweep     - run the full experimental grid from a config file and write
               one results table (this is what produces Section VII's data).
 """
@@ -19,6 +19,7 @@ import click
 
 STORAGE_RULES = ["fixed", "demand", "congestion"]
 CONTROLLERS = ["centralised", "section", "decentralised"]
+PLANNERS = ["prioritised_astar"]
 
 
 @click.group()
@@ -37,8 +38,14 @@ def cli():
 @click.option(
     "--controller",
     type=click.Choice(CONTROLLERS),
-    default="centralised",
-    help="Routing/assignment architecture.",
+    default=None,
+    help="Routing/assignment architecture. Give this or --planner, not both.",
+)
+@click.option(
+    "--planner",
+    type=click.Choice(PLANNERS),
+    default=None,
+    help="Non-learned reference planner, outside the three controllers.",
 )
 @click.option(
     "--congestion-sensitive",
@@ -71,6 +78,7 @@ def cli():
 def simulate(
     storage_rule,
     controller,
+    planner,
     congestion_sensitive,
     communication,
     num_agents,
@@ -81,6 +89,8 @@ def simulate(
     output,
 ):
     """Run episodes for one configuration and report the evaluation metrics."""
+    if (controller is None) == (planner is None):
+        raise click.UsageError("Give exactly one of --controller and --planner.")
     if controller == "decentralised" and checkpoint is None:
         raise click.UsageError("--checkpoint is required when --controller=decentralised.")
     if controller != "decentralised" and checkpoint is not None:
@@ -109,7 +119,7 @@ def simulate(
     "--output", type=click.Path(), default="./checkpoints", help="Checkpoint output directory."
 )
 def train(config, storage_rule, num_iterations, num_gpus, seed, output):
-    """Train the decentralised controller (PPO). The other two controllers need no training."""
+    """Train the decentralised controller (PPO). The other controllers and the reference planner need no training."""
     raise NotImplementedError("Training is not implemented yet.")
 
 

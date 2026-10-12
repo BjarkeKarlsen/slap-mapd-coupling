@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from slap_mapd_coupling.planners.registry import PlannerName
+
 StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
 ControllerArchitecture = Literal["centralised", "section", "decentralised"]
 
@@ -31,7 +33,10 @@ class ExperimentConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     storage_mode: StorageMode
-    controller: ControllerArchitecture
+    # Exactly one of controller and planner is set. A planner is a
+    # non-learned reference outside the three controllers in Pi.
+    controller: ControllerArchitecture | None = None
+    planner: PlannerName | None = None
     congestion_sensitive: bool
     communication: bool  # only meaningful if controller == "decentralised"
     num_agents: PositiveInt  # m
@@ -78,6 +83,12 @@ class ExperimentConfig(BaseModel):
                     raise ValueError(f"storage_mode={self.storage_mode!r} requires {name}.")
             if self.storage_mode == "congestion" and self.congestion_weight is None:
                 raise ValueError("storage_mode='congestion' requires congestion_weight (beta).")
+        return self
+
+    @model_validator(mode="after")
+    def _exactly_one_of_controller_and_planner(self) -> "ExperimentConfig":
+        if (self.controller is None) == (self.planner is None):
+            raise ValueError("Set exactly one of controller and planner.")
         return self
 
     @model_validator(mode="after")

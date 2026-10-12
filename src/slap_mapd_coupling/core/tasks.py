@@ -164,7 +164,7 @@ def active_tasks_by_agent(tasks: Iterable[Task], t: int) -> dict[AgentId, Task]:
     """The active task (if any) each agent is currently serving at t --
     at most one per agent, since the task stages' B_t membership plus
     "no re-tasking" (sec:pf:scope) together guarantee an agent serves at
-    most one active task at once. Shared by controllers/centralised.py,
+    most one active task at once. Shared by planners/prioritised_astar.py,
     environment/multi_agent_env.py and environment/observation.py rather
     than each recomputing it.
     """

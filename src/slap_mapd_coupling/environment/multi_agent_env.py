@@ -39,7 +39,7 @@ silent on both:
 Observations returned by reset/step are a placeholder for M2: each
 agent's own current vertex. The full o_i(t) feature vector
 (eq:observation/eq:features) is environment/observation.py, M5 -- not
-needed by the centralised controller this milestone wires up, since it
+needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
 step() also accepts an optional `actions` mapping (issue #30): stage 3
@@ -54,8 +54,8 @@ action_for_slot); every other stage (assignment, conflict resolution,
 lifecycle, storage, reward) is untouched, so this is still the same
 six-stage loop, not a second one -- only stage 3's *source* differs.
 The registered-Controller path (`actions=None`) stays the only one
-centralised/section-based ever use, unaffected by this. Controller
-resolution is therefore lazy (looked up on first `actions=None` step,
+reference planner and section-based ever use, unaffected by this. Router
+resolution (get_router) is therefore lazy (looked up on first `actions=None` step,
 not in `__init__`): `config.controller="decentralised"` has no
 registered Controller until #29 lands, but a run driven entirely by
 `actions` never needs one.
@@ -72,7 +72,6 @@ import numpy as np
 
 from slap_mapd_coupling.controllers.assignment import assign_tasks
 from slap_mapd_coupling.controllers.base import Controller
-from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
@@ -85,6 +84,7 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
+from slap_mapd_coupling.routing import get_router
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
 
@@ -273,7 +273,7 @@ class WarehouseMAPDEnv:
             }
         else:
             if self._controller is None:
-                self._controller = get_controller(self.config.controller)
+                self._controller = get_router(self.config)
             proposed = self._controller.route(self.graph, self.fleet, self.tasks, self._t)
         self.log.routing_runtime_seconds.append(time.perf_counter() - route_start)
 
@@ -451,7 +451,7 @@ class WarehouseMAPDEnv:
         (GAPS.tex's fix to eq:objective's scope): the four reward weights
         are None on ExperimentConfig for every controller except
         "decentralised" (core/experiment_config.py), so this returns an
-        all-zero reward for the centralised/section-based baselines this
+        all-zero reward for the reference planner and section-based baselines this
         milestone actually runs, rather than crashing on missing weights.
 
         `congestion` is hardcoded to 0.0 pending eq:congestion's delta_i(t)
