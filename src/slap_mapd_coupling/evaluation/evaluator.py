@@ -110,6 +110,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         arrival_rate=config.arrival_rate,
         seed=config.seed,
         horizon=horizon,
+        observation_depth=config.observation_depth,
         num_completed_tasks=num_completed,
         throughput=throughput,
         keep_up_ratio=keep_up_ratio,

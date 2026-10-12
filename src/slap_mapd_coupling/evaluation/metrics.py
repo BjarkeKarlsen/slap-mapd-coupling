@@ -3,7 +3,15 @@ three parts, crowding, relocations per storage update, and runtime."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, NonNegativeInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveInt,
+    model_validator,
+)
 
 from slap_mapd_coupling.core.experiment_config import ControllerArchitecture, StorageMode
 from slap_mapd_coupling.planners.registry import PlannerName
@@ -37,6 +45,7 @@ class RunMetrics(BaseModel):
     arrival_rate: NonNegativeFloat
     seed: int
     horizon: NonNegativeInt  # T
+    observation_depth: PositiveInt  # d_obs, the window the run was scored under
 
     # --- keeping up, eq:throughput: a check, applied first ---
     num_completed_tasks: NonNegativeInt  # |C_T|
