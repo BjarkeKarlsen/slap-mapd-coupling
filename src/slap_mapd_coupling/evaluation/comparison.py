@@ -6,12 +6,15 @@ stream (sec:impl:instances), so the difference in their mean service times
 comes from the storage rule alone. eq:rqformal therefore pairs runs seed by
 seed: gain_n = zeta_bar_T(F_fix) - zeta_bar_T(F) under seed n, and adaptive
 storage wins if every run keeps up and the confidence interval of the
-mean gain lies above zero -- a paired t-test over seeds.
+mean gain lies above zero, a paired t-test over seeds. Every other scored
+quantity of each arm is reported as a mean over seeds with the same kind
+of interval (sec:pf:measures).
 
 A run that does not keep up is not compared on service time
 (eq:throughput), so any such run, or any run whose keep-up check is still
 unset because f_up is not configured, makes the comparison undecided
-rather than counting as a loss or a win.
+rather than counting as a loss or a win. An unset check shows as
+all_keep_up = None, distinct from False for a run that falls behind.
 """
 
 from __future__ import annotations
@@ -33,7 +36,38 @@ _MATCHED_FIELDS = (
     "num_agents",
     "arrival_rate",
     "horizon",
+    # The window: runs with different fields of view are not a pair.
+    "observation_depth",
 )
+
+# Every scored quantity of sec:pf:measures that is a number per run. Each is
+# reported as a mean over seeds with a confidence interval, per arm.
+_SCORED_QUANTITIES = (
+    "keep_up_ratio",
+    "throughput",
+    "mean_crowding",
+    "mean_relocated_units",
+    "mean_decision_runtime_seconds",
+)
+# The service time and its three parts exist only for runs that finished a
+# task, and a run that does not keep up is not compared on them
+# (eq:throughput), so they are summarised only when every run keeps up.
+_SERVICE_QUANTITIES = (
+    "mean_service_time",
+    "mean_wait_for_agent",
+    "mean_travel_time",
+    "mean_blocked_time",
+)
+
+
+class Interval(BaseModel):
+    """Mean over seeds and the two-sided t confidence interval of it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mean: float
+    ci_low: float
+    ci_high: float
 
 
 class PairedComparison(BaseModel):
@@ -44,9 +78,16 @@ class PairedComparison(BaseModel):
     adaptive_storage_mode: str
     num_seeds: PositiveInt
     confidence: float = Field(gt=0.0, lt=1.0)
-    # True only if every run in both arms has keeps_up == True.
-    all_keep_up: bool
-    # Per-seed gains and their summary; None when all_keep_up is False,
+    # True if every run in both arms has keeps_up == True, None (undecided)
+    # if some run's check is unset because f_up is not configured, and False
+    # otherwise.
+    all_keep_up: bool | None
+    # Per arm, each scored quantity (sec:pf:measures) as a mean over seeds
+    # with its confidence interval. The service-time quantities are left
+    # out unless all_keep_up is True.
+    fixed_summary: dict[str, Interval]
+    adaptive_summary: dict[str, Interval]
+    # Per-seed gains and their summary; None unless all_keep_up is True,
     # since service time is then not compared (eq:throughput).
     gains: tuple[float, ...] | None = None
     mean_gain: float | None = None
@@ -91,15 +132,25 @@ def compare_paired(
                 )
 
     adaptive_mode = adaptive_modes.pop()
-    all_keep_up = all(
-        run.keeps_up is True for run in (*fixed_by_seed.values(), *adaptive_by_seed.values())
-    )
+    all_runs = (*fixed_by_seed.values(), *adaptive_by_seed.values())
+    all_keep_up: bool | None
+    if any(run.keeps_up is None for run in all_runs):
+        all_keep_up = None
+    else:
+        all_keep_up = all(run.keeps_up for run in all_runs)
+
+    names = _SCORED_QUANTITIES + (_SERVICE_QUANTITIES if all_keep_up else ())
+    fixed_summary = _summarise([fixed_by_seed[seed] for seed in seeds], names, confidence)
+    adaptive_summary = _summarise([adaptive_by_seed[seed] for seed in seeds], names, confidence)
+
     if not all_keep_up:
         return PairedComparison(
             adaptive_storage_mode=adaptive_mode,
             num_seeds=len(seeds),
             confidence=confidence,
-            all_keep_up=False,
+            all_keep_up=all_keep_up,
+            fixed_summary=fixed_summary,
+            adaptive_summary=adaptive_summary,
             shortens_service_time=False,
         )
 
@@ -117,6 +168,8 @@ def compare_paired(
         num_seeds=len(seeds),
         confidence=confidence,
         all_keep_up=True,
+        fixed_summary=fixed_summary,
+        adaptive_summary=adaptive_summary,
         gains=tuple(gains),
         mean_gain=mean_gain,
         ci_low=ci_low,
@@ -132,6 +185,20 @@ def _by_seed(runs: Sequence[RunMetrics], name: str) -> dict[int, RunMetrics]:
             raise ValueError(f"{name} has two runs with seed {run.seed}; pairing needs one each.")
         by_seed[run.seed] = run
     return by_seed
+
+
+def _summarise(
+    runs: Sequence[RunMetrics], names: Sequence[str], confidence: float
+) -> dict[str, Interval]:
+    """Mean and interval over the runs (one per seed) of each named field."""
+    summary = {}
+    for name in names:
+        values = [getattr(run, name) for run in runs]
+        # The service-time fields are set for every run that keeps up.
+        assert all(value is not None for value in values)
+        mean, low, high = _mean_and_interval(values, confidence)
+        summary[name] = Interval(mean=mean, ci_low=low, ci_high=high)
+    return summary
 
 
 def _mean_and_interval(values: Sequence[float], confidence: float) -> tuple[float, float, float]:

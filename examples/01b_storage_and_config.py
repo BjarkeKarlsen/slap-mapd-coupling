@@ -102,6 +102,7 @@ def show_run_metrics_shape() -> None:
         arrival_rate=1.0,
         seed=0,
         horizon=1000,
+        observation_depth=3,
         num_completed_tasks=0,
         throughput=0.0,
         keep_up_ratio=0.0,

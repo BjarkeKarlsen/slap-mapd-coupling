@@ -17,6 +17,7 @@ def _run(seed: int, service_time: float, storage_mode: str = "fixed", **override
         arrival_rate=1.0,
         seed=seed,
         horizon=100,
+        observation_depth=3,
         num_completed_tasks=90,
         throughput=0.9,
         keep_up_ratio=0.9,
@@ -85,7 +86,44 @@ def test_a_run_that_does_not_keep_up_leaves_the_comparison_undecided():
 
 def test_unset_keep_up_check_leaves_the_comparison_undecided():
     fixed, adaptive = _arms([10.0, 11.0], [9.0, 10.0], keeps_up=None)
-    assert not compare_paired(fixed, adaptive).all_keep_up
+    result = compare_paired(fixed, adaptive)
+    assert result.all_keep_up is None
+    assert result.mean_gain is None
+    assert not result.shortens_service_time
+
+
+def test_a_run_that_falls_behind_is_false_not_none():
+    fixed, adaptive = _arms([10.0, 11.0], [9.0, 10.0])
+    adaptive[1] = _run(1, 10.0, storage_mode="demand", keeps_up=False)
+    assert compare_paired(fixed, adaptive).all_keep_up is False
+
+
+def test_runs_with_different_windows_are_not_a_pair():
+    fixed, adaptive = _arms([10.0, 11.0], [9.0, 10.0], observation_depth=5)
+    with pytest.raises(ValueError, match="observation_depth"):
+        compare_paired(fixed, adaptive)
+
+
+def test_every_scored_quantity_has_an_interval_per_arm():
+    crowding = [0.1, 0.2, 0.3, 0.4]
+    fixed = [_run(seed, 10.0, mean_crowding=c) for seed, c in enumerate(crowding)]
+    adaptive = [_run(seed, 9.0, storage_mode="demand", mean_crowding=0.05) for seed in range(4)]
+    result = compare_paired(fixed, adaptive)
+    summary = result.fixed_summary["mean_crowding"]
+    expected = stats.t.interval(0.95, df=3, loc=0.25, scale=stats.sem(crowding))
+    assert summary.mean == pytest.approx(0.25)
+    assert (summary.ci_low, summary.ci_high) == pytest.approx(expected)
+    assert result.adaptive_summary["mean_crowding"].ci_low == pytest.approx(0.05)
+    assert result.adaptive_summary["mean_service_time"].mean == pytest.approx(9.0)
+    for name in ("keep_up_ratio", "throughput", "mean_relocated_units", "mean_travel_time"):
+        assert name in result.fixed_summary
+
+
+def test_service_time_is_summarised_only_when_every_run_keeps_up():
+    fixed, adaptive = _arms([10.0, 11.0], [9.0, 10.0], keeps_up=None)
+    result = compare_paired(fixed, adaptive)
+    assert "mean_service_time" not in result.fixed_summary
+    assert "mean_crowding" in result.fixed_summary
 
 
 def test_seeds_must_match():
