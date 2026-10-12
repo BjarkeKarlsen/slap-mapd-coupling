@@ -94,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same "two copies drift apart" problem the wiki's Home page was
   deliberately kept free of. Bugs/documentation-worthy findings go
   straight to an issue from now on — see `AGENTS.md`.
+- `EpisodeLog.total_movement_cost` and its per-step accumulation in
+  `WarehouseMAPDEnv`, with the `_edge_costs` lookup it needed. The scoring
+  (`sec:pf:measures`) no longer reports movement cost. `edge_traversals`
+  stays, since the storage estimates of #60 will read it.
 
 ## [0.1.0] - 2026-08-14
 
