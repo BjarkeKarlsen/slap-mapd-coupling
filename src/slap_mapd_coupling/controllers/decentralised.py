@@ -148,7 +148,8 @@ def _single_agent_batch(encoded: EncodedObservation) -> dict:
             "observations": {
                 "node_features": to_tensor(encoded.node_features),
                 "node_mask": to_tensor(encoded.node_mask),
-                "adjacency": to_tensor(encoded.adjacency),
+                "edge_index": to_tensor(encoded.edge_index),
+                "edge_mask": to_tensor(encoded.edge_mask),
                 "own_index": to_tensor(encoded.own_index),
                 "message_features": to_tensor(encoded.message_features),
                 "message_mask": to_tensor(encoded.message_mask),

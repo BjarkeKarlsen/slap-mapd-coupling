@@ -1,28 +1,10 @@
-"""pi_theta(.|o_i(t)) and V_theta(o_i(t)) (sec:method:model, issue #28):
-fully connected layers with ReLU activations over z_i (the readout).
+"""pi_theta(.|o_i(t)) and V_theta(o_i(t)) (sec:method:model): fully
+connected layers with ReLU activations over z_i (the readout).
 
-Scoped to the issue's literal text -- "fully connected layers with ReLU
-activations over z_i ... masked per the action mask before the softmax"
--- as the policy/value heads over the encoder's output. Masking itself
-is NOT applied here: #26's ActionMaskingTorchRLModule already owns
-"masked ... before the softmax" as RLlib infrastructure (it adds -inf
-to raw action logits before they reach the action distribution).
-Re-masking here would double-apply the action mask, so this module
-hands back raw (unmasked) logits plus a scalar value -- exactly the
-pair #26 expects to receive.
-
-The issue's own text calls this a "TorchModelV2 wrapper," which is
-stale relative to RLlib's actual current API (see models/gnn_encoder.py
-and environment/action_masking.py, which already established this: the
-new API stack uses RLModule, not TorchModelV2). Registering
-GNNEncoder + PolicyValueHead as the real RLlib RLModule/Catalog that
-#26 wraps -- so DefaultPPOTorchRLModule builds this architecture
-instead of RLlib's own default MLP-on-flat-observation -- is #29/#30's
-job (decentralised controller wrapper / training config), not this
-one. This module is deliberately RLlib-agnostic: a plain, independently
-testable PyTorch nn.Module operating on encode_observation()'s tensors
-(models/local_subgraph_encoding.py), the same "pure module now, RLlib
-wiring deferred" split GNNEncoder.forward/forward_padded already uses.
+The heads return raw logits and a scalar value. The action mask is applied
+afterwards by ActionMaskingTorchRLModule (environment/action_masking.py),
+so masking here would apply it twice. This module is plain PyTorch with no
+RLlib dependency. The RLlib wiring is in models/rl_module.py.
 """
 
 from __future__ import annotations
@@ -45,11 +27,9 @@ class PolicyValueHeadConfig(BaseModel):
 
 
 class PolicyValueHead(nn.Module):
-    """FC+ReLU trunk over z_i, then separate policy (num_actions raw
-    logits) and value (scalar) outputs -- the conventional actor-critic
-    realisation of "fully connected layers with ReLU activations over
-    z_i" (issue #28); a shared trunk isn't itself pinned down further by
-    the thesis text, so this is a defensible, not a forced, choice."""
+    """FC+ReLU trunk over z_i, then a policy output (num_actions raw logits)
+    and a value output (scalar). The shared trunk is a choice, not a thesis
+    fact."""
 
     def __init__(self, input_dim: int, config: PolicyValueHeadConfig) -> None:
         super().__init__()
@@ -66,12 +46,9 @@ class PolicyValueHead(nn.Module):
 
 
 class GNNPolicyValueModel(nn.Module):
-    """The full pi_theta/V_theta pipeline (sec:method:model):
-    GNNEncoder.forward_padded (#27) -> PolicyValueHead. The decentralised
-    policy reads o_i(t) and the received messages, not o_i(t) alone, so
-    the pipeline maps (o_i(t), received messages) -> (raw logits, value).
-    Batched only (mirrors forward_padded); RLlib wiring is #29/#30's job,
-    see module docstring."""
+    """GNNEncoder.forward_padded followed by PolicyValueHead
+    (sec:method:model), on the padded tensors of
+    models/local_subgraph_encoding.py. Batched only."""
 
     def __init__(self, encoder: GNNEncoder, head_config: PolicyValueHeadConfig) -> None:
         super().__init__()
@@ -82,7 +59,8 @@ class GNNPolicyValueModel(nn.Module):
         self,
         node_features: torch.Tensor,
         node_mask: torch.Tensor,
-        adjacency: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_mask: torch.Tensor,
         own_index: torch.Tensor,
         message_features: torch.Tensor,
         message_mask: torch.Tensor,
@@ -91,7 +69,8 @@ class GNNPolicyValueModel(nn.Module):
         z = self.encoder.forward_padded(
             node_features,
             node_mask,
-            adjacency,
+            edge_index,
+            edge_mask,
             own_index,
             message_features,
             message_mask,

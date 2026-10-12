@@ -93,7 +93,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._next_train_seed_index = 0
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
-        base_observation_space = encoded_observation_space(encoding_config)
+        base_observation_space = encoded_observation_space(encoding_config, self._d_max)
         per_agent_observation_space = masked_observation_space(
             base_observation_space, self._d_max + 1
         )

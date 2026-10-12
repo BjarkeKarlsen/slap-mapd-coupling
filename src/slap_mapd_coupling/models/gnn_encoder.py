@@ -1,35 +1,17 @@
-"""Multi-round message-passing encoder over the local observation graph
-G_i^(d_obs)(t) (sec:method:model, the message-passing step / the readout).
+"""Multi-round message-passing encoder over the field of view G_i^(d_obs)(t)
+(sec:method:model, the message-passing step and the readout).
 
-h_v^(0) = f(v,t) (the vertex features); for r = 1..L:
-  m_v^(r) = phi_r(h_v^(r-1), {h_w^(r-1) : w in G_i^(d_obs)(t), (w,v) or (v,w) in E})
-  h_v^(r) = psi_r(h_v^(r-1), m_v^(r))
-z_i = h_{l_i(t)}^(L) || AGG(messages from a_j : (a_i,a_j) in E^A_t) || delta_i(t)
+phi_r is a per-neighbour MLP over concat(h_v, h_w), averaged over the
+neighbour set, and psi_r is an MLP over concat(h_v, m_v). The thesis
+leaves their internal form open. AGG for incoming messages is the mean.
+L and the hidden width (tab:modelparams) live in GNNEncoderConfig, local
+to this module like GeneratorParams in instances/generator.py.
 
-phi_r/psi_r's internal form isn't pinned down beyond this signature.
-Realised here as a standard MPNN pair: phi_r is a per-neighbour-pair MLP
-(concat(h_v, h_w)) mean-pooled over the neighbour set, and psi_r is a
-second MLP over concat(h_v, m_v). AGG for incoming messages is mean, as
-the readout's own parenthetical suggests ("e.g. mean").
-
-L and hidden width (tab:modelparams) are TBD-by-sweep, so they live in
-GNNEncoderConfig here, not ExperimentConfig, the same "parameters local
-to the module they configure" pattern instances/generator.py's own
-GeneratorParams follows.
-
-L=0 collapses the message-passing step to raw node features, with no
-propagation within the field of view. Communication has its own switch
-(ExperimentConfig.communication): the message mean at L=0 is unchanged,
-so the structural ablation and the communication ablation are separate
-(4.Implementation.tex:379-382).
-
-`forward` is the unbatched path: one Observation in, one z_i out.
-`forward_padded` is the batched entry point over already-padded/masked
-tensors (models/local_subgraph_encoding.py), needed because
-G_i^(d_obs)(t) has a variable vertex count RLlib's fixed-shape pipeline
-can't carry directly. Both paths share the same phi/psi weights and
-compute the same message-passing step, just vectorised; tests check
-they agree on the same input.
+`forward` is the unbatched oracle, one Observation in, one z_i out.
+`forward_padded` is the batched path over the padded tensors of
+models/local_subgraph_encoding.py. It passes messages over an undirected
+edge list, so its cost grows with the number of edges (issue #86). Tests
+check that both paths agree.
 """
 
 from __future__ import annotations
@@ -48,8 +30,7 @@ MESSAGE_FEATURE_DIM = 2  # hand-built (distance, eta) messages, until #91's lear
 
 
 class GNNEncoderConfig(BaseModel):
-    """L and hidden width (tab:modelparams). See module docstring for why
-    this lives here rather than on ExperimentConfig."""
+    """L and hidden width (tab:modelparams)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -71,10 +52,8 @@ def _node_feature_vector(features: VertexFeatures) -> list[float]:
 def _local_undirected_neighbours(
     graph: WarehouseGraph, visible: Sequence[VertexId]
 ) -> dict[VertexId, set[VertexId]]:
-    """{v: {w : (w,v) in E or (v,w) in E, w in G_i^(d_obs)(t)}} -- the
-    message-passing step's neighbour set is explicitly "or," so a
-    one-way edge in either direction still counts, restricted to the
-    visible vertex set."""
+    """The neighbour set of the message-passing step. An edge in either
+    direction counts, restricted to the visible vertices."""
     visible_set = set(visible)
     neighbours: dict[VertexId, set[VertexId]] = {v: set() for v in visible}
     for edge in graph.edges:
@@ -86,10 +65,8 @@ def _local_undirected_neighbours(
 
 class GNNEncoder(nn.Module):
     """z_i (the readout), via L rounds of the message-passing step over
-    G_i^(d_obs)(t). See module docstring for phi_r/psi_r's realisation and
-    the L=0 ablation. Weights are shared across all agents (parameter
-    sharing, sec:pf:controllers) -- one GNNEncoder instance, called once
-    per agent per decision, not one instance per agent.
+    the field of view. L = 0 gives the raw node features. Weights are
+    shared across all agents (sec:pf:controllers).
     """
 
     def __init__(self, config: GNNEncoderConfig) -> None:
@@ -160,45 +137,55 @@ class GNNEncoder(nn.Module):
         self,
         node_features: torch.Tensor,
         node_mask: torch.Tensor,
-        adjacency: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_mask: torch.Tensor,
         own_index: torch.Tensor,
         message_features: torch.Tensor,
         message_mask: torch.Tensor,
         congestion: torch.Tensor,
     ) -> torch.Tensor:
-        """Batched z_i (the readout) over already-padded/masked tensors --
-        see class docstring. Shapes, with B the batch size, N
-        max_local_nodes, M max_messages (models/local_subgraph_encoding.py):
+        """Batched z_i (the readout) over padded tensors. B is the batch
+        size, N max_local_nodes, E the edge list length, M max_messages.
 
-        node_features [B,N,NODE_FEATURE_DIM], node_mask [B,N] (1 valid /
-        0 pad), adjacency [B,N,N] (1 undirected neighbour / 0 otherwise,
-        already 0 on any padded row/col), own_index [B] (long, which row
-        is l_i(t)), message_features [B,M,MESSAGE_FEATURE_DIM],
-        message_mask [B,M], congestion [B].
+        node_features [B,N,NODE_FEATURE_DIM], node_mask [B,N], edge_index
+        [B,E,2] (int64, one row per undirected pair, padded rows point at
+        vertex 0), edge_mask [B,E] (1 valid / 0 pad), own_index [B] (int64),
+        message_features [B,M,MESSAGE_FEATURE_DIM], message_mask [B,M],
+        congestion [B].
 
-        Mathematically identical to `forward`'s per-vertex mean
-        aggregation: phi_r is evaluated for every (v,w) pair densely,
-        weighted by `adjacency` (zeroing out non-neighbours and padding
-        in one step) and averaged by each node's own (masked) degree --
-        the same neighbour-set mean `forward` computes sparsely via a
-        Python loop, just vectorised.
+        The batch is flattened to B*N vertices. Each edge gives both
+        directions, phi_r runs once per directed edge, and the results are
+        summed per receiving vertex and divided by its masked degree
+        (minimum 1). This equals `forward`'s mean over each vertex's
+        neighbour set. Padded edges and vertices carry zero weight.
         """
         h = node_features
         batch_size, max_nodes, _ = h.shape
 
         if self.config.num_rounds > 0:
+            offsets = (torch.arange(batch_size, device=h.device) * max_nodes).unsqueeze(1)
+            first = edge_index[..., 0]  # [B,E]
+            second = edge_index[..., 1]  # [B,E]
+            edge_weight = edge_mask * node_mask.gather(1, first) * node_mask.gather(1, second)
+            weight = edge_weight.reshape(-1)
+            receivers = torch.cat([(first + offsets).reshape(-1), (second + offsets).reshape(-1)])
+            senders = torch.cat([(second + offsets).reshape(-1), (first + offsets).reshape(-1)])
+            weight = torch.cat([weight, weight])  # [2*B*E], one entry per directed edge
+            degree = torch.zeros(batch_size * max_nodes, dtype=h.dtype, device=h.device)
+            degree.index_add_(0, receivers, weight)
+            degree = degree.clamp(min=1.0).unsqueeze(-1)  # [B*N,1]
+
             for phi_r, psi_r in zip(self.phi, self.psi):
-                own = h.unsqueeze(2).expand(batch_size, max_nodes, max_nodes, -1)
-                other = h.unsqueeze(1).expand(batch_size, max_nodes, max_nodes, -1)
-                pairwise = torch.cat([own, other], dim=-1)
-                pairwise_messages = phi_r(pairwise)  # [B,N,N,hidden]
-
-                weight = adjacency * node_mask.unsqueeze(1) * node_mask.unsqueeze(2)  # [B,N,N]
-                weighted = pairwise_messages * weight.unsqueeze(-1)
-                summed = weighted.sum(dim=2)  # sum over w -> [B,N,hidden]
-                degree = weight.sum(dim=2, keepdim=True).clamp(min=1.0)
-                m = summed / degree
-
+                flat = h.reshape(batch_size * max_nodes, -1)
+                edge_messages = phi_r(torch.cat([flat[receivers], flat[senders]], dim=-1))
+                summed = torch.zeros(
+                    batch_size * max_nodes,
+                    edge_messages.shape[-1],
+                    dtype=edge_messages.dtype,
+                    device=h.device,
+                )
+                summed.index_add_(0, receivers, edge_messages * weight.unsqueeze(-1))
+                m = (summed / degree).reshape(batch_size, max_nodes, -1)
                 h = psi_r(torch.cat([h, m], dim=-1))
 
         own_embedding = h[torch.arange(batch_size), own_index]  # [B, node_dim]

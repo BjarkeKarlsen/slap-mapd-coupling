@@ -1,39 +1,16 @@
-"""The GNN architecture (#27/#28) registered as an actual RLlib RLModule
-(sec:method:model, sec:method:training, issue #30).
+"""The GNN architecture registered as an RLlib RLModule (sec:method:model,
+sec:method:training).
 
-#28's own module docstring deferred exactly this wiring here: "Registering
-GNNEncoder + PolicyValueHead as the real RLlib RLModule/Catalog that #26
-wraps -- so DefaultPPOTorchRLModule builds this architecture instead of
-RLlib's own default MLP-on-flat-observation -- is #29/#30's job." Skipping
-#29 per the user's instruction, this module does that registration
-directly for #30's PPO training path.
+DefaultPPORLModule needs `setup()` to build `self.encoder`, `self.pi` and
+`self.vf`, with `self.encoder(batch)` returning
+`{ENCODER_OUT: {ACTOR: t, CRITIC: t}}`. GNNEncoder.forward_padded gives one
+shared z_i for both roles (the readout), so ACTOR and CRITIC are the same
+tensor.
 
-DefaultPPORLModule's contract (ray.rllib.algorithms.ppo.default_ppo_rl_module,
-inspected directly against the installed ray version rather than assumed
-from memory, matching the same "verify against the actual installed
-package" discipline #26/#27 already established): `setup()` must build
-`self.encoder`, `self.pi`, `self.vf`; `self.encoder(batch)` must return
-`{ENCODER_OUT: {ACTOR: t, CRITIC: t}}`; `self.pi(actor_embedding)` must
-return raw action-dist-input logits; `self.vf(critic_embedding)` must
-return a value tensor RLlib squeezes on its last dim (see
-`ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module`).
-GNNEncoder.forward_padded already produces one shared z_i (the readout)
-for both roles -- unlike RLlib's own actor/critic-encoder split, there
-is no separate value encoder here, matching the readout's single z_i
-feeding both pi_theta and V_theta (sec:method:model): ACTOR and CRITIC
-are the same tensor.
-
-GNNActionMaskingRLModule below composes this with #26's
-ActionMaskingTorchRLModule via multiple inheritance rather than
-re-deriving its forward/masking logic: verified directly (not assumed)
-that Python's C3 linearization places GNNPPOTorchRLModule in the MRO
-exactly where ActionMaskingTorchRLModule expects DefaultPPOTorchRLModule,
-so every method ActionMaskingTorchRLModule already implements --
-setup(), _forward_inference/_forward_exploration/_forward_train,
-compute_values, mask application -- works completely unchanged, only
-now dispatching to self.encoder/self.pi/self.vf as GNNPPOTorchRLModule.
-setup() builds them, instead of RLlib's Catalog-built default network.
-No masking logic is duplicated here.
+GNNActionMaskingRLModule composes this with ActionMaskingTorchRLModule by
+multiple inheritance. Python's method resolution order puts
+GNNPPOTorchRLModule where the masking module expects
+DefaultPPOTorchRLModule, so no masking logic is repeated here.
 """
 
 from __future__ import annotations
@@ -68,7 +45,8 @@ class _GNNSharedEncoder(nn.Module):
         z = self.gnn.forward_padded(
             obs["node_features"],
             obs["node_mask"],
-            obs["adjacency"],
+            obs["edge_index"],
+            obs["edge_mask"],
             obs["own_index"],
             obs["message_features"],
             obs["message_mask"],
