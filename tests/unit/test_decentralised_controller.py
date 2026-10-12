@@ -66,7 +66,7 @@ def _decentralised_config(**overrides) -> ExperimentConfig:
 
 def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig):
     d_max = max_out_degree(graph)
-    base_space = encoded_observation_space(enc_config)
+    base_space = encoded_observation_space(enc_config, d_max)
     obs_space = masked_observation_space(base_space, d_max + 1)
     spec = RLModuleSpec(
         module_class=GNNActionMaskingRLModule,

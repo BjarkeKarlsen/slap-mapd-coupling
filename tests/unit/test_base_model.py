@@ -42,14 +42,22 @@ def test_gnn_policy_value_model_end_to_end_shapes():
     batch_size, n, m = 2, 5, 3
     node_features = torch.randn(batch_size, n, NODE_FEATURE_DIM)
     node_mask = torch.ones(batch_size, n)
-    adjacency = torch.zeros(batch_size, n, n)
+    edge_index = torch.zeros(batch_size, 2, 2, dtype=torch.long)
+    edge_mask = torch.zeros(batch_size, 2)
     own_index = torch.zeros(batch_size, dtype=torch.long)
     message_features = torch.randn(batch_size, m, MESSAGE_FEATURE_DIM)
     message_mask = torch.ones(batch_size, m)
     congestion = torch.zeros(batch_size)
 
     logits, value = model(
-        node_features, node_mask, adjacency, own_index, message_features, message_mask, congestion
+        node_features,
+        node_mask,
+        edge_index,
+        edge_mask,
+        own_index,
+        message_features,
+        message_mask,
+        congestion,
     )
     assert logits.shape == (batch_size, 4)
     assert value.shape == (batch_size,)
@@ -66,13 +74,21 @@ def test_gnn_policy_value_model_logits_are_unmasked_raw_values():
 
     node_features = torch.randn(1, 2, NODE_FEATURE_DIM)
     node_mask = torch.ones(1, 2)
-    adjacency = torch.zeros(1, 2, 2)
+    edge_index = torch.zeros(1, 2, 2, dtype=torch.long)
+    edge_mask = torch.zeros(1, 2)
     own_index = torch.zeros(1, dtype=torch.long)
     message_features = torch.zeros(1, 1, MESSAGE_FEATURE_DIM)
     message_mask = torch.zeros(1, 1)
     congestion = torch.zeros(1)
 
     logits, _ = model(
-        node_features, node_mask, adjacency, own_index, message_features, message_mask, congestion
+        node_features,
+        node_mask,
+        edge_index,
+        edge_mask,
+        own_index,
+        message_features,
+        message_mask,
+        congestion,
     )
     assert torch.isfinite(logits).all()

@@ -1,20 +1,18 @@
-"""Pads/masks a structured Observation (#25, environment/observation.py)
-into the fixed-shape tensors GNNEncoder.forward_padded (#27) and RLlib's
-batched training pipeline need.
+"""Pads and masks an Observation (environment/observation.py) into the
+fixed-shape arrays GNNEncoder.forward_padded and RLlib's batched pipeline
+need. The field of view has a variable vertex count, so everything is
+padded to max_local_nodes.
 
-G_i^(d_obs)(t) has a variable vertex count (the field of view); RLlib's
-tensor-batched pipeline needs a fixed shape, so this pads/masks to a
-fixed max_local_nodes cap.
+The thesis does not say what to do when the field of view exceeds the cap
+(issue #66), so the truncation is a flagged choice. Nodes keep the
+agent's own vertex first, then the rest by ascending eta_i(v,t). An edge
+to a dropped vertex is left out of the edge list. Messages keep the
+max_messages closest senders by distance.
 
-The thesis doesn't say what to do when |G_i^(d_obs)(t)| exceeds a fixed
-cap, so the truncation policy is a flagged choice, not a thesis fact:
-  - Nodes: always keep the agent's own vertex l_i(t) (own_index must be
-    valid), then fill remaining slots by ascending eta_i(v,t) (the
-    distance label), keeping the vertices closest to the agent's current
-    goal first. An edge to a truncated-away vertex is simply absent from
-    the resulting (dense) adjacency.
-  - Messages: keep the max_messages closest senders by distance
-    (Message.distance).
+The edge list has one row per undirected pair among the selected
+vertices, padded to E_max = max_local_nodes * d_max. That bound holds
+because every selected pair is a directed edge, and no selected vertex
+has more than d_max outgoing edges.
 """
 
 from __future__ import annotations
@@ -35,9 +33,8 @@ from slap_mapd_coupling.models.gnn_encoder import MESSAGE_FEATURE_DIM, NODE_FEAT
 
 
 class LocalSubgraphEncodingConfig(BaseModel):
-    """max_local_nodes/max_messages: the padding caps. Model architecture
-    hyperparameters, local to this module -- same "not ExperimentConfig"
-    pattern as GNNEncoderConfig (see models/gnn_encoder.py's docstring)."""
+    """max_local_nodes/max_messages: the padding caps. Local to this module,
+    like GNNEncoderConfig."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -47,12 +44,13 @@ class LocalSubgraphEncodingConfig(BaseModel):
 
 @dataclass(frozen=True)
 class EncodedObservation:
-    """The padded/masked tensors for one agent at one timestep, unbatched
-    (no leading batch dim -- callers stack these themselves)."""
+    """The padded arrays for one agent at one timestep, without a batch
+    dimension."""
 
     node_features: np.ndarray  # [max_local_nodes, NODE_FEATURE_DIM]
     node_mask: np.ndarray  # [max_local_nodes], 1.0 valid / 0.0 pad
-    adjacency: np.ndarray  # [max_local_nodes, max_local_nodes]
+    edge_index: np.ndarray  # [E_max, 2] int64, one row per undirected pair, pad rows are (0, 0)
+    edge_mask: np.ndarray  # [E_max], 1.0 valid / 0.0 pad
     own_index: int
     message_features: np.ndarray  # [max_messages, MESSAGE_FEATURE_DIM]
     message_mask: np.ndarray  # [max_messages]
@@ -60,16 +58,15 @@ class EncodedObservation:
     action_mask: np.ndarray  # [num_actions], {0.0, 1.0} -- to_action_mask(mask)
 
     def as_rllib_dict(self) -> dict[str, Any]:
-        """{"action_mask": ..., "observations": {...}} -- the Dict shape
-        masked_observation_space()/ActionMaskingTorchRLModule (#26) and
-        encoded_observation_space() below expect, for one agent's o_i(t)
-        as an RLlib env's per-agent obs (training/rllib_env.py, #30)."""
+        """{"action_mask": ..., "observations": {...}}, the Dict shape that
+        masked_observation_space() and encoded_observation_space() declare."""
         return {
             "action_mask": self.action_mask,
             "observations": {
                 "node_features": self.node_features,
                 "node_mask": self.node_mask,
-                "adjacency": self.adjacency,
+                "edge_index": self.edge_index,
+                "edge_mask": self.edge_mask,
                 "own_index": self.own_index,
                 "message_features": self.message_features,
                 "message_mask": self.message_mask,
@@ -78,11 +75,15 @@ class EncodedObservation:
         }
 
 
-def encoded_observation_space(config: LocalSubgraphEncodingConfig) -> gym.spaces.Dict:
-    """The "observations" half of masked_observation_space() (#26) for one
-    agent's o_i(t) -- i.e. encoded_observation_space(config) is exactly
-    what a caller should pass as masked_observation_space's
-    base_observation_space when training the decentralised regime."""
+def max_edges(config: LocalSubgraphEncodingConfig, d_max: int) -> int:
+    """E_max, the padded length of the edge list."""
+    return config.max_local_nodes * d_max
+
+
+def encoded_observation_space(config: LocalSubgraphEncodingConfig, d_max: int) -> gym.spaces.Dict:
+    """The "observations" half of masked_observation_space() for one agent.
+    `d_max` is max_out_degree(graph), which sets the edge list's size."""
+    num_edges = max_edges(config, d_max)
     return gym.spaces.Dict(
         {
             "node_features": gym.spaces.Box(
@@ -94,12 +95,13 @@ def encoded_observation_space(config: LocalSubgraphEncodingConfig) -> gym.spaces
             "node_mask": gym.spaces.Box(
                 low=0.0, high=1.0, shape=(config.max_local_nodes,), dtype=np.float32
             ),
-            "adjacency": gym.spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(config.max_local_nodes, config.max_local_nodes),
-                dtype=np.float32,
+            "edge_index": gym.spaces.Box(
+                low=0,
+                high=config.max_local_nodes - 1,
+                shape=(num_edges, 2),
+                dtype=np.int64,
             ),
+            "edge_mask": gym.spaces.Box(low=0.0, high=1.0, shape=(num_edges,), dtype=np.float32),
             "own_index": gym.spaces.Discrete(config.max_local_nodes),
             "message_features": gym.spaces.Box(
                 low=-np.inf,
@@ -118,8 +120,7 @@ def encoded_observation_space(config: LocalSubgraphEncodingConfig) -> gym.spaces
 def _select_nodes(
     observation: Observation, agent_location: VertexId, max_local_nodes: int
 ) -> list[VertexId]:
-    """l_i(t) always first (guarantees own_index is valid), then the
-    remaining visible vertices by ascending eta -- see module docstring."""
+    """l_i(t) first, then the remaining visible vertices by ascending eta."""
     visible = list(observation.visible_vertices)
     if len(visible) <= max_local_nodes:
         return visible
@@ -131,7 +132,7 @@ def _select_nodes(
 
 
 def _select_messages(observation: Observation, max_messages: int) -> tuple[Message, ...]:
-    """The max_messages closest senders by distance -- see module docstring."""
+    """The max_messages closest senders by distance."""
     if len(observation.messages) <= max_messages:
         return observation.messages
     return tuple(sorted(observation.messages, key=lambda m: m.distance)[:max_messages])
@@ -144,11 +145,9 @@ def encode_observation(
     mask: Mask,
     config: LocalSubgraphEncodingConfig,
 ) -> EncodedObservation:
-    """o_i(t) (#25) + its action mask (environment/spaces.py::legality_mask,
-    the action mask) -> the fixed-shape EncodedObservation GNNEncoder.forward_padded
-    (#27) and RLlib both need. `mask` is the caller's own legality_mask
-    result, not recomputed here (same "pass it, don't recompute per call"
-    convention legality_mask's own docstring already uses for d_max)."""
+    """o_i(t) and its action mask -> the fixed-shape EncodedObservation.
+    `mask` is the caller's own legality_mask result. Its length is
+    d_max + 1, which sets the edge list's size."""
     selected = _select_nodes(observation, agent_location, config.max_local_nodes)
     index = {v: i for i, v in enumerate(selected)}
     n = len(selected)
@@ -167,11 +166,18 @@ def encode_observation(
     node_mask = np.zeros(config.max_local_nodes, dtype=np.float32)
     node_mask[:n] = 1.0
 
-    adjacency = np.zeros((config.max_local_nodes, config.max_local_nodes), dtype=np.float32)
+    num_edges = max_edges(config, len(mask) - 1)
+    edge_index = np.zeros((num_edges, 2), dtype=np.int64)
+    edge_mask = np.zeros(num_edges, dtype=np.float32)
+    pairs: set[tuple[int, int]] = set()
     for edge in graph.edges:
         if edge.source in index and edge.target in index:
-            adjacency[index[edge.source], index[edge.target]] = 1.0
-            adjacency[index[edge.target], index[edge.source]] = 1.0
+            a, b = index[edge.source], index[edge.target]
+            pair = (min(a, b), max(a, b))
+            if pair not in pairs:
+                edge_index[len(pairs)] = pair
+                edge_mask[len(pairs)] = 1.0
+                pairs.add(pair)
 
     own_index = index[agent_location]
 
@@ -185,7 +191,8 @@ def encode_observation(
     return EncodedObservation(
         node_features=node_features,
         node_mask=node_mask,
-        adjacency=adjacency,
+        edge_index=edge_index,
+        edge_mask=edge_mask,
         own_index=own_index,
         message_features=message_features,
         message_mask=message_mask,
