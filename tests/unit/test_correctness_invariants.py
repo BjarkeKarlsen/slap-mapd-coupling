@@ -157,7 +157,7 @@ def test_replay_is_bit_for_bit_deterministic_under_a_fixed_seed(seed: int):
             (t.task_id, t.release_time, t.assignment_time, t.pickup_time, t.finish_time)
             for t in sorted(env.tasks, key=lambda t: t.task_id)
         )
-        return trace, task_snapshot, env.log.edge_traversals, env.log.total_movement_cost
+        return trace, task_snapshot, env.log.edge_traversals
 
     first = run()
     second = run()

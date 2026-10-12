@@ -103,11 +103,11 @@ class EpisodeLog:
     episode to build one RunMetrics row; this class only accumulates,
     it does not itself compute throughput/service time/etc.
 
-    edge_traversals and total_movement_cost are not part of the score
-    (sec:pf:measures no longer reports traffic concentration or movement
-    cost). They stay logged because the replay-determinism invariant
-    compares them, and per-edge traversal counts are what an online
-    traffic estimator for F (issue #60) would read.
+    edge_traversals is not part of the score (sec:pf:measures no longer
+    reports traffic concentration or movement cost). It stays logged
+    because the replay-determinism invariant compares it, and per-edge
+    traversal counts are what an online traffic estimator for F (issue
+    #60) would read.
     """
 
     edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)
@@ -115,7 +115,6 @@ class EpisodeLog:
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)
-    total_movement_cost: float = 0.0  # sum_i sum_t hat_c(l_i(t), l_i(t+1)), eq:onestepcost
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
     # every controller (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
@@ -149,10 +148,6 @@ class WarehouseMAPDEnv:
         # module docstring ("Controller resolution is therefore lazy").
         self._controller: Controller | None = None
         self._storage_rule = get_storage_rule(config.storage_mode)
-        # eq:onestepcost's c(v,w): graph.out_neighbours only exposes
-        # targets, not per-edge cost, so cache a lookup once rather than
-        # linear-scanning graph.edges every step for total_movement_cost.
-        self._edge_costs: dict[EdgeKey, float] = {(e.source, e.target): e.cost for e in graph.edges}
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -288,17 +283,6 @@ class WarehouseMAPDEnv:
         for agent_id, action in proposed.items():
             if action.kind == "move" and realised_locations[agent_id] == action.target:
                 self.log.record_edge((before_locations[agent_id], action.target))
-
-        # eq:onestepcost's hat_c(l_i(t), l_i(t+1)), summed into
-        # log.total_movement_cost -- against the REALISED transition for every
-        # agent, not the proposal, so an overridden move is correctly
-        # costed as a wait, not as the move that didn't happen.
-        for agent_id, before_v in before_locations.items():
-            after_v = realised_locations[agent_id]
-            if before_v == after_v:
-                self.log.total_movement_cost += self.graph.wait_cost
-            else:
-                self.log.total_movement_cost += self._edge_costs[(before_v, after_v)]
 
         self.fleet = result.fleet
         next_t = self._t + 1
