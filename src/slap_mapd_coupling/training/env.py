@@ -13,12 +13,13 @@ this exact purpose (issue #30) -- so this file only translates between
 RLlib's gym-style, action-driven MultiAgentEnv contract and
 WarehouseMAPDEnv's own (full-state, controller-driven-OR-externally-
 driven) contract:
-  - observation: o_i(t) (#25's build_observation) encoded to a fixed
-    shape (#28's encode_observation) plus its action mask, wrapped as
+  - observation: o_i(t) and, with communication on, the views of the
+    agents it hears, encoded to a fixed shape by encode_all_observations
+    (#28) plus the action mask, wrapped as
     {"action_mask": ..., "observations": ...} (#26's
     masked_observation_space contract);
   - action: RLlib hands back one action SLOT per agent (Discrete(d_max+1),
-    eq:mask), passed straight through to WarehouseMAPDEnv.step(actions).
+    the action mask), passed straight through to WarehouseMAPDEnv.step(actions).
 
 Only ever constructed with config.controller="decentralised" -- the
 other two architectures already have their own env-driven loop
@@ -46,11 +47,10 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
-from slap_mapd_coupling.environment.observation import build_observation
-from slap_mapd_coupling.environment.spaces import action_space, legality_mask, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
-    encode_observation,
+    encode_all_observations,
     encoded_observation_space,
 )
 
@@ -93,7 +93,9 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._next_train_seed_index = 0
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
-        base_observation_space = encoded_observation_space(encoding_config, self._d_max)
+        base_observation_space = encoded_observation_space(
+            encoding_config, self._d_max, config.communication
+        )
         per_agent_observation_space = masked_observation_space(
             base_observation_space, self._d_max + 1
         )
@@ -145,15 +147,13 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         return observations, str_rewards, str_terminated, str_truncated, str_infos
 
     def _encode_all_observations(self) -> dict[str, Any]:
-        locations = self._env.fleet.locations()
-        observations: dict[str, Any] = {}
-        for agent_id, location in locations.items():
-            observation = build_observation(
-                self.graph, self._env.fleet, self._env.tasks, agent_id, self._env.t, self._config
-            )
-            mask = legality_mask(self.graph, location, d_max=self._d_max)
-            encoded = encode_observation(
-                self.graph, location, observation, mask, self._encoding_config
-            )
-            observations[str(agent_id)] = encoded.as_rllib_dict()
-        return observations
+        encoded = encode_all_observations(
+            self.graph,
+            self._env.fleet,
+            self._env.tasks,
+            self._env.t,
+            self._config,
+            self._encoding_config,
+            self._d_max,
+        )
+        return {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}

@@ -200,7 +200,7 @@ def train(
     use_gpu: bool = False,
 ):
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32)
+    gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32, communication=config.communication)
     d_max = max_out_degree(graph)
     head_config = PolicyValueHeadConfig(hidden_width=32, num_actions=d_max + 1)
 

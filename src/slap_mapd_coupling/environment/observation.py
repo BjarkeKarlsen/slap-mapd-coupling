@@ -1,16 +1,11 @@
-"""o_i(t), the decentralised observation (sec:method:rl).
+"""o_i(t), the decentralised observation (sec:pf:observations).
 
 Built from the field of view G_i^(d_obs)(t), the distance label eta_i(v,t)
 on every visible vertex and the congestion feature delta_i(t). The result
-is a structured Observation. Encoding it into tensors is the job of
-models/ (sec:method:model).
-
-Where the code still differs from the thesis:
-- Messages are carried here as hand-built (distance, eta_j) pairs. In the
-  thesis they are learned by the policy and are not part of o_i(t), see
-  issue #91.
-- The field of view and the communication graph use cost distance d_G,
-  not hop distance, see issue #89.
+is a structured Observation. Messages are not part of it, since they depend
+on the network's weights (sec:method:model). Encoding the observation into
+tensors is the job of models/. The field of view and the communication graph
+use cost distance d_G.
 
 The vertex features use a multi-hot role (storage, delivery, endpoint,
 transit), because VertexRole allows a vertex several roles. Transit is
@@ -44,15 +39,6 @@ class VertexFeatures:
 
 
 @dataclass(frozen=True)
-class Message:
-    """One message from a_j, (d_G(l_i(t),l_j(t)), eta_j(l_j(t),t))."""
-
-    sender: AgentId
-    distance: float
-    eta: float
-
-
-@dataclass(frozen=True)
 class Observation:
     """o_i(t), the decentralised observation, structured
     rather than a fixed-size vector."""
@@ -60,14 +46,11 @@ class Observation:
     visible_vertices: tuple[VertexId, ...]  # V_i^(d_obs)(t)
     features: dict[VertexId, VertexFeatures]
     congestion: float  # delta_i(t); always one of o_i(t)'s three pieces
-    messages: tuple[Message, ...]
 
 
 def local_subgraph(graph: WarehouseGraph, location: VertexId, depth: float) -> tuple[VertexId, ...]:
-    """V_i^(d_obs)(t), the vertices of the field of view.
-
-    Uses cost distance d_G(l_i(t), v) <= d_obs. The thesis uses hop
-    distance, see issue #89."""
+    """V_i^(d_obs)(t), the vertices of the field of view, the movable
+    vertices with cost distance d_G(l_i(t), v) <= d_obs."""
     return tuple(
         v
         for v, vertex in graph.vertices.items()
@@ -105,13 +88,19 @@ def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[
 def communication_neighbours(
     graph: WarehouseGraph, fleet: FleetState, agent_id: AgentId, observation_depth: float
 ) -> tuple[AgentId, ...]:
-    """{a_j : (a_i,a_j) in E^A_t}, the communication graph,
-    bounded by d_obs."""
+    """{a_j : (a_i,a_j) in E^A_t}, the communication graph, bounded by
+    d_obs, closest first by d_G(l_i(t), l_j(t)) with ties by agent id."""
     location = fleet.locations()[agent_id]
-    return tuple(
-        other_id
+    distances = {
+        other_id: graph.distance(location, state.location)
         for other_id, state in fleet.agents.items()
-        if other_id != agent_id and graph.distance(location, state.location) <= observation_depth
+        if other_id != agent_id
+    }
+    return tuple(
+        sorted(
+            (other_id for other_id, d in distances.items() if d <= observation_depth),
+            key=lambda other_id: (distances[other_id], other_id),
+        )
     )
 
 
@@ -148,23 +137,4 @@ def build_observation(
 
     congestion = occupancy_fraction(fleet, visible, excl={agent_id})
 
-    messages: tuple[Message, ...] = ()
-    if config.communication:
-        messages = tuple(
-            Message(
-                sender=other_id,
-                distance=graph.distance(location, locations[other_id]),
-                eta=eta(
-                    graph,
-                    locations[other_id],
-                    current_target(locations[other_id], active_by_agent.get(other_id)),
-                ),
-            )
-            for other_id in communication_neighbours(
-                graph, fleet, agent_id, config.observation_depth
-            )
-        )
-
-    return Observation(
-        visible_vertices=visible, features=features, congestion=congestion, messages=messages
-    )
+    return Observation(visible_vertices=visible, features=features, congestion=congestion)

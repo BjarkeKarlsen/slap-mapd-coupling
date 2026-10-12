@@ -28,7 +28,7 @@ from torch import nn
 
 from slap_mapd_coupling.environment.action_masking import ActionMaskingTorchRLModule
 from slap_mapd_coupling.models.base_model import PolicyValueHead, PolicyValueHeadConfig
-from slap_mapd_coupling.models.gnn_encoder import GNNEncoder, GNNEncoderConfig
+from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS, GNNEncoder, GNNEncoderConfig
 
 
 class _GNNSharedEncoder(nn.Module):
@@ -42,15 +42,18 @@ class _GNNSharedEncoder(nn.Module):
 
     def forward(self, batch: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         obs = batch[Columns.OBS]
+        # the sender keys are in the observation exactly when communication is on
+        sender_blocks = (
+            {key: obs[key] for key in SENDER_KEYS} if self.gnn.config.communication else {}
+        )
         z = self.gnn.forward_padded(
             obs["node_features"],
             obs["node_mask"],
             obs["edge_index"],
             obs["edge_mask"],
             obs["own_index"],
-            obs["message_features"],
-            obs["message_mask"],
             obs["congestion"],
+            **sender_blocks,
         )
         return {ENCODER_OUT: {ACTOR: z, CRITIC: z}}
 
