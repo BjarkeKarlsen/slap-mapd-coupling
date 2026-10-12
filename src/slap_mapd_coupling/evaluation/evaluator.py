@@ -6,14 +6,17 @@ and the environment (environment/multi_agent_env.py's
 _ORDER_SEED_OFFSET), so the same order stream replays identically across
 controllers/storage rules sharing a seed -- what makes eq:rqformal's
 paired comparison meaningful (sec:impl:instances, evaluation/comparison.py).
-This module doesn't re-seed anything itself; it only drives
-WarehouseMAPDEnv and reads its already-online-accumulated log at the end.
+This module doesn't re-seed the order generator or the environment
+itself; it only resets the controller's own random stream (see
+run_episode) and drives WarehouseMAPDEnv, reading its already-online-
+accumulated log at the end.
 """
 
 from __future__ import annotations
 
 from typing import Mapping
 
+from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
@@ -29,7 +32,16 @@ def run_episode(
     config: ExperimentConfig,
 ) -> RunMetrics:
     """Run one full episode (config.horizon timesteps) and reduce it to
-    one RunMetrics row."""
+    one RunMetrics row.
+
+    Resets the registered controller's own random stream to this
+    episode's seed before stepping (Controller.reset, a no-op for a
+    controller with none), so a controller's action-sampling stream --
+    the decentralised arm's, concretely -- replays bit-for-bit under a
+    fixed seed the same way the order generator and conflict resolution
+    already do (4.Implementation.tex:450-452, sec:impl:instances).
+    """
+    get_controller(config.controller).reset(config.seed)
     env = WarehouseMAPDEnv(graph, skus, initial_storage_counts, storage_capacities, config)
     env.reset()
     for _ in range(config.horizon):

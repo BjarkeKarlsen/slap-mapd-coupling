@@ -14,6 +14,9 @@ class _DummyController:
     def route(self, graph, fleet, tasks, t):
         return {}
 
+    def reset(self, episode_seed):
+        pass
+
 
 class _NotAController:
     pass

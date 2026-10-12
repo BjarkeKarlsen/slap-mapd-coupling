@@ -37,6 +37,19 @@ def _task(task_id: int, pickup: int, delivery: int, assignment_time: int = 0) ->
     ).assign(agent_id=task_id, t=assignment_time)
 
 
+def test_reset_is_a_no_op_and_does_not_affect_route():
+    """CentralisedController is a pure function of (graph, fleet, tasks,
+    t) with no randomness of its own (sec:method:controllers); reset()
+    exists only to satisfy the Controller protocol."""
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2})
+    controller = CentralisedController()
+    before = controller.route(graph, fleet, tasks=[], t=0)
+    controller.reset(episode_seed=123)
+    after = controller.route(graph, fleet, tasks=[], t=0)
+    assert before == after
+
+
 def test_free_agent_with_no_task_waits():
     graph = _line_graph(5)
     fleet = _fleet({1: 2})
