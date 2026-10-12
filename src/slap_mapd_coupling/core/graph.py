@@ -167,6 +167,7 @@ class WarehouseGraph(BaseModel):
         out: dict[VertexId, list[Edge]] = {v: [] for v in self.vertices}
         for edge in self.edges:
             out[edge.source].append(edge)
+        # Outgoing edges in increasing target number, so slot k is the k-th smallest neighbour.
         self._out = {v: tuple(sorted(items, key=lambda e: e.target)) for v, items in out.items()}
         self._legal_actions = {
             v: (Action(kind="wait"),) + tuple(Action(kind="move", target=e.target) for e in items)
@@ -195,11 +196,11 @@ class WarehouseGraph(BaseModel):
         return distances
 
     def out_neighbours(self, v: VertexId) -> tuple[VertexId, ...]:
-        """N+(v): movable successors of v (eq:actions)."""
+        """N+(v) in the action set, ordered by increasing vertex number."""
         return tuple(e.target for e in self._out.get(v, ()))
 
     def legal_actions(self, v: VertexId) -> tuple[Action, ...]:
-        """U(v) = {wait} u {move(w): w in N+(v)} (eq:actions). O(1) precomputed lookup."""
+        """U(v) in the action set: wait, then one move per N+(v) in increasing vertex number."""
         return self._legal_actions[v]
 
     def distance(self, v: VertexId, w: VertexId) -> float:

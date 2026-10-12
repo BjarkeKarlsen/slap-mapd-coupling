@@ -82,3 +82,16 @@ def test_slot_for_action_raises_for_illegal_action():
     graph = _star_graph()
     with pytest.raises(ValueError):
         slot_for_action(graph, vertex=1, action=Action(kind="move", target=2))
+
+
+def test_move_slot_k_is_the_kth_smallest_neighbour():
+    """Edges from vertex 0 are inserted as 3, 1, 4, 2, yet slot k still means target k."""
+    vertices = {i: Vertex(id=i) for i in range(5)}
+    edges = tuple(Edge(source=0, target=i, cost=1.0) for i in (3, 1, 4, 2))
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    assert graph.out_neighbours(0) == (1, 2, 3, 4)
+    for k in (1, 2, 3, 4):
+        action = Action(kind="move", target=k)
+        assert action_for_slot(graph, vertex=0, slot=k) == action
+        assert slot_for_action(graph, vertex=0, action=action) == k
+    assert legality_mask(graph, vertex=0) == (0.0,) * 5
