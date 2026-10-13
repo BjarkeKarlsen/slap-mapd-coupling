@@ -6,11 +6,13 @@ from typing import Callable, Literal
 
 from slap_mapd_coupling.planners.base import Planner
 from slap_mapd_coupling.planners.prioritised_astar import PrioritisedAStarPlanner
+from slap_mapd_coupling.planners.token_passing import TokenPassingPlanner
 
-PlannerName = Literal["prioritised_astar"]
+PlannerName = Literal["prioritised_astar", "token_passing"]
 
 _PLANNERS: dict[str, Callable[[], Planner]] = {
     "prioritised_astar": PrioritisedAStarPlanner,
+    "token_passing": TokenPassingPlanner,
 }
 
 

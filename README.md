@@ -29,7 +29,7 @@ for real bugs found and fixed along the way.
 - `resolution/` — the conflict-resolution operator
 - `controllers/` — shared task assignment + swappable routing
   (centralised / section-based / decentralised) behind a registry
-- `planners/` — non-learned reference planners (prioritised A*), outside
+- `planners/` — non-learned reference planners (Token Passing, prioritised A*), outside
   the three controllers
 - `environment/` — the RLlib `MultiAgentEnv`, spaces/masking, reward
 - `models/` — the GNN encoder and policy/value heads

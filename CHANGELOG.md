@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `TokenPassingPlanner` (`planners/token_passing.py`, `--planner token_passing`), the
+  reference baseline of Ma et al. (2017). It picks its own tasks, so the
+  environment loop asks a `SelfAssigningRouter` for the assignment in place of
+  the shared `assign_tasks`, and `PlannerRouter.reset` and `WarehouseMAPDEnv.reset`
+  now reset a planner that keeps state. The new
+  `examples/01_baseline_fixed_centralised.py` runs it, and the prioritised A*
+  example is renamed `01_baseline_fixed_prioritised_astar.py`.
 - `planners/` package (`Planner` protocol, `PrioritisedAStarPlanner`). The A*
   planner moved out of `controllers/centralised.py`. It is a reference
   planner outside the three controllers, chosen with the new
