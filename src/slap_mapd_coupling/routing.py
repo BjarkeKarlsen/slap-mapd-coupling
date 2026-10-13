@@ -5,7 +5,7 @@ from __future__ import annotations
 from slap_mapd_coupling.controllers.base import Controller
 from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.planners import PlannerRouter, get_planner
+from slap_mapd_coupling.planners import get_planner, router_for
 
 
 def get_router(config: ExperimentConfig) -> Controller:
@@ -14,4 +14,4 @@ def get_router(config: ExperimentConfig) -> Controller:
     if config.controller is not None:
         return get_controller(config.controller)
     assert config.planner is not None
-    return PlannerRouter(get_planner(config.planner))
+    return router_for(get_planner(config.planner))

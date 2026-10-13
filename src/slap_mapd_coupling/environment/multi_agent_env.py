@@ -71,6 +71,7 @@ from typing import Mapping
 import numpy as np
 
 from slap_mapd_coupling.controllers.assignment import assign_tasks
+from slap_mapd_coupling.controllers.base import SelfAssigningRouter
 from slap_mapd_coupling.controllers.base import Controller
 from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -195,6 +196,10 @@ class WarehouseMAPDEnv:
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
         self.last_proposed = {}
         self.last_overridden = frozenset()
+        # A router that keeps state (Token Passing's committed paths) must not carry it
+        # into the new episode (Controller.reset).
+        if self._controller is not None:
+            self._controller.reset(episode_seed)
 
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
@@ -242,9 +247,22 @@ class WarehouseMAPDEnv:
         # Stage 1: orders -> new tasks entering Q_t.
         self.tasks.extend(self._generate_tasks())
 
-        # Stage 2: shared greedy task assignment (pi_assign).
+        # The registered router, resolved before stage 2 because a planner that picks its
+        # own tasks (Token Passing) takes over the assignment. Not needed when `actions`
+        # are given, since stage 3 then decodes them instead.
+        router: Controller | None = None
+        if actions is None:
+            if self._controller is None:
+                self._controller = get_router(self.config)
+            router = self._controller
+
+        # Stage 2: shared greedy task assignment (pi_assign), unless the router
+        # picks its own tasks (SelfAssigningRouter).
         assign_start = time.perf_counter()
-        assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
+        if isinstance(router, SelfAssigningRouter):
+            assignments = router.assign(self.graph, self.fleet, self.tasks, self._t)
+        else:
+            assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
         self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
         if assignments:
             self.tasks = [
@@ -273,9 +291,8 @@ class WarehouseMAPDEnv:
                 for agent_id, slot in actions.items()
             }
         else:
-            if self._controller is None:
-                self._controller = get_router(self.config)
-            proposed = self._controller.route(self.graph, self.fleet, self.tasks, self._t)
+            assert router is not None  # resolved above whenever actions is None
+            proposed = router.route(self.graph, self.fleet, self.tasks, self._t)
         self.log.routing_runtime_seconds.append(time.perf_counter() - route_start)
 
         # Stage 4: conflict resolution.
