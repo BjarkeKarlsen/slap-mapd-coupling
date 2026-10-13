@@ -32,6 +32,8 @@ from slap_mapd_coupling.instances.generator import (
     generate_and_validate,
     generate_instance,
 )
+from slap_mapd_coupling.planners import TokenPassingPlanner
+from slap_mapd_coupling.planners.driver import step_with_planner
 
 FLEET_SIZE = 6
 
@@ -119,11 +121,12 @@ def _run_trace(
     counts: dict[SkuId, dict[VertexId, int]],
     config: ExperimentConfig,
 ) -> list[tuple[tuple[int, int], ...]]:
-    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+    planner = TokenPassingPlanner()
+    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config, assigner=planner)
     env.reset()
     trace = []
     for _ in range(config.horizon):
-        obs, *_ = env.step()
+        obs, *_ = step_with_planner(env, planner)
         trace.append(tuple(sorted(obs.items())))
     return trace
 
@@ -136,11 +139,12 @@ def demonstrate_done_when_criteria(
     config: ExperimentConfig,
 ) -> None:
     print("=== Demonstrating M2's 'done when' criteria directly ===")
-    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+    planner = TokenPassingPlanner()
+    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config, assigner=planner)
     env.reset()
     before: FleetState = env.fleet
     for t in range(config.horizon):
-        env.step()
+        step_with_planner(env, planner)
         assert is_collision_free(before, env.fleet), f"collision at t={t}"
         assert not env.last_overridden, f"conflict resolution overrode a plan at t={t}"
         assert is_feasible(env.storage), f"infeasible storage at t={t}"
@@ -194,7 +198,8 @@ def render_live(
 
     from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
-    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+    planner = TokenPassingPlanner()
+    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config, assigner=planner)
     env.reset()
     renderer = WarehouseRenderer(graph, positions)
     try:
@@ -202,7 +207,7 @@ def render_live(
         for _ in range(config.horizon):
             if not running:
                 break
-            env.step()
+            step_with_planner(env, planner)
             running = renderer.render(env.fleet)
             time.sleep(delay_seconds)
     finally:

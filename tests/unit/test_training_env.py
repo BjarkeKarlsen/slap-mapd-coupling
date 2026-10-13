@@ -74,16 +74,8 @@ def _env(
 
 
 def test_rejects_non_decentralised_controller():
-    # observation_depth is required for every controller now (sec:pf:env),
-    # unlike the reward fields below, which stay None for a non-learned one.
     with pytest.raises(ValueError, match="decentralised"):
-        _env(
-            controller="section",
-            discount=None,
-            deliver_reward=None,
-            override_penalty=None,
-            congestion_reward_weight=None,
-        )
+        _env(controller="section")
 
 
 def test_empty_train_seeds_rejected():
@@ -208,3 +200,47 @@ def test_step_respects_action_mask_and_truncates_at_horizon():
             actions[aid] = int(np.random.choice(legal))
         obs, rewards, terminated, truncated, infos = env.step(actions)
     assert truncated["__all__"] is True
+
+
+ETA_COLUMN = 4  # the distance label in a node feature row (models/gnn_encoder.py)
+
+
+def _own_eta(obs: dict, aid: str) -> float:
+    view = obs[aid]["observations"]
+    return float(view["node_features"][int(view["own_index"])][ETA_COLUMN])
+
+
+def test_the_reset_observation_shows_the_target_of_a_robot_assigned_at_t0():
+    env = _env(arrival_rate=10.0)
+    obs, _ = env.reset()
+    inner = env._env
+    assigned = {task.assigned_agent: task for task in inner.tasks if task.assignment_time == 0}
+    assert assigned
+    locations = inner.fleet.locations()
+    for agent_id in inner.fleet.agents:
+        task = assigned.get(agent_id)
+        target = locations[agent_id] if task is None else task.pickup_vertex
+        expected = env.graph.distance(locations[agent_id], target)
+        assert (expected > 0) == (task is not None)
+        assert _own_eta(obs, str(agent_id)) == pytest.approx(expected)
+
+
+def test_every_observation_shows_the_task_assigned_at_its_own_timestep():
+    # A task assigned at t must already be in the observation of t, the one the robot
+    # acts on. The assignment is read back from the task list after the next step.
+    env = _env(arrival_rate=0.3, horizon=40)
+    obs, _ = env.reset()
+    inner = env._env
+    checked = 0
+    for _ in range(40):
+        t, locations = inner.t, inner.fleet.locations()
+        seen = obs
+        obs, *_ = env.step({aid: 0 for aid in env.agents})
+        for task in inner.tasks:
+            if task.assignment_time == t:
+                assert task.assigned_agent is not None
+                expected = env.graph.distance(locations[task.assigned_agent], task.pickup_vertex)
+                assert expected > 0
+                assert _own_eta(seen, str(task.assigned_agent)) == pytest.approx(expected)
+                checked += 1
+    assert checked > 1  # the assignment of reset and at least one later one

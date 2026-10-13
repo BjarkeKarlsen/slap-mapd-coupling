@@ -17,11 +17,35 @@ ranked by the episode's priority order of the conflict resolution operator
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable, Protocol, Sequence, runtime_checkable
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task, TaskId, free_agents
+
+
+@runtime_checkable
+class Assigner(Protocol):
+    """Something that takes the place of the shared rule in stage 2.
+
+    Token Passing picks its own tasks, because its guarantee depends on its own
+    task rule. The environment resets the assigner with the episode seed before
+    the assignment of t = 0, and asks it for the assignment of every timestep.
+    """
+
+    def reset(self, episode_seed: int) -> None:
+        """Forget what was kept from the last episode."""
+        ...
+
+    def assign(
+        self,
+        graph: WarehouseGraph,
+        fleet: FleetState,
+        tasks: Sequence[Task],
+        t: int,
+    ) -> dict[TaskId, AgentId]:
+        """task_id -> agent_id for every task taken at time t. Does not mutate a Task."""
+        ...
 
 
 def assign_tasks(

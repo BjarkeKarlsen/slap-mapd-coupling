@@ -11,6 +11,8 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.planners import PrioritisedAStarPlanner
+from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.training.callbacks import (
     StandingStillCounter,
     format_iteration,
@@ -54,9 +56,10 @@ def _env(horizon: int = 30) -> WarehouseMAPDEnv:
 def test_progress_metrics_at_reset_has_nothing_completed():
     env = _env()
     env.reset()
+    # The orders of t = 0 are released in reset, but the backlog is logged before them.
     assert progress_metrics(env) == {
         "tasks_completed": 0.0,
-        "tasks_released": 0.0,
+        "tasks_released": float(len(env.tasks)),
         "backlog": 0.0,
         "steps_since_last_completion": 0.0,
         "episode_step": 0.0,
@@ -66,8 +69,9 @@ def test_progress_metrics_at_reset_has_nothing_completed():
 def test_progress_metrics_follow_the_environment_after_a_few_steps():
     env = _env()
     env.reset()
+    planner = PrioritisedAStarPlanner()
     for _ in range(12):
-        env.step()
+        step_with_planner(env, planner)
     values = progress_metrics(env)
     finish_times = [task.finish_time for task in env.tasks if task.finish_time is not None]
     assert values["episode_step"] == 12.0

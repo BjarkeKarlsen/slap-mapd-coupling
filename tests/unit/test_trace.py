@@ -22,7 +22,10 @@ from slap_mapd_coupling.evaluation.trace import (
     summarise_trace,
 )
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
-from slap_mapd_coupling.routing import get_router
+from slap_mapd_coupling.planners import PrioritisedAStarPlanner
+from slap_mapd_coupling.planners.driver import step_with_planner
+
+_PLANNER = PrioritisedAStarPlanner()  # keeps no state, so one instance serves every test
 
 
 def _config(**overrides) -> ExperimentConfig:
@@ -86,7 +89,7 @@ def _run_with_trace(config: ExperimentConfig, path: Path, steps: int) -> Warehou
     env.reset()
     with EpisodeTraceWriter(path, env) as writer:
         for _ in range(steps):
-            env.step()
+            step_with_planner(env, _PLANNER)
             writer.record(env)
     return env
 
@@ -324,12 +327,11 @@ def test_writing_a_trace_does_not_change_the_run_metrics(tmp_path):
     config = _config(seed=5, horizon=25)
 
     def run(path: Path | None):
-        get_router(config).reset(config.seed)
         env = _generated_env(config)
         env.reset()
         writer = None if path is None else EpisodeTraceWriter(path, env)
         for _ in range(config.horizon):
-            env.step()
+            step_with_planner(env, _PLANNER)
             if writer is not None:
                 writer.record(env)
         if writer is not None:

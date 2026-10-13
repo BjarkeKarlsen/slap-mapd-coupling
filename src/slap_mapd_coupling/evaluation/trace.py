@@ -81,8 +81,9 @@ class EpisodeTraceWriter:
         t = env.t
         locations = env.fleet.locations()
         # The task an agent served during the step that just ended. A task
-        # assigned or finished at t was active at t - 1.
-        serving = active_tasks_by_agent(env.tasks, t - 1)
+        # assigned or finished at t was active at t - 1. A task released at t
+        # (the end of the step releases the next orders) has no status at t - 1.
+        serving = active_tasks_by_agent([x for x in env.tasks if x.release_time < t], t - 1)
         agents: dict[str, dict[str, Any]] = {}
         for agent_id, at in locations.items():
             action = env.last_proposed.get(agent_id)

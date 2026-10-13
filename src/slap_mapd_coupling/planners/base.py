@@ -13,13 +13,8 @@ from slap_mapd_coupling.core.tasks import Task, TaskId
 class Planner(Protocol):
     """A planner proposes one action per agent for one timestep.
 
-    planners/router.py lets the environment loop run any Planner, so a new
-    reference planner (ICBS, ICTS, ODrM*) is one new file here. Conflict
+    planners/driver.py runs any Planner from outside the environment. Conflict
     resolution still runs on the proposed actions afterwards.
-
-    A planner may be a pure function of its arguments (prioritised A*) or keep
-    state across steps (Token Passing, a SelfAssigningPlanner below), which is
-    why PlannerRouter forwards `reset` to it.
     """
 
     def plan(
@@ -37,11 +32,8 @@ class Planner(Protocol):
 class SelfAssigningPlanner(Planner, Protocol):
     """A stateful planner that also picks its own tasks.
 
-    Token Passing chooses a task for an agent in the same step that it plans
-    the agent's path, since its guarantee depends on that task rule. The
-    environment loop therefore asks such a planner for the assignment in place
-    of the shared pi_assign (controllers/assignment.py), and calls `reset` so
-    that the committed paths of one episode never reach the next.
+    It is passed to the environment as its Assigner (controllers/assignment.py),
+    which resets it and asks it for the assignment in place of the shared rule.
     """
 
     def reset(self, episode_seed: int) -> None:

@@ -15,6 +15,12 @@ respective registries (docs/controller_integration.md,
 docs/storage_rule_integration.md), so this loop never changes when either
 is added to.
 
+Stages 1 and 2 run at the end of reset() (for t = 0) and at the end of
+every step() that does not end the episode (for the new t). A robot
+therefore sees the task it was assigned in the observation it acts on, and
+the next step starts at stage 3. The order draws and the backlog values
+are the same as when stages 1 and 2 opened the step.
+
 Not a subclass of ray.rllib.MultiAgentEnv or gymnasium.Env: the
 dict-keyed-by-agent-id obs/reward/terminated/truncated/info shape follows
 those conventions (sec:impl:simulator says so explicitly), but importing
@@ -42,23 +48,12 @@ agent's own current vertex. The full o_i(t) feature vector
 needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
-step() also accepts an optional `actions` mapping (issue #30): stage 3
-normally asks the registered Controller to compute u_i(t) for every
-agent from full state (`self._controller.route(...)`), but an RLlib
-rollout worker training a decentralised policy needs the OPPOSITE
-direction -- it observes o_i(t) itself (training/rllib_env.py) and
-supplies each agent's chosen action slot externally, every step, while
-gradients are live. Passing `actions` bypasses `route()` for that step
-and decodes the given slots directly (environment/spaces.py::
-action_for_slot); every other stage (assignment, conflict resolution,
-lifecycle, storage, reward) is untouched, so this is still the same
-six-stage loop, not a second one -- only stage 3's *source* differs.
-The registered-Controller path (`actions=None`) stays the only one
-reference planner and section-based ever use, unaffected by this. Router
-resolution (get_router) is therefore lazy (looked up on first `actions=None` step,
-not in `__init__`): `config.controller="decentralised"` has no
-registered Controller until #29 lands, but a run driven entirely by
-`actions` never needs one.
+step(actions) takes one action slot per robot (the action mask), decoded by
+environment/spaces.py::action_for_slot, so the simulator has one step mode.
+Whoever produces the slots, a learned policy or a planner driven from
+planners/driver.py, times itself and records the time on the log.
+The shared assignment rule of stage 2 can be replaced by an `Assigner`
+(controllers/assignment.py), which a planner that picks its own tasks is.
 """
 
 from __future__ import annotations
@@ -66,13 +61,12 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
 
-from slap_mapd_coupling.controllers.assignment import assign_tasks
-from slap_mapd_coupling.controllers.base import SelfAssigningRouter
-from slap_mapd_coupling.controllers.base import Controller
+from slap_mapd_coupling.controllers.assignment import Assigner, assign_tasks
 from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
@@ -85,7 +79,6 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
-from slap_mapd_coupling.routing import get_router
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
 
@@ -115,9 +108,9 @@ class EpisodeLog:
     backlog_by_t: list[int] = field(default_factory=list)  # B_t, every timestep
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
-    routing_runtime_seconds: list[float] = field(default_factory=list)
+    routing_runtime_seconds: list[float] = field(default_factory=list)  # set by whoever acts
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
-    # every controller (observation_depth is required for all of them).
+    # every controller and planner (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (eq:relocation).
     relocated_units_by_update: list[int] = field(default_factory=list)
@@ -127,6 +120,10 @@ class EpisodeLog:
 
     def record_blocked_tick(self, task_id: TaskId) -> None:
         self.blocked_ticks_by_task[task_id] = self.blocked_ticks_by_task.get(task_id, 0) + 1
+
+    def record_routing_runtime(self, seconds: float) -> None:
+        """Whoever produces the actions times itself and records it here."""
+        self.routing_runtime_seconds.append(seconds)
 
 
 class WarehouseMAPDEnv:
@@ -139,15 +136,14 @@ class WarehouseMAPDEnv:
         initial_storage_counts: Mapping[SkuId, Mapping[VertexId, int]],
         storage_capacities: Mapping[VertexId, float],
         config: ExperimentConfig,
+        assigner: Assigner | None = None,
     ) -> None:
         self.graph = graph
         self.config = config
         self._skus = dict(skus)
         self._storage_capacities = dict(storage_capacities)
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
-        # Lazy: resolved on first actions=None step, not here -- see
-        # module docstring ("Controller resolution is therefore lazy").
-        self._controller: Controller | None = None
+        self._assigner = assigner
         self._storage_rule = get_storage_rule(config.storage_mode)
 
         self.fleet: FleetState
@@ -158,11 +154,19 @@ class WarehouseMAPDEnv:
         self._next_task_id: int
         self._priority: tuple[AgentId, ...]
         self._order_rng: np.random.Generator
+        self._congestion_by_agent: dict[AgentId, float] = {}
         # What the last step proposed and what conflict resolution overrode,
         # read by the episode trace (evaluation/trace.py). Never fed back in.
         self.last_proposed: dict[AgentId, Action] = {}
         self.last_overridden: frozenset[AgentId] = frozenset()
         self.reset()
+
+    @property
+    def congestion_by_agent(self) -> Mapping[AgentId, float]:
+        """delta_i(t) of every robot at the current t, the congestion feature read over the
+        field of view. Computed once per timestep. After the step that ends the episode it
+        still holds the values of the last timestep acted in."""
+        return MappingProxyType(self._congestion_by_agent)
 
     @property
     def t(self) -> int:
@@ -196,13 +200,15 @@ class WarehouseMAPDEnv:
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
         self.last_proposed = {}
         self.last_overridden = frozenset()
-        # A router that keeps state (Token Passing's committed paths) must not carry it
-        # into the new episode (Controller.reset).
-        if self._controller is not None:
-            self._controller.reset(episode_seed)
+        # An assigner that keeps state (Token Passing's committed paths) must not carry
+        # it into the new episode, and must be reset before the assignment of t = 0.
+        if self._assigner is not None:
+            self._assigner.reset(episode_seed)
 
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
+        self._release_and_assign()
+        self._record_crowding()
 
         observations = dict(self.fleet.locations())
         infos: dict[AgentId, dict] = {aid: {} for aid in agent_ids}
@@ -222,7 +228,7 @@ class WarehouseMAPDEnv:
 
     def step(
         self,
-        actions: Mapping[AgentId, int] | None = None,
+        actions: Mapping[AgentId, int],
     ) -> tuple[
         dict[AgentId, VertexId],
         dict[AgentId, float],
@@ -230,70 +236,31 @@ class WarehouseMAPDEnv:
         dict[AgentId | str, bool],
         dict[AgentId | str, dict],
     ]:
-        """Advance one timestep through all six stages. Returns
+        """Advance one timestep: stages 3 to 6, then stages 1 and 2 for the new t
+        unless the episode ends. Returns
         (observations, rewards, terminated, truncated, infos), dict-keyed
         by agent id plus an "__all__" entry (RLlib/PettingZoo convention)
         signalling whether the whole episode is done.
 
-        `actions`, if given, is a per-agent chosen slot index (eq:mask)
-        decoded via environment/spaces.py::action_for_slot and used
-        directly for stage 3 instead of asking the registered Controller
-        -- see module docstring ("step() also accepts an optional
-        `actions` mapping").
+        `actions` maps every agent id to a chosen slot (the action mask), decoded via
+        environment/spaces.py::action_for_slot.
         """
         before_fleet = self.fleet
-        self._record_crowding(before_fleet)
+        congestion = self._congestion_by_agent  # delta_i(t), at the step the action is chosen in
 
-        # Stage 1: orders -> new tasks entering Q_t.
-        self.tasks.extend(self._generate_tasks())
-
-        # The registered router, resolved before stage 2 because a planner that picks its
-        # own tasks (Token Passing) takes over the assignment. Not needed when `actions`
-        # are given, since stage 3 then decodes them instead.
-        router: Controller | None = None
-        if actions is None:
-            if self._controller is None:
-                self._controller = get_router(self.config)
-            router = self._controller
-
-        # Stage 2: shared greedy task assignment (pi_assign), unless the router
-        # picks its own tasks (SelfAssigningRouter).
-        assign_start = time.perf_counter()
-        if isinstance(router, SelfAssigningRouter):
-            assignments = router.assign(self.graph, self.fleet, self.tasks, self._t)
-        else:
-            assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
-        self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
-        if assignments:
-            self.tasks = [
-                (
-                    task.assign(assignments[task.task_id], self._t)
-                    if task.task_id in assignments
-                    else task
-                )
-                for task in self.tasks
-            ]
-
-        # eq:lifecycle: a task assigned at self._t is already active AT
-        # self._t, so this has to be taken after stage 2, not before --
-        # the freshly assigned agent's action this same tick still counts
-        # towards omega_j(t) and this timestep's reward.
+        # Stages 1 and 2 already ran for this t, at the end of reset() or of the
+        # previous step. Under the task lifecycle a task assigned at self._t is
+        # already active at self._t, so the freshly assigned agent's action this
+        # same tick still counts towards omega_j(t) and this timestep's reward.
         active_by_agent = active_tasks_by_agent(self.tasks, self._t)
 
-        # Stage 3: routing (pi_route) -- the one stage a controller swap
-        # touches, and the one stage `actions` (if given) overrides the
-        # source of, per the module docstring.
-        route_start = time.perf_counter()
-        if actions is not None:
-            locations = self.fleet.locations()
-            proposed: dict[AgentId, Action] = {
-                agent_id: action_for_slot(self.graph, locations[agent_id], slot)
-                for agent_id, slot in actions.items()
-            }
-        else:
-            assert router is not None  # resolved above whenever actions is None
-            proposed = router.route(self.graph, self.fleet, self.tasks, self._t)
-        self.log.routing_runtime_seconds.append(time.perf_counter() - route_start)
+        # Stage 3: routing (pi_route), the one stage a controller swap touches. The
+        # slots come from outside, so this only decodes them.
+        locations = self.fleet.locations()
+        proposed: dict[AgentId, Action] = {
+            agent_id: action_for_slot(self.graph, locations[agent_id], slot)
+            for agent_id, slot in actions.items()
+        }
 
         # Stage 4: conflict resolution.
         result = resolve_conflicts(self.graph, self.fleet, proposed, self._priority)
@@ -347,11 +314,14 @@ class WarehouseMAPDEnv:
             )
 
         rewards = self._compute_rewards(
-            before_locations, active_by_agent, result.overridden, next_t
+            before_locations, active_by_agent, result.overridden, next_t, congestion
         )
 
         self._t = next_t
         episode_done = self._t >= self.config.horizon
+        if not episode_done:
+            self._release_and_assign()
+            self._record_crowding()
         observations = dict(self.fleet.locations())
         terminated: dict[AgentId | str, bool] = {aid: False for aid in self.fleet.agents}
         terminated["__all__"] = False
@@ -362,6 +332,27 @@ class WarehouseMAPDEnv:
         }
         infos["__all__"] = {}
         return observations, rewards, terminated, truncated, infos
+
+    def _release_and_assign(self) -> None:
+        """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
+        assignment, or the assigner's own) for the current t."""
+        self.tasks.extend(self._generate_tasks())
+
+        assign_start = time.perf_counter()
+        if self._assigner is not None:
+            assignments = self._assigner.assign(self.graph, self.fleet, self.tasks, self._t)
+        else:
+            assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
+        self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
+        if assignments:
+            self.tasks = [
+                (
+                    task.assign(assignments[task.task_id], self._t)
+                    if task.task_id in assignments
+                    else task
+                )
+                for task in self.tasks
+            ]
 
     def _generate_tasks(self) -> list[Task]:
         """Stage 1: P_ord -> new tasks (eq:task), entering Q_t.
@@ -428,22 +419,19 @@ class WarehouseMAPDEnv:
             updated.append(task)
         return updated
 
-    def _record_crowding(self, fleet: FleetState) -> None:
-        """sum_i delta_i(t) for the state at timestep t (the mean
-        crowding), each delta_i(t) per the congestion feature: the other
-        agents inside a_i's window, over the vertices available to hold
-        them. Read over the field of view d_obs (config.observation_depth),
-        required for every controller, so this runs every timestep
-        regardless of architecture (sec:pf:env, sec:pf:controllers)."""
+    def _record_crowding(self) -> None:
+        """delta_i(t) of every robot for the current t, the congestion feature: the other
+        robots inside a_i's field of view over the vertices available to hold them. Read
+        over d_obs (config.observation_depth), required for every controller, so this runs
+        every timestep. Stores the mapping and logs its sum, the mean crowding."""
         depth = self.config.observation_depth
-        self.log.crowding_sum_by_t.append(
-            sum(
-                occupancy_fraction(
-                    fleet, local_subgraph(self.graph, state.location, depth), excl={agent_id}
-                )
-                for agent_id, state in fleet.agents.items()
+        self._congestion_by_agent = {
+            agent_id: occupancy_fraction(
+                self.fleet, local_subgraph(self.graph, state.location, depth), excl={agent_id}
             )
-        )
+            for agent_id, state in self.fleet.agents.items()
+        }
+        self.log.crowding_sum_by_t.append(sum(self._congestion_by_agent.values()))
 
     def _backlog(self, t: int) -> int:
         """B_t = |Q_t| + |B_t|, the backlog the keep-up check plots (eq:throughput)."""
@@ -455,19 +443,11 @@ class WarehouseMAPDEnv:
         active_by_agent: Mapping[AgentId, Task],
         overridden: frozenset[AgentId],
         next_t: int,
+        congestion: Mapping[AgentId, float],
     ) -> dict[AgentId, float]:
-        """R_i(t) (eq:reward) -- only meaningful for a LEARNED controller
-        (GAPS.tex's fix to eq:objective's scope): the four reward weights
-        are None on ExperimentConfig for every controller except
-        "decentralised" (core/experiment_config.py), so this returns an
-        all-zero reward for the reference planner and section-based baselines this
-        milestone actually runs, rather than crashing on missing weights.
-
-        `congestion` is hardcoded to 0.0 pending eq:congestion's delta_i(t)
-        (environment/observation.py, M5) -- flagged, not silently treated
-        as though congestion sensitivity were already wired in.
-        """
-        if self.config.controller != "decentralised":
+        """R_i(t), the reward, for every robot. `congestion` holds delta_i(t) at the
+        step the action was chosen in. A planner run has no reward weights and gets zero."""
+        if self.config.controller is None:
             return {aid: 0.0 for aid in self.fleet.agents}
 
         assert self.config.discount is not None
@@ -496,7 +476,7 @@ class WarehouseMAPDEnv:
                 task_next=task_next,
                 completed_task=completed,
                 overridden=agent_id in overridden,
-                congestion=0.0,
+                congestion=congestion[agent_id],
                 discount=self.config.discount,
                 deliver_reward=self.config.deliver_reward,
                 override_penalty=self.config.override_penalty,

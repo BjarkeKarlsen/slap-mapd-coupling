@@ -47,7 +47,7 @@ def test_observation_depth_required_for_every_controller():
         ExperimentConfig(**base)
 
 
-def _decentralised_reward_kwargs(**overrides) -> dict:
+def _reward_kwargs(**overrides) -> dict:
     defaults = dict(
         controller="decentralised",
         planner=None,
@@ -66,8 +66,26 @@ def test_decentralised_controller_requires_reward_parameters():
 
 
 def test_decentralised_controller_with_reward_parameters_is_valid():
-    config = ExperimentConfig(**_base(**_decentralised_reward_kwargs()))
+    config = ExperimentConfig(**_base(**_reward_kwargs()))
     assert config.discount == 0.99
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section", "decentralised"])
+@pytest.mark.parametrize(
+    "missing", ["discount", "deliver_reward", "override_penalty", "congestion_reward_weight"]
+)
+def test_every_controller_requires_every_reward_parameter(controller, missing):
+    """All three architectures learn from the same reward (sec:method:rl)."""
+    kwargs = _reward_kwargs(controller=controller)
+    del kwargs[missing]
+    with pytest.raises(ValidationError, match=missing):
+        ExperimentConfig(**_base(**kwargs))
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section", "decentralised"])
+def test_every_controller_with_reward_parameters_is_valid(controller):
+    config = ExperimentConfig(**_base(**_reward_kwargs(controller=controller)))
+    assert config.congestion_reward_weight == 0.1
 
 
 def test_reference_planner_does_not_require_reward_parameters():
@@ -75,21 +93,29 @@ def test_reference_planner_does_not_require_reward_parameters():
     assert config.discount is None
 
 
+def test_communication_is_rejected_for_a_centralised_controller_with_reward_parameters():
+    with pytest.raises(ValidationError, match="communication"):
+        ExperimentConfig(**_base(communication=True, **_reward_kwargs(controller="centralised")))
+
+
 def test_exactly_one_of_controller_and_planner_is_required():
     with pytest.raises(ValidationError, match="exactly one"):
-        ExperimentConfig(**_base(controller="section"))
+        ExperimentConfig(
+            **_base(**_reward_kwargs(controller="section", planner="prioritised_astar"))
+        )
     with pytest.raises(ValidationError, match="exactly one"):
         ExperimentConfig(**_base(planner=None))
-    assert ExperimentConfig(**_base(planner=None, controller="section")).planner is None
+    section = ExperimentConfig(**_base(**_reward_kwargs(controller="section")))
+    assert section.planner is None
 
 
 def test_discount_above_one_rejected():
     with pytest.raises(ValidationError, match="discount"):
-        ExperimentConfig(**_base(**_decentralised_reward_kwargs(discount=1.5)))
+        ExperimentConfig(**_base(**_reward_kwargs(discount=1.5)))
 
 
 def test_discount_of_exactly_one_is_allowed():
-    config = ExperimentConfig(**_base(**_decentralised_reward_kwargs(discount=1.0)))
+    config = ExperimentConfig(**_base(**_reward_kwargs(discount=1.0)))
     assert config.discount == 1.0
 
 

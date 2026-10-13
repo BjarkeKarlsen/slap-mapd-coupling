@@ -58,12 +58,9 @@ class ExperimentConfig(BaseModel):
     # None leaves RunMetrics.keeps_up unset.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
 
-    # Reward and learning objective (tab:rlparams, sec:method:rl). Required
-    # only for controller="decentralised", since the learning objective
-    # "applies to whichever regime is realised as a LEARNED controller"
-    # and only the decentralised regime trains (AGENTS.md: --checkpoint
-    # never applies to the other two). Unlike observation_depth above,
-    # these have no meaning for a non-learned controller at all.
+    # Reward and learning objective (tab:rlparams, sec:method:rl). Required for
+    # every controller, since all three learn from the same reward. A planner
+    # is not learned, so it has no use for them and they stay optional.
     discount: PositiveFloat | None = None  # gamma, learning objective
     deliver_reward: NonNegativeFloat | None = None  # n_deliver, reward
     override_penalty: NonNegativeFloat | None = None  # n_blocked, reward
@@ -100,7 +97,7 @@ class ExperimentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _controller_parameters(self) -> "ExperimentConfig":
-        if self.controller == "decentralised":
+        if self.controller is not None:
             for name in (
                 "discount",
                 "deliver_reward",
@@ -108,8 +105,8 @@ class ExperimentConfig(BaseModel):
                 "congestion_reward_weight",
             ):
                 if getattr(self, name) is None:
-                    raise ValueError(f"controller='decentralised' requires {name}.")
-        elif self.communication:
+                    raise ValueError(f"controller={self.controller!r} requires {name}.")
+        if self.controller != "decentralised" and self.communication:
             raise ValueError(
                 "communication=True only applies to controller='decentralised' "
                 "(matches main.py's CLI check)."

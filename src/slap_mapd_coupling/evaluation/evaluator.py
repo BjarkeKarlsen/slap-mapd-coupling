@@ -6,24 +6,27 @@ and the environment (environment/multi_agent_env.py's
 _ORDER_SEED_OFFSET), so the same order stream replays identically across
 controllers/storage rules sharing a seed -- what makes eq:rqformal's
 paired comparison meaningful (sec:impl:instances, evaluation/comparison.py).
-This module doesn't re-seed the order generator or the environment
-itself; it only resets the controller's own random stream (see
-run_episode) and drives WarehouseMAPDEnv, reading its already-online-
-accumulated log at the end.
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Mapping
 
+from slap_mapd_coupling.controllers.assignment import Assigner
+from slap_mapd_coupling.controllers.base import Controller
+from slap_mapd_coupling.controllers.registry import get_controller
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
+from slap_mapd_coupling.environment.spaces import slot_for_action
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
 from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter
-from slap_mapd_coupling.routing import get_router
+from slap_mapd_coupling.planners import get_planner
+from slap_mapd_coupling.planners.base import Planner
+from slap_mapd_coupling.planners.driver import step_with_planner
 
 
 def run_episode(
@@ -37,29 +40,61 @@ def run_episode(
     """Run one full episode (config.horizon timesteps) and reduce it to
     one RunMetrics row.
 
-    Resets the registered controller's own random stream to this
-    episode's seed before stepping (Controller.reset, a no-op for a
-    controller with none), so a controller's action-sampling stream --
-    the decentralised arm's, concretely -- replays bit-for-bit under a
-    fixed seed the same way the order generator and conflict resolution
-    already do (4.Implementation.tex:450-452, sec:impl:instances).
+    A planner config drives the env with planners/driver.py. A planner that
+    picks its own tasks is passed to the env as its assigner, and the env resets it
+    with the episode seed. A controller config goes through the registry, and the
+    controller is reset with the episode seed before stepping, so its
+    action-sampling stream replays bit-for-bit under a fixed seed.
 
     With `trace_path` the episode also writes a per-step trace there
     (evaluation/trace.py). The writer only reads the environment, so the
     returned RunMetrics are the same with or without it.
     """
-    get_router(config).reset(config.seed)
-    env = WarehouseMAPDEnv(graph, skus, initial_storage_counts, storage_capacities, config)
-    env.reset()
+    controller: Controller | None = None
+    planner: Planner | None = None
+    assigner: Assigner | None = None
+    if config.planner is not None:
+        planner = get_planner(config.planner)
+        if isinstance(planner, Assigner):
+            assigner = planner
+    else:
+        assert config.controller is not None
+        controller = get_controller(config.controller)
+        controller.reset(config.seed)
+    env = WarehouseMAPDEnv(
+        graph, skus, initial_storage_counts, storage_capacities, config, assigner=assigner
+    )
+
+    def step() -> None:
+        if planner is not None:
+            step_with_planner(env, planner)
+        else:
+            assert controller is not None
+            _step_with_controller(env, controller)
+
     if trace_path is None:
         for _ in range(config.horizon):
-            env.step()
+            step()
     else:
         with EpisodeTraceWriter(trace_path, env) as writer:
             for _ in range(config.horizon):
-                env.step()
+                step()
                 writer.record(env)
     return _to_run_metrics(env, config)
+
+
+def _step_with_controller(env: WarehouseMAPDEnv, controller: Controller) -> None:
+    """Temporary, removed together with the controller registry. Converts the
+    controller's `route` output to slots, times it and steps the env."""
+    start = time.perf_counter()
+    actions = controller.route(env.graph, env.fleet, env.tasks, env.t)
+    locations = env.fleet.locations()
+    slots = {
+        agent_id: slot_for_action(env.graph, locations[agent_id], action)
+        for agent_id, action in actions.items()
+    }
+    env.log.record_routing_runtime(time.perf_counter() - start)
+    env.step(slots)
 
 
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
