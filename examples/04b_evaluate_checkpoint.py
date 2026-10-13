@@ -70,23 +70,27 @@ CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_c
 
 
 def _instance_params() -> GeneratorParams:
+    # Must match 04_decentralised_training.py::build_instance exactly.
     return GeneratorParams(
-        num_aisles=7,
-        aisle_length=9,
-        num_cross_aisles=6,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=5,
-        num_storage_vertices=10,
-        num_delivery_vertices=6,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
+        min_internal_role_vertices=2,
         seed=42,
     )
 
 
 def build_instance() -> WarehouseGraph:
     params = _instance_params()
-    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=False)
+    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=True)
     if not report.accepted:
         raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
     return graph
@@ -124,11 +128,11 @@ def build_config(seed: int) -> ExperimentConfig:
         num_agents=FLEET_SIZE,
         arrival_rate=1.0,
         seed=seed,
-        horizon=300,
-        wait_cost=0.5,
-        observation_depth=3,
+        horizon=2000,
+        wait_cost=2.0,
+        observation_depth=5,
         discount=0.99,
-        deliver_reward=20.0,
+        deliver_reward=10.0,
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )

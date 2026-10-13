@@ -1,5 +1,7 @@
 """Unit tests for slap_mapd_coupling.evaluation.evaluator."""
 
+import json
+
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -142,3 +144,25 @@ def test_relocated_units_counts_arrivals_at_new_cells():
 def test_decision_runtimes_are_nonnegative_and_present():
     metrics = _run(_graph(), _config(horizon=10))
     assert metrics.mean_decision_runtime_seconds >= 0.0
+
+
+def test_run_episode_with_a_trace_path_returns_the_same_metrics(tmp_path):
+    config = _config()
+    graph = _graph()
+    path = tmp_path / "traces" / "episode.jsonl"
+    with_trace = _run_traced(graph, config, path)
+    without = _run(graph, config)
+    # Decision runtime is wall-clock time, so it differs between any two runs.
+    exclude = {"mean_decision_runtime_seconds"}
+    assert with_trace.model_dump(exclude=exclude) == without.model_dump(exclude=exclude)
+    lines = path.read_text().splitlines()
+    assert len(lines) == config.horizon + 1
+    assert json.loads(lines[0])["type"] == "header"
+
+
+def _run_traced(graph: WarehouseGraph, config: ExperimentConfig, path):
+    storage_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
+    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
+    capacities = {v: 10.0 for v in storage_vertices}
+    counts = {"tea": {storage_vertices[0]: 5, storage_vertices[1]: 5}}
+    return run_episode(graph, skus, counts, capacities, config, trace_path=path)

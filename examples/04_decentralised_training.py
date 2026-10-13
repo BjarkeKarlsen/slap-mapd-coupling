@@ -64,6 +64,12 @@ from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, is_feasible
+from slap_mapd_coupling.evaluation.trace import (
+    EpisodeTraceWriter,
+    format_summary,
+    load_trace,
+    summarise_trace,
+)
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
@@ -80,6 +86,7 @@ from slap_mapd_coupling.training.utils import save_checkpoint
 
 FLEET_SIZE = 3
 CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_checkpoint"
+TRACE_DIR = Path(__file__).parent / "output" / "traces"
 
 
 def build_instance() -> WarehouseGraph:
@@ -266,23 +273,28 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
         before_fleet = env._env.fleet
         completed_before = sum(1 for t in env._env.tasks if t.finish_time is not None)
 
-        for _ in range(config.horizon):
-            batch, agent_ids = _to_batch(obs)
-            fwd_out = module.forward_inference(batch)
-            logits = fwd_out["action_dist_inputs"]
-            # Pair logits[i] with agent_ids[i], NOT env.agents[i] -- obs's
-            # own key order (which _to_batch stacks in) isn't guaranteed
-            # to match env.agents's fixed order.
-            actions = {}
-            for i, aid in enumerate(agent_ids):
-                mask = obs[aid]["action_mask"]
-                actions[aid] = _sample_legal_slot(logits[i].detach().numpy(), mask, rng)
-            obs, rewards, terminated, truncated, infos = env.step(actions)
-            assert is_collision_free(before_fleet, env._env.fleet), "collision during evaluation"
-            assert is_feasible(env._env.storage), "infeasible storage during evaluation"
-            before_fleet = env._env.fleet
-            if truncated["__all__"] or terminated["__all__"]:
-                break
+        trace_path = TRACE_DIR / f"04_episode_{episode_idx + 1}.jsonl"
+        with EpisodeTraceWriter(trace_path, env._env) as writer:
+            for _ in range(config.horizon):
+                batch, agent_ids = _to_batch(obs)
+                fwd_out = module.forward_inference(batch)
+                logits = fwd_out["action_dist_inputs"]
+                # Pair logits[i] with agent_ids[i], NOT env.agents[i] -- obs's
+                # own key order (which _to_batch stacks in) isn't guaranteed
+                # to match env.agents's fixed order.
+                actions = {}
+                for i, aid in enumerate(agent_ids):
+                    mask = obs[aid]["action_mask"]
+                    actions[aid] = _sample_legal_slot(logits[i].detach().numpy(), mask, rng)
+                obs, rewards, terminated, truncated, infos = env.step(actions)
+                writer.record(env._env)
+                assert is_collision_free(
+                    before_fleet, env._env.fleet
+                ), "collision during evaluation"
+                assert is_feasible(env._env.storage), "infeasible storage during evaluation"
+                before_fleet = env._env.fleet
+                if truncated["__all__"] or terminated["__all__"]:
+                    break
 
         completed_after = sum(1 for t in env._env.tasks if t.finish_time is not None)
         print(
@@ -290,6 +302,8 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
             f"tasks completed = {completed_after - completed_before}, "
             f"collisions = none, storage feasible = yes"
         )
+        print(format_summary(summarise_trace(*load_trace(trace_path))))
+        print(f"  trace written to {trace_path}")
 
 
 def _to_batch(obs: dict) -> tuple[dict, list[str]]:

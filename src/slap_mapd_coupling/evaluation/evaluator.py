@@ -14,6 +14,7 @@ accumulated log at the end.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Mapping
 
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -21,6 +22,7 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
+from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter
 from slap_mapd_coupling.routing import get_router
 
 
@@ -30,6 +32,7 @@ def run_episode(
     initial_storage_counts: Mapping[SkuId, Mapping[VertexId, int]],
     storage_capacities: Mapping[VertexId, float],
     config: ExperimentConfig,
+    trace_path: Path | None = None,
 ) -> RunMetrics:
     """Run one full episode (config.horizon timesteps) and reduce it to
     one RunMetrics row.
@@ -40,12 +43,22 @@ def run_episode(
     the decentralised arm's, concretely -- replays bit-for-bit under a
     fixed seed the same way the order generator and conflict resolution
     already do (4.Implementation.tex:450-452, sec:impl:instances).
+
+    With `trace_path` the episode also writes a per-step trace there
+    (evaluation/trace.py). The writer only reads the environment, so the
+    returned RunMetrics are the same with or without it.
     """
     get_router(config).reset(config.seed)
     env = WarehouseMAPDEnv(graph, skus, initial_storage_counts, storage_capacities, config)
     env.reset()
-    for _ in range(config.horizon):
-        env.step()
+    if trace_path is None:
+        for _ in range(config.horizon):
+            env.step()
+    else:
+        with EpisodeTraceWriter(trace_path, env) as writer:
+            for _ in range(config.horizon):
+                env.step()
+                writer.record(env)
     return _to_run_metrics(env, config)
 
 
