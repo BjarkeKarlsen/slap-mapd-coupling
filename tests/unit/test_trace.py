@@ -377,3 +377,46 @@ def test_cli_counts_the_fleet_as_dead_after_50_still_steps_unless_told_otherwise
 def test_cli_rejects_a_dead_after_below_one(tmp_path):
     with pytest.raises(SystemExit):
         main([_still_trace(tmp_path, 3), "--dead-after", "0"])
+
+
+def test_cli_pools_the_share_of_goal_moves_that_bring_an_agent_closer(tmp_path, capsys):
+    # Vertices 1 - 0 - 2 on a line, goal 2. Agent 1 shuffles between 0 and 1 (2 of 4 goal
+    # moves bring it closer), agent 2 walks to the goal (2 of 2). Pooled, that is 4 of 6.
+    header = {
+        "type": "header",
+        "format": 1,
+        "initial": {"1": 0, "2": 1},
+        "edges": [[1, 0, 1.0], [0, 1, 1.0], [0, 2, 1.0], [2, 0, 1.0]],
+    }
+
+    def agent(at, moved):
+        return {
+            "at": at,
+            "intent": None,
+            "moved": moved,
+            "overridden": False,
+            "task": 1,
+            "phase": "to_pickup",
+            "goal": 2,
+        }
+
+    shuffle, walk = [1, 0, 1, 0], [(0, True), (2, True), (2, False), (2, False)]
+    lines = [json.dumps(header)]
+    for t in range(4):
+        step = {
+            "type": "step",
+            "t": t + 1,
+            "completed": 0,
+            "released": 2,
+            "backlog": 2,
+            "agents": {"1": agent(shuffle[t], True), "2": agent(*walk[t])},
+        }
+        lines.append(json.dumps(step))
+    paths = []
+    for name in ("a", "b"):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(lines) + "\n")
+        paths.append(str(path))
+    main([*paths, "--window", "4"])
+    out = capsys.readouterr().out
+    assert "goal moves that bring an agent closer, over all episodes: 67%" in out
