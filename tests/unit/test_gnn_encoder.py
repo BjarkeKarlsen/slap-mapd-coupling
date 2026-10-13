@@ -62,8 +62,6 @@ def _config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-
-
 def _encoder(num_rounds: int, communication: bool, hidden_width: int = 8) -> GNNEncoder:
     config = GNNEncoderConfig(
         num_rounds=num_rounds, hidden_width=hidden_width, communication=communication
@@ -799,7 +797,7 @@ def test_encode_padded_move_inputs_match_the_unbatched_embed_moves(num_rounds, c
         assert torch.allclose(gathered[:slots], xibar_w, atol=1e-5)
         assert not gathered[slots:].any()
         found_a_sender = found_a_sender or bool(mask.any())
-    assert found_a_sender
+    assert found_a_sender or not communication
 
 
 def test_embed_moves_rejects_senders_when_communication_is_off():

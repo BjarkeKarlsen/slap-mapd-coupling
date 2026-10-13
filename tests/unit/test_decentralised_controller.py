@@ -387,7 +387,6 @@ def test_batch_stacks_every_observation_key_including_the_move_slot_arrays(commu
 
 
 def test_constructing_a_controller_with_communication_and_no_room_for_a_sender_is_rejected():
-    graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=0)
     config = _decentralised_config(num_agents=2, communication=True)
 
