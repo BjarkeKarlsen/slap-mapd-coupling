@@ -11,6 +11,7 @@ from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.environment.observation import (
     build_observation,
     communication_neighbours,
+    local_subgraph,
 )
 from slap_mapd_coupling.models.base_model import (
     MOVE_SENDER_KEYS,
@@ -70,9 +71,21 @@ def _config(communication: bool) -> ExperimentConfig:
     )
 
 
-def _batch(communication: bool, max_messages: int = 2) -> dict[str, torch.Tensor]:
-    """The three robots' encoded observations stacked into one batch."""
+def _zone_pool(graph: WarehouseGraph, location: int) -> tuple[int, ...]:
+    """The field of view's vertices in the zone of `location`, for the zones
+    {0, 1} and {2, 3}. The rest of the field of view is the halo."""
+    return tuple(v for v in local_subgraph(graph, location, 3) if (v < 2) == (location < 2))
+
+
+def _batch(
+    communication: bool, max_messages: int = 2, pooling: str = "none"
+) -> dict[str, torch.Tensor]:
+    """The three robots' encoded observations stacked into one batch. With
+    pooling on, each robot pools over its zone (_zone_pool)."""
     graph = _star_graph()
+    pool_vertices = None
+    if pooling != "none":
+        pool_vertices = {aid: _zone_pool(graph, loc) for aid, loc in _LOCATIONS.items()}
     encoded = encode_all_observations(
         graph,
         _fleet(),
@@ -81,6 +94,8 @@ def _batch(communication: bool, max_messages: int = 2) -> dict[str, torch.Tensor
         _config(communication),
         LocalSubgraphEncodingConfig(max_local_nodes=6, max_messages=max_messages),
         d_max=3,
+        pooling=pooling,
+        pool_vertices=pool_vertices,
     )
     rows = [item.as_rllib_dict()["observations"] for item in encoded.values()]
     return {key: torch.as_tensor(np.stack([row[key] for row in rows])) for key in rows[0]}
@@ -94,10 +109,15 @@ def _randomise(module: nn.Module, seed: int = 0) -> None:
             p.copy_(0.5 * torch.randn(p.shape, generator=generator))
 
 
-def _model(num_rounds: int, communication: bool, hidden_width: int = 8) -> GNNPolicyValueModel:
+def _model(
+    num_rounds: int, communication: bool, hidden_width: int = 8, pooling: str = "none"
+) -> GNNPolicyValueModel:
     encoder = GNNEncoder(
         GNNEncoderConfig(
-            num_rounds=num_rounds, hidden_width=hidden_width, communication=communication
+            num_rounds=num_rounds,
+            hidden_width=hidden_width,
+            communication=communication,
+            pooling=pooling,
         )
     )
     model = GNNPolicyValueModel(encoder, PolicyValueHeadConfig(hidden_width=hidden_width))
@@ -113,7 +133,9 @@ def _call(model: GNNPolicyValueModel, tensors: dict[str, torch.Tensor]):
 
 def _encode(model: GNNPolicyValueModel, tensors: dict[str, torch.Tensor]):
     senders = {key: tensors[key] for key in SENDER_KEYS if key in tensors}
-    return model.encoder.encode_padded(*(tensors[key] for key in _ENCODER_KEYS), **senders)
+    return model.encoder.encode_padded(
+        *(tensors[key] for key in _ENCODER_KEYS), **senders, pool_mask=tensors.get("pool_mask")
+    )
 
 
 def _permuted(tensors: dict[str, torch.Tensor], perm: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -201,17 +223,18 @@ def test_gnn_policy_value_model_logits_are_unmasked_raw_values():
     assert torch.isfinite(logits).all()
 
 
+@pytest.mark.parametrize("pooling", ["none", "mean"])
 @pytest.mark.parametrize("num_rounds", [0, 2])
 @pytest.mark.parametrize("communication", [False, True])
 def test_padded_logits_equal_an_unbatched_oracle_that_scores_one_neighbour_at_a_time(
-    num_rounds, communication
+    num_rounds, communication, pooling
 ):
     graph = _star_graph()
     config = _config(communication)
     fleet = _fleet()
-    model = _model(num_rounds, communication)
+    model = _model(num_rounds, communication, pooling=pooling)
     with torch.no_grad():
-        logits, _ = _call(model, _batch(communication))
+        logits, _ = _call(model, _batch(communication, pooling=pooling))
         for row, agent_id in enumerate(_LOCATIONS):
             location = _LOCATIONS[agent_id]
             observation = build_observation(graph, fleet, [], agent_id, 0, config)
@@ -222,7 +245,8 @@ def test_padded_logits_equal_an_unbatched_oracle_that_scores_one_neighbour_at_a_
                     (_LOCATIONS[j], build_observation(graph, fleet, [], j, 0, config))
                     for j in heard
                 ]
-            z = model.encoder(graph, location, observation, senders)
+            pool_vertices = _zone_pool(graph, location) if pooling == "mean" else None
+            z = model.encoder(graph, location, observation, senders, pool_vertices)
             h_w, xibar_w = model.encoder.embed_moves(graph, location, observation, senders)
 
             assert torch.allclose(model.head.score_wait(z)[0], logits[row, 0], atol=1e-5)
@@ -376,6 +400,47 @@ def test_no_gradient_reaches_the_encoder_when_h_w_and_xibar_w_are_both_detached(
     logits = _move_logits(model, _batch(True), detach_h=True, detach_xibar=True)
     model.zero_grad()
     logits[0, 1].backward()
+    assert not _encoder_got_a_gradient(model)
+
+
+def _logits_through_the_pooled_term(model, tensors, detach_pooled: bool = False):
+    """Logits from a head whose inputs are all detached except the pooled
+    term of z_i, which sits just before the congestion feature."""
+    out = _encode(model, tensors)
+    start = out.z.shape[1] - 1 - model.encoder.embedding_dim
+    pooled = out.z[:, start:-1]
+    z = torch.cat(
+        [
+            out.z[:, :start].detach(),
+            pooled.detach() if detach_pooled else pooled,
+            out.z[:, -1:].detach(),
+        ],
+        dim=-1,
+    )
+    senders = {}
+    if model.head.communication:
+        senders = {key: tensors[key] for key in MOVE_SENDER_KEYS}
+        senders["messages"] = out.messages.detach()
+    return model.head.policy(
+        z, out.node_embeddings.detach(), tensors["move_target_index"], **senders
+    )
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_a_loss_on_the_logits_reaches_the_encoder_through_the_pooled_term(communication):
+    model = _model(2, communication, pooling="mean")
+    tensors = _batch(communication, pooling="mean")
+
+    logits = _logits_through_the_pooled_term(model, tensors)
+    model.zero_grad()
+    logits.sum().backward()
+    assert _encoder_got_a_gradient(model)
+
+    # the check above is not vacuous, since with the pooled term detached as well
+    # nothing reaches the encoder
+    logits = _logits_through_the_pooled_term(model, tensors, detach_pooled=True)
+    model.zero_grad()
+    logits.sum().backward()
     assert not _encoder_got_a_gradient(model)
 
 

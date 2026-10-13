@@ -11,6 +11,7 @@ from slap_mapd_coupling.core.tasks import Task
 from slap_mapd_coupling.environment.observation import (
     build_observation,
     communication_neighbours,
+    local_subgraph,
 )
 from slap_mapd_coupling.environment.spaces import max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import (
@@ -62,9 +63,14 @@ def _config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-def _encoder(num_rounds: int, communication: bool, hidden_width: int = 8) -> GNNEncoder:
+def _encoder(
+    num_rounds: int, communication: bool, hidden_width: int = 8, pooling: str = "none"
+) -> GNNEncoder:
     config = GNNEncoderConfig(
-        num_rounds=num_rounds, hidden_width=hidden_width, communication=communication
+        num_rounds=num_rounds,
+        hidden_width=hidden_width,
+        communication=communication,
+        pooling=pooling,
     )
     return GNNEncoder(config)
 
@@ -222,7 +228,15 @@ _LOCATIONS = {1: 0, 2: 2, 3: 3, 4: 9, 5: 5}
 _MAX_MESSAGES = 3
 
 
-def _scenario(communication: bool):
+def _zone_pool(graph: WarehouseGraph, location: int, depth: int) -> tuple[int, ...]:
+    """The field of view's vertices in the zone of `location`, for the zones
+    {0, ..., 4} and {5, ..., 9}. The rest of the field of view is the halo."""
+    return tuple(v for v in local_subgraph(graph, location, depth) if (v < 5) == (location < 5))
+
+
+def _scenario(communication: bool, pooling: str = "none"):
+    """With pooling on, each robot pools over the part of its field of view
+    in its own zone (_zone_pool)."""
     graph = _line_graph(10)
     fleet = _fleet(_LOCATIONS)
     task = Task(task_id=2, release_time=0, pickup_vertex=9, delivery_vertex=0, sku="sku-1").assign(
@@ -230,8 +244,19 @@ def _scenario(communication: bool):
     )
     config = _config(observation_depth=3, communication=communication)
     encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=9, max_messages=_MAX_MESSAGES)
+    pool_vertices = None
+    if pooling != "none":
+        pool_vertices = {aid: _zone_pool(graph, loc, 3) for aid, loc in _LOCATIONS.items()}
     encoded = encode_all_observations(
-        graph, fleet, [task], 0, config, encoding_config, max_out_degree(graph)
+        graph,
+        fleet,
+        [task],
+        0,
+        config,
+        encoding_config,
+        max_out_degree(graph),
+        pooling=pooling,
+        pool_vertices=pool_vertices,
     )
     return graph, fleet, [task], config, encoded
 
@@ -252,6 +277,7 @@ def _forward_padded(encoder: GNNEncoder, tensors: dict[str, torch.Tensor]) -> to
         tensors["own_index"],
         tensors["congestion"],
         **senders,
+        pool_mask=tensors.get("pool_mask"),
     )
 
 
@@ -273,22 +299,27 @@ def _oracle(encoder: GNNEncoder, scenario, agent_id: int) -> torch.Tensor:
     """The unbatched forward of one robot, with the observations of the
     robots it hears built from scratch."""
     graph, fleet, tasks, config, _ = scenario
+    location = fleet.locations()[agent_id]
     observation = build_observation(graph, fleet, tasks, agent_id, 0, config)
-    return encoder(
-        graph, fleet.locations()[agent_id], observation, _heard_senders(scenario, agent_id)
-    )
+    pool_vertices = None
+    if encoder.config.pooling != "none":
+        pool_vertices = _zone_pool(graph, location, config.observation_depth)
+    return encoder(graph, location, observation, _heard_senders(scenario, agent_id), pool_vertices)
 
 
+@pytest.mark.parametrize("pooling", ["none", "mean"])
 @pytest.mark.parametrize("num_rounds", [0, 2])
 @pytest.mark.parametrize("communication", [False, True])
-def test_forward_padded_matches_the_unbatched_forward_for_every_robot(num_rounds, communication):
+def test_forward_padded_matches_the_unbatched_forward_for_every_robot(
+    num_rounds, communication, pooling
+):
     """The padded path, with node, edge and sender padding from
     encode_all_observations, equals the unbatched forward of each robot."""
-    scenario = _scenario(communication)
+    scenario = _scenario(communication, pooling)
     encoded = scenario[-1]
 
     torch.manual_seed(1)
-    encoder = _encoder(num_rounds, communication)
+    encoder = _encoder(num_rounds, communication, pooling=pooling)
     encoder.eval()
     with torch.no_grad():
         batched = _forward_padded(encoder, _as_tensors(encoded.values()))
@@ -561,6 +592,7 @@ def _embedding_of(encoder: GNNEncoder, views: dict) -> torch.Tensor:
             num_rounds=encoder.config.num_rounds,
             hidden_width=encoder.config.hidden_width,
             communication=False,
+            pooling="none",
         )
     )
     off.load_state_dict(encoder.state_dict())
@@ -809,3 +841,95 @@ def test_embed_moves_rejects_senders_when_communication_is_off():
 
     with pytest.raises(ValueError, match="communication off"):
         encoder.embed_moves(graph, 0, observation, _heard_senders(scenario, 1))
+
+
+@pytest.mark.parametrize("num_rounds", [0, 2])
+@pytest.mark.parametrize("communication", [False, True])
+def test_pooling_widens_the_readout_by_one_embedding(num_rounds, communication):
+    off = _encoder(num_rounds, communication)
+    on = _encoder(num_rounds, communication, pooling="mean")
+    assert on.output_dim == off.output_dim + off.embedding_dim
+    # pooling adds no weights, so the two encoders can share them
+    assert on.state_dict().keys() == off.state_dict().keys()
+
+
+def test_the_pooled_mean_ignores_padding_and_unmarked_vertices():
+    """At L = 0 the embedding is the raw features, so the readout can be
+    written down by hand. Vertex 1 is real but unmarked, like the halo, and
+    vertex 3 is padding marked on purpose."""
+    encoder = _encoder(0, False, pooling="mean")
+    vertices = [
+        [1.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0, 7.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0, 4.0, 1.0],
+        [9.0, 9.0, 9.0, 9.0, 9.0, 9.0],
+    ]
+    z = encoder.forward_padded(
+        torch.tensor([vertices]),
+        torch.tensor([[1.0, 1.0, 1.0, 0.0]]),
+        torch.zeros(1, 1, 2, dtype=torch.long),
+        torch.zeros(1, 1),
+        torch.tensor([1]),
+        torch.tensor([0.25]),
+        pool_mask=torch.tensor([[1.0, 0.0, 1.0, 1.0]]),
+    )
+    own = [0.0, 1.0, 0.0, 0.0, 7.0, 1.0]
+    pooled = [0.5, 0.0, 0.5, 0.0, 3.0, 0.5]  # the mean of vertices 0 and 2
+    assert z[0].tolist() == pytest.approx(own + pooled + [0.25])
+
+
+def test_padded_vertices_marked_for_pooling_do_not_change_z():
+    generator = torch.Generator().manual_seed(7)
+    torch.manual_seed(0)
+    encoder = _encoder(2, True, pooling="mean")
+    encoder.eval()
+    batch = _random_batch(generator, 3, n=6, e_max=8, m=2, communication=True)
+    batch["pool_mask"] = (torch.rand(3, 6, generator=generator) < 0.5).float()
+    batch["pool_mask"][:, 0] = 1.0
+
+    padded = _with_padded_vertices_and_edges(batch, 3, 4)
+    padded["pool_mask"] = torch.cat([batch["pool_mask"], torch.ones(3, 3)], dim=1)
+
+    with torch.no_grad():
+        plain = encoder.forward_padded(**batch)
+        with_padding = encoder.forward_padded(**padded)
+    assert torch.allclose(plain, with_padding, atol=1e-5)
+
+
+@pytest.mark.parametrize("num_rounds", [0, 2])
+@pytest.mark.parametrize("communication", [False, True])
+def test_pooling_none_gives_the_readout_without_the_pooled_term(num_rounds, communication):
+    """With the same weights, the readout with pooling off is the readout
+    with pooling on less the pooled term, which sits just before the
+    congestion feature."""
+    torch.manual_seed(3)
+    on = _encoder(num_rounds, communication, pooling="mean")
+    off = _encoder(num_rounds, communication)
+    off.load_state_dict(on.state_dict())
+    pooled_dim = on.embedding_dim
+
+    with torch.no_grad():
+        z_on = _forward_padded(on, _as_tensors(_scenario(communication, "mean")[-1].values()))
+        z_off = _forward_padded(off, _as_tensors(_scenario(communication)[-1].values()))
+    assert torch.equal(z_off, torch.cat([z_on[:, : -1 - pooled_dim], z_on[:, -1:]], dim=-1))
+
+
+def test_forward_padded_requires_the_pool_mask_exactly_when_pooling_is_on():
+    generator = torch.Generator().manual_seed(31)
+    batch = _random_batch(generator, 2, n=5, e_max=6, m=2, communication=False)
+
+    with pytest.raises(ValueError, match="pool_mask"):
+        _encoder(1, False, pooling="mean").forward_padded(**batch)
+    with pytest.raises(ValueError, match="pool_mask"):
+        _encoder(1, False).forward_padded(**batch, pool_mask=torch.ones(2, 5))
+
+
+def test_forward_rejects_pool_vertices_with_pooling_off_or_outside_the_window():
+    graph = _line_graph(6)
+    config = _config(observation_depth=1)
+    observation = build_observation(graph, _fleet({1: 2}), [], agent_id=1, t=0, config=config)
+
+    with pytest.raises(ValueError, match="pooling off"):
+        _encoder(1, False)(graph, 2, observation, pool_vertices=(2,))
+    with pytest.raises(ValueError, match="part of the window"):
+        _encoder(1, False, pooling="mean")(graph, 2, observation, pool_vertices=(2, 5))

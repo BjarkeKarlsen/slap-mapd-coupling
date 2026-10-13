@@ -104,7 +104,7 @@ def test_build_ppo_config_rejects_a_cap_too_small_for_a_vertex_and_its_neighbour
     skus, capacities, counts = _instance(graph)
     assert max_out_degree(graph) + 1 > 2
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=2, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
 
     with pytest.raises(ValueError, match="max_local_nodes"):
         build_ppo_config(
@@ -125,7 +125,7 @@ def test_build_ppo_config_rejects_a_neighbour_outside_the_field_of_view():
     graph = _graph(random_edge_costs=True, edge_cost_range=(1.5, 2.0))
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
 
     with pytest.raises(ValueError, match="observation_depth"):
         build_ppo_config(
@@ -155,7 +155,7 @@ def test_build_ppo_config_rejects_a_communication_mismatch(experiment_communicat
     config = _config(communication=experiment_communication)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     gnn_config = GNNEncoderConfig(
-        num_rounds=1, hidden_width=8, communication=not experiment_communication
+        num_rounds=1, hidden_width=8, communication=not experiment_communication, pooling="none"
     )
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
@@ -179,7 +179,7 @@ def test_build_ppo_config_accepts_communication_when_both_switches_agree():
     skus, capacities, counts = _instance(graph)
     # the largest field of view of _graph() at d_obs = 3 has 20 vertices
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True, pooling="none")
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
     ppo_config = build_ppo_config(
@@ -201,7 +201,7 @@ def test_build_ppo_config_rejects_communication_with_no_room_for_a_sender():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=0)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True, pooling="none")
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="max_messages"):
@@ -228,7 +228,7 @@ def test_build_ppo_config_rejects_missing_discount():
     skus, capacities, counts = _instance(graph)
     config = _config().model_construct(**{**_config().model_dump(), "discount": None})
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="discount"):
@@ -250,7 +250,7 @@ def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="credit_signal"):
@@ -274,7 +274,7 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     config = _config()
     # the largest field of view of _graph() at d_obs = 3 has 20 vertices
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
     ppo_config = build_ppo_config(
