@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `PPOHyperparameters.training_budget_env_steps`, with no default, since the thesis counts
+  the training budget in environment steps and leaves its value TBD.
+- `tensorboard` in the dev extras.
+- A test that a saved checkpoint loads through the path example 04b uses.
 - `TokenPassingPlanner` (`planners/token_passing.py`, `--planner token_passing`), the
   reference baseline of Ma et al. (2017). It picks its own tasks, so the
   environment loop asks a `SelfAssigningRouter` for the assignment in place of
@@ -67,6 +71,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correct).
 
 ### Changed
+- Examples 02, 03, 04 and 04b run through Ray Tune with Ray's default checkpoints. 02
+  (centralised) and 03 (section-based) are thin variants of 04, and 04b takes
+  `--checkpoint=<path>` and `--arm`. Each example sets `max_local_nodes` from the graph
+  to the largest window its arm uses, so no window is truncated, and builds its instance
+  with `generate_instance` and the validation checks so the aisle index is kept.
+  04 evaluates one episode per evaluation seed through `run_episode(policy=...)`, and
+  `--regime matched` trains under the storage rule used at evaluation.
+- `docs/controller_integration.md` describes the `Assigner`, the planner driver and the
+  policy function. `docs/TRAINING.md` describes a Tune run, checkpoints and TensorBoard.
 - `check_well_formedness` counts non-task endpoints, the vertices of V_ep in neither
   V_str nor V_del, against the fleet size, as the thesis says. It used to count
   V_ep, V_str and V_del together, so an instance with fewer than m vertices in V_ep
@@ -109,6 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restructuring.
 
 ### Removed
+- `training/utils.py` (`save_checkpoint`, `load_checkpoint`) and every `CHECKPOINT_DIR`.
+  Checkpoints go where Ray puts them.
 - `bugs.md`. Its content was already duplicated as closed GitHub issues
   #1-6 (see the repo's issue tracker); keeping both was exactly the
   same "two copies drift apart" problem the wiki's Home page was
