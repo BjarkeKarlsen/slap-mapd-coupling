@@ -12,9 +12,10 @@ an aisle or cross-aisle. They are not automatically added as leaf vertices.
 A role assignment is accepted only when every pair of role vertices can reach
 each other without using a third role vertex as an intermediate vertex.
 
-The integer lattice is visualization metadata only. It gives every displayed
-node a unique position with equal spacing; it does not determine whether a
-vertex is plain, storage, delivery, or parking.
+The integer lattice gives every displayed node a unique position with equal
+spacing; it does not determine whether a vertex is plain, storage, delivery,
+or parking. Its column is also recorded as the vertex's aisle number
+(``aisle_index``). The display positions are visualization metadata only.
 """
 
 from __future__ import annotations
@@ -150,6 +151,10 @@ class GeneratedInstance(BaseModel):
 
     graph: WarehouseGraph
     positions: dict[VertexId, Position]
+    # Aisle number of every vertex, left to right from 0. Cross-aisle vertices
+    # carry the number of the aisle they sit on. Taken from the lattice column
+    # when the vertex is created, so it does not depend on the display positions.
+    aisle_index: dict[VertexId, int]
     aisle_lengths: tuple[PositiveInt, ...]
     cross_aisle_rows: tuple[PositiveInt, ...]
     num_transit_vertices: PositiveInt
@@ -165,6 +170,9 @@ class GeneratedInstance(BaseModel):
     def _metadata_must_match_graph(self) -> "GeneratedInstance":
         if set(self.positions) != set(self.graph.vertices):
             raise ValueError("Position keys must exactly match graph vertex IDs.")
+
+        if set(self.aisle_index) != set(self.graph.vertices):
+            raise ValueError("aisle_index keys must exactly match graph vertex IDs.")
 
         if len(set(self.positions.values())) != len(self.positions):
             raise ValueError("Every graph vertex must have a unique display position.")
@@ -208,6 +216,7 @@ class _MutableTopology:
 
     vertices: dict[VertexId, Vertex] = field(default_factory=dict)
     positions: dict[VertexId, Position] = field(default_factory=dict)
+    aisle_index: dict[VertexId, int] = field(default_factory=dict)
     grid: dict[GridCell, VertexId] = field(default_factory=dict)
     next_id: int = 0
 
@@ -224,6 +233,7 @@ class _MutableTopology:
             role=VertexRole(movable=True),
         )
         self.positions[vertex_id] = _to_plot_position(cell)
+        self.aisle_index[vertex_id] = cell[1]
         self.grid[cell] = vertex_id
         return vertex_id
 
@@ -403,6 +413,7 @@ def _try_build(
     instance = GeneratedInstance(
         graph=graph,
         positions=topology.positions,
+        aisle_index=topology.aisle_index,
         aisle_lengths=shape.aisle_lengths,
         cross_aisle_rows=shape.cross_aisle_rows,
         num_transit_vertices=shape.num_vertices,

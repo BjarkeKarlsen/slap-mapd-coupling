@@ -5,6 +5,7 @@ import pytest
 from slap_mapd_coupling.core.graph import Edge, WarehouseGraph
 from slap_mapd_coupling.instances import generator
 from slap_mapd_coupling.instances.generator import (
+    GeneratedInstance,
     GeneratorParams,
     InstanceGenerationError,
     generate_and_validate,
@@ -76,6 +77,47 @@ def test_generator_is_deterministic_given_seed():
 def test_generate_instance_positions_match_graph_vertices():
     instance = generate_instance(_params(one_way_fraction=0.1))
     assert set(instance.positions.keys()) == set(instance.graph.vertices.keys())
+
+
+def test_aisle_index_keys_equal_the_vertices_and_values_are_consecutive_from_zero():
+    instance = generate_instance(_large_params(seed=3))
+    assert set(instance.aisle_index) == set(instance.graph.vertices)
+    assert set(instance.aisle_index.values()) == set(range(instance.num_aisles))
+
+
+def test_aisle_index_gives_every_vertex_the_aisle_it_was_built_in():
+    # Aisles are created left to right, aisle_lengths[a] + 1 vertices each,
+    # so vertex numbers run through the aisles in order. Cross-aisle vertices
+    # are ordinary members of their aisle.
+    instance = generate_instance(_large_params(seed=3))
+    expected: dict[int, int] = {}
+    next_vertex = 0
+    for aisle, length in enumerate(instance.aisle_lengths):
+        for _ in range(length + 1):
+            expected[next_vertex] = aisle
+            next_vertex += 1
+    assert instance.aisle_index == expected
+
+
+def test_aisle_index_matches_the_lattice_column_of_every_vertex():
+    instance = generate_instance(_large_params(seed=3))
+    columns = {v: round(x / 1.5) for v, (x, _) in instance.positions.items()}
+    assert instance.aisle_index == columns
+
+
+def test_aisle_index_keys_must_match_the_graph_vertices():
+    instance = generate_instance(_large_params(seed=3))
+    incomplete = dict(instance.aisle_index)
+    incomplete.pop(0)
+    with pytest.raises(ValueError, match="aisle_index"):
+        GeneratedInstance(
+            graph=instance.graph,
+            positions=instance.positions,
+            aisle_index=incomplete,
+            aisle_lengths=instance.aisle_lengths,
+            cross_aisle_rows=instance.cross_aisle_rows,
+            num_transit_vertices=instance.num_transit_vertices,
+        )
 
 
 def test_generate_warehouse_graph_unchanged_by_refactor():
