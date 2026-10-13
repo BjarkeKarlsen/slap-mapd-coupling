@@ -41,3 +41,31 @@ def test_evaluation_seeds_are_the_eval_half_of_the_split(example_04):
     train_seeds, eval_seeds = split_seeds(example_04.build_seed_split(0, 8))
     assert len(eval_seeds) == 8
     assert not set(train_seeds) & set(eval_seeds)
+
+
+def test_budget_is_read_and_must_be_positive(example_04):
+    assert example_04.parse_args(["--budget-env-steps", "600"]).budget_env_steps == 600
+    assert example_04.parse_args(["--budget-env-steps=600"]).budget_env_steps == 600
+    assert example_04.parse_args([]).budget_env_steps == example_04.ILLUSTRATIVE_BUDGET_ENV_STEPS
+    with pytest.raises(SystemExit):
+        example_04.parse_args(["--budget-env-steps=0"])
+
+
+def test_hyperparameters_carry_the_budget_given(example_04):
+    assert example_04.build_hyperparameters(0, 900).training_budget_env_steps == 900
+
+
+def test_matched_regime_trains_under_the_evaluation_storage_rule(example_04, monkeypatch):
+    # With the evaluation rule changed to one this demo cannot configure, "matched" must
+    # follow it and "fixed_only" must not.
+    assert example_04.build_config("matched", seed=0).storage_mode == "fixed"
+    monkeypatch.setattr(example_04, "EVALUATION_STORAGE_MODE", "demand")
+    assert example_04.build_config("fixed_only", seed=0).storage_mode == "fixed"
+    with pytest.raises(ValueError, match="demand"):
+        example_04.build_config("matched", seed=0)
+
+
+def test_evaluation_config_uses_the_evaluation_storage_rule_and_seed(example_04):
+    config = example_04.evaluation_config(17, "centralised")
+    assert (config.seed, config.controller) == (17, "centralised")
+    assert config.storage_mode == example_04.EVALUATION_STORAGE_MODE

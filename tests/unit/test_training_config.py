@@ -92,6 +92,7 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
         train_batch_size=60,
+        training_budget_env_steps=120,
         credit_signal="per_agent",
     )
     defaults.update(overrides)
@@ -115,6 +116,16 @@ def test_split_seeds_produces_disjoint_contiguous_ranges():
 def test_ppo_hyperparameters_requires_every_field_no_defaults():
     with pytest.raises(Exception):
         PPOHyperparameters()  # type: ignore[call-arg]
+
+
+def test_training_budget_has_no_default_and_must_be_positive():
+    # The thesis leaves the budget TBD (tab:trainparams), so no number is picked here.
+    fields = {**_ppo_hp().model_dump()}
+    del fields["training_budget_env_steps"]
+    with pytest.raises(ValueError, match="training_budget_env_steps"):
+        PPOHyperparameters(**fields)
+    with pytest.raises(ValueError, match="training_budget_env_steps"):
+        _ppo_hp(training_budget_env_steps=0)
 
 
 def test_build_ppo_config_rejects_a_cap_too_small_for_a_vertex_and_its_neighbours():

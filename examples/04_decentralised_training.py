@@ -1,78 +1,73 @@
-"""Train the decentralised GNN+PPO controller and sanity-check it.
+"""Train a learned controller with PPO under Ray Tune and evaluate it.
 
-The M5 milestone's worked example: builds a small instance, trains the
-GNN-based PPO policy (models/rl_module.py, training/config.py, #30) for
-a handful of iterations, saves a checkpoint, then runs the trained
-policy for a few fresh episodes to confirm it produces a valid,
-correctness-invariant-respecting trace and completes at least some
-tasks -- not just that loss goes somewhere.
+The M5 milestone's worked example. It builds a small instance, trains the
+GNN-based PPO policy for a training budget counted in environment steps,
+saves Ray's default checkpoint, loads the module back from it and runs it for
+one episode per evaluation seed through the evaluator, with a trace per
+episode. This file trains the decentralised arm. 02_centralised_fixed.py and
+03_section_based.py are thin variants of it for the other two arms, and
+04b_evaluate_checkpoint.py evaluates a saved checkpoint without retraining.
 
-Scope, flagged rather than silently narrowed:
-- Only "fixed_only" (train under F_fix; sec:method:training's other
-  regime, "matched," trains under whichever storage rule is under
-  evaluation) is exercised here by default -- pass --regime matched to
-  run the other one instead. Running both by default would double this
-  script's already-nontrivial runtime for what's meant to stay a quick
-  smoke-testable example; tab:trainparams's own text asks for both
-  regimes to be "distinguished and reported," which a real sweep script
-  (not this one) is where that comparison actually belongs.
-- "Evaluates it" (issue #31's text) here means running the just-trained
-  RLModule directly for a few episodes and checking the correctness
-  invariants plus basic task-completion counts -- NOT the full
-  evaluator.py/RunMetrics comparison against the centralised/section-
-  based baselines that #29 (decentralised controller wrapper, wrapping
-  the trained policy behind the shared Controller Protocol so
-  evaluation/evaluator.py can run it like any other controller) would
-  enable. #29 is explicitly skipped this session; wiring the trained
-  checkpoint into evaluator.py for an apples-to-apples RunMetrics
-  comparison is #29's job, not re-derived here.
+Values that are illustrative, not the thesis's (tab:trainparams and
+tab:modelparams leave them TBD, or this script has no reason to fix them):
+- every PPO hyperparameter, the training budget and the seed counts,
+- credit_signal="per_agent" for every arm, because the thesis leaves the
+  credit signal of the centralised and section arms open,
+- the number of zones of the section arm (NUM_ZONES, zones follow the aisles).
 
-Hyperparameters below are still deliberately small relative to a real
-sweep (tab:trainparams's actual values are TBD, not these), but sized
-to actually converge on some task completions, not just to demonstrate
-the pipeline runs: with the previous tinier defaults (hidden_width=16,
-1 GNN round, horizon=30, 5 iterations), the policy's logits stayed
-close to untrained noise and greedy evaluation picked "wait" for every
-agent at every timestep, so no task was ever completed, training
-iteration count or not. A wider/deeper encoder, a longer horizon and
-far more iterations (below) does learn real navigation -- confirmed
-directly: a 500-iteration, horizon=150 run completed 4/2/3 tasks across
-its three evaluation episodes, with zero collisions. The current
-defaults (horizon=300, 5000 iterations) ask for noticeably more than
-that confirmed run, sized for a multi-hour pass rather than a quick
-check -- pass --iterations=N to run something shorter (500 took about
-15 minutes with --gpu --env-runners=6 on an 8-core/RTX-2070 machine).
-Once a checkpoint exists, 04b_evaluate_checkpoint.py re-evaluates it
-without retraining.
+Window caps. A window larger than max_local_nodes raises, so the cap is set
+from the graph to the largest window the arm uses and no window is truncated.
+That is every movable vertex for the centralised arm, the largest field of view
+for the decentralised arm, and the largest zone with its halo for the section
+arm. Pooling is "mean" for the centralised and section arms and "none" for the
+decentralised arm.
 
---gpu requests one GPU for the learner (passed through to
-build_ppo_config's use_gpu); --env-runners=N parallelises rollout
-collection across N worker processes. Both are execution details,
-tuned to the machine running this script, not study parameters.
+Regimes (sec:method:training). "fixed_only" trains under F_fix. "matched" trains
+under the storage rule used at evaluation, EVALUATION_STORAGE_MODE. That rule is
+F_fix here, so the two regimes train identically until the online storage
+estimates of the demand and congestion rules exist. Evaluation samples a legal
+slot with the policy function's rule. Whether it should take the most likely
+slot instead is still open.
+
+Run it with the smallest settings, for example
+    python examples/04_decentralised_training.py --budget-env-steps=600
+Ray writes its results, with the checkpoint, under ~/ray_results.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+from typing import Any, Mapping, NamedTuple
 
-import numpy as np
+from ray import tune
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
-from slap_mapd_coupling.core.agents import is_collision_free
-from slap_mapd_coupling.core.experiment_config import ExperimentConfig
+from slap_mapd_coupling.core.experiment_config import (
+    ControllerArchitecture,
+    ExperimentConfig,
+)
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
-from slap_mapd_coupling.core.storage_state import SkuId, SkuType, is_feasible
+from slap_mapd_coupling.core.storage_state import SkuId, SkuType
+from slap_mapd_coupling.environment.observation import local_subgraph
+from slap_mapd_coupling.environment.zones import halo, zones_by_aisle
+from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.evaluation.trace import (
-    EpisodeTraceWriter,
     format_summary,
     load_trace,
+    pooled_progress,
     summarise_trace,
 )
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
+from slap_mapd_coupling.instances.generator import (
+    GeneratedInstance,
+    GeneratorParams,
+    generate_instance,
+)
+from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
-from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
+from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig, Pooling
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.callbacks import (
     TrainingProgressCallbacks,
@@ -80,28 +75,35 @@ from slap_mapd_coupling.training.callbacks import (
     iteration_record,
 )
 from slap_mapd_coupling.training.config import (
+    DEFAULT_POLICY_ID,
     PPOHyperparameters,
     SeedSplitConfig,
     TrainingRegime,
     build_ppo_config,
     split_seeds,
 )
-from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
-from slap_mapd_coupling.training.policy import _sample_legal_slot
-from slap_mapd_coupling.training.utils import save_checkpoint
+from slap_mapd_coupling.training.env import CreditSignal, Zones
+from slap_mapd_coupling.training.policy import ModulePolicy
 
 FLEET_SIZE = 3
-CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_checkpoint"
-TRACE_DIR = Path(__file__).parent / "output" / "traces"
-PROGRESS_FILE = Path(__file__).parent / "output" / "04_training_progress.jsonl"
+# Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
+ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
+# Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
+CREDIT_SIGNAL: CreditSignal = "per_agent"
+# Illustrative. The number of zones is a sweep parameter (tab:modelparams).
+NUM_ZONES = 3
+# The storage rule a policy is evaluated under. "matched" training uses it too.
+EVALUATION_STORAGE_MODE = "fixed"
+POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
+OUTPUT_DIR = Path(__file__).parent / "output"
 
 
-def build_instance() -> WarehouseGraph:
+def build_generated_instance() -> GeneratedInstance:
+    """The generated instance, which keeps the aisle index the section arm needs."""
     params = GeneratorParams(
         max_num_aisles=7,
         max_aisle_length=7,
         max_num_cross_aisles=6,
-        # num_transit_vertices=56,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
         random_edge_costs=True,
@@ -110,15 +112,24 @@ def build_instance() -> WarehouseGraph:
         num_storage_vertices=4,
         num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
-        # Require at least eight selected role nodes to have degree >= 2.
+        # Require at least two selected role nodes to have degree >= 2.
         # Use zero if leaf placements are also acceptable.
         min_internal_role_vertices=2,
         seed=42,
     )
-    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=True)
-    if not report.accepted:
-        raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
-    return graph
+    instance = generate_instance(params)
+    connectivity = check_connectivity(instance.graph)
+    well_formedness = check_well_formedness(instance.graph, FLEET_SIZE)
+    if not (connectivity.ok and well_formedness.ok):
+        raise RuntimeError(
+            f"Instance rejected: connectivity_ok={connectivity.ok}, "
+            f"well_formedness_ok={well_formedness.ok}."
+        )
+    return instance
+
+
+def build_instance() -> WarehouseGraph:
+    return build_generated_instance().graph
 
 
 def build_storage(
@@ -131,17 +142,17 @@ def build_storage(
     return skus, capacities, counts
 
 
-def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
-    # "matched" training uses whichever storage_mode evaluation would use
-    # (sec:method:training); F_dem/F_cng need extra ExperimentConfig
-    # fields this quick demo doesn't otherwise exercise, so "matched"
-    # here still means F_fix -- a real matched-regime run would set
-    # storage_mode to the rule actually under study, per the module
-    # docstring's own scope note.
-    del regime  # both regimes use F_fix in this deliberately small demo
+def build_config(
+    regime: TrainingRegime, seed: int, controller: ControllerArchitecture = "decentralised"
+) -> ExperimentConfig:
+    """The configuration a run trains under. "fixed_only" trains under F_fix and
+    "matched" under the storage rule used at evaluation (sec:method:training).
+    The two differ only once EVALUATION_STORAGE_MODE is not "fixed", which needs the
+    online storage estimates of the demand and congestion rules."""
+    storage_mode = "fixed" if regime == "fixed_only" else EVALUATION_STORAGE_MODE
     return ExperimentConfig(
-        storage_mode="fixed",
-        controller="decentralised",
+        storage_mode=storage_mode,
+        controller=controller,
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
@@ -151,43 +162,33 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
         wait_cost=2.0,
         observation_depth=5,
         discount=0.99,
-        # n_deliver raised well above its earlier 1.0: a 5000-iteration run
-        # on this instance showed rising training return with zero
-        # evaluation completions, consistent with the per-step shaping
-        # term (proportional to remaining distance, now much larger on
-        # this bigger graph) outweighing a fixed small completion bonus.
+        # n_deliver raised well above 1.0: a 5000-iteration run on this instance
+        # showed rising training return with zero evaluation completions, consistent
+        # with the per-step shaping term outweighing a small completion bonus.
         deliver_reward=10.0,
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
 
 
+def evaluation_config(seed: int, controller: ControllerArchitecture) -> ExperimentConfig:
+    """The configuration an episode is evaluated under, the "matched" one."""
+    return build_config("matched", seed, controller)
+
+
 def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
-    # Illustrative demo values. train/eval seed counts (tab:trainparams)
-    # are TBD, tracked in #85; small here since this script is a
-    # deliberately quick smoke test, not a real sweep run.
+    # Illustrative. The train and eval seed counts are TBD (tab:trainparams, #85).
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
-def build_hyperparameters(num_env_runners: int) -> PPOHyperparameters:
-    # See module docstring: sized to actually converge, not just to be
-    # fast. hidden_width=16/num_rounds=1 (the previous sizing) left the
-    # encoder with too little capacity to learn directed navigation in
-    # this instance; train_batch_size=180 (6 episodes/iteration) was
-    # also too little experience per update for 3 agents sharing one
-    # policy to disentangle useful signal from noise.
+def build_hyperparameters(num_env_runners: int, budget_env_steps: int) -> PPOHyperparameters:
+    # Illustrative values, sized so a longer run learns some navigation on this instance.
     rollout_fragment_length = 30
-    # RLlib requires train_batch_size to be an (approximate) multiple of
-    # num_env_runners * rollout_fragment_length whenever num_env_runners
-    # > 0 (PPOConfig.validate_train_batch_size_vs_rollout_fragment_length);
-    # with num_env_runners=0 (local, synchronous sampling) any value
-    # works, so this still picks the multiple of rollout_fragment_length
-    # closest to the same ~600-sample target used before --env-runners
-    # existed, rather than a value that only happens to work for one
-    # specific worker count.
+    # RLlib needs train_batch_size to be about a multiple of num_env_runners *
+    # rollout_fragment_length when num_env_runners > 0. This picks the multiple closest
+    # to 600 samples, which is also fine for num_env_runners = 0.
     per_iteration_samples = max(num_env_runners, 1) * rollout_fragment_length
     multiple = max(1, round(600 / per_iteration_samples))
-    train_batch_size = multiple * per_iteration_samples
     return PPOHyperparameters(
         lr=3e-4,
         clip_param=0.2,
@@ -197,190 +198,277 @@ def build_hyperparameters(num_env_runners: int) -> PPOHyperparameters:
         rollout_fragment_length=rollout_fragment_length,
         entropy_coeff=0.02,
         vf_loss_coeff=1.0,
-        train_batch_size=train_batch_size,
-        credit_signal="per_agent",
+        train_batch_size=multiple * per_iteration_samples,
+        training_budget_env_steps=budget_env_steps,
+        credit_signal=CREDIT_SIGNAL,
     )
 
 
-def train(
+# NamedTuple, not a dataclass, so a test can load this file by path without registering it.
+class Arm(NamedTuple):
+    """What an arm needs besides the graph: its pooling, its zones (section only)
+    and the padding caps."""
+
+    controller: ControllerArchitecture
+    pooling: Pooling
+    zones: Zones | None
+    encoding: LocalSubgraphEncodingConfig
+
+
+def largest_window(
     graph: WarehouseGraph,
+    controller: ControllerArchitecture,
+    observation_depth: int,
+    zones: Zones | None,
+) -> int:
+    """The vertices of the largest window the arm uses, so the cap truncates none."""
+    movable = [v for v, vertex in graph.vertices.items() if vertex.role.movable]
+    if controller == "centralised":
+        return len(movable)
+    if controller == "section":
+        assert zones is not None
+        return max(len(zone | halo(graph, zone, observation_depth)) for zone in zones)
+    return max(len(local_subgraph(graph, v, observation_depth)) for v in movable)
+
+
+def build_arm(
+    instance: GeneratedInstance, controller: ControllerArchitecture, observation_depth: int
+) -> Arm:
+    zones = None
+    if controller == "section":
+        zones = zones_by_aisle(instance.graph, instance.aisle_index, NUM_ZONES)
+    cap = largest_window(instance.graph, controller, observation_depth, zones)
+    return Arm(
+        controller=controller,
+        pooling=POOLING[controller],
+        zones=zones,
+        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=2),
+    )
+
+
+def build_gnn_config(config: ExperimentConfig, arm: Arm) -> GNNEncoderConfig:
+    return GNNEncoderConfig(
+        num_rounds=2,
+        hidden_width=32,
+        communication=config.communication,
+        pooling=arm.pooling,
+    )
+
+
+class ProgressLog(tune.Callback):
+    """Prints one line per iteration and appends it to a JSON Lines file."""
+
+    def __init__(self, expected_iterations: int, progress_path: Path | None) -> None:
+        self._expected_iterations = expected_iterations
+        self._progress_path = progress_path
+        if progress_path is not None:
+            progress_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_path.write_text("", encoding="utf-8")
+
+    def on_trial_result(self, iteration, trials, trial, result: dict, **info: Any) -> None:
+        i = result["training_iteration"]
+        print(format_iteration(i, self._expected_iterations, result))
+        if self._progress_path is not None:
+            with self._progress_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(iteration_record(i, result)) + "\n")
+
+
+class TrainingRun(NamedTuple):
+    checkpoint: Path
+    env_steps_sampled: int
+
+
+def train(
+    instance: GeneratedInstance,
     skus: dict[SkuId, SkuType],
     capacities: dict[VertexId, float],
     counts: dict[SkuId, dict[VertexId, int]],
     config: ExperimentConfig,
-    num_iterations: int,
+    arm: Arm,
+    hyperparameters: PPOHyperparameters,
+    seed_split: SeedSplitConfig,
+    run_name: str,
     num_env_runners: int = 0,
     use_gpu: bool = False,
-    eval_seed_count: int = 3,
     progress_path: Path | None = None,
-):
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    gnn_config = GNNEncoderConfig(
-        num_rounds=2, hidden_width=32, communication=config.communication, pooling="none"
-    )
-    head_config = PolicyValueHeadConfig(hidden_width=32)
-
+) -> TrainingRun:
+    """Trains with Ray Tune, stops at the first iteration at or above the training
+    budget, and returns Ray's default checkpoint of the end of the run."""
     ppo_config = build_ppo_config(
-        graph,
+        instance.graph,
         skus,
         counts,
         capacities,
         config,
-        enc_config,
-        gnn_config,
-        head_config,
-        build_hyperparameters(num_env_runners),
-        build_seed_split(config.seed, eval_seed_count),
+        arm.encoding,
+        build_gnn_config(config, arm),
+        PolicyValueHeadConfig(hidden_width=32),
+        hyperparameters,
+        seed_split,
+        zones=arm.zones,
         num_env_runners=num_env_runners,
         use_gpu=use_gpu,
     ).callbacks(TrainingProgressCallbacks)
+    budget = hyperparameters.training_budget_env_steps
+    expected_iterations = math.ceil(budget / hyperparameters.train_batch_size)
+    print(
+        f"=== Training the {arm.controller} GNN+PPO controller "
+        f"(budget {budget} environment steps) ==="
+    )
+    results = tune.Tuner(
+        "PPO",
+        param_space=ppo_config,
+        run_config=tune.RunConfig(
+            name=run_name,
+            stop={"num_env_steps_sampled_lifetime": budget},
+            checkpoint_config=tune.CheckpointConfig(checkpoint_at_end=True),
+            callbacks=[ProgressLog(expected_iterations, progress_path)],
+        ),
+    ).fit()
+    result = results[0]
+    if result.error is not None:
+        raise result.error
+    assert result.checkpoint is not None and result.metrics is not None
+    return TrainingRun(
+        checkpoint=Path(result.checkpoint.path),
+        env_steps_sampled=int(result.metrics["num_env_steps_sampled_lifetime"]),
+    )
 
-    algo = ppo_config.build_algo()
-    print(f"=== Training the decentralised GNN+PPO controller ({num_iterations} iterations) ===")
-    if progress_path is not None:
-        progress_path.parent.mkdir(parents=True, exist_ok=True)
-        progress_path.write_text("", encoding="utf-8")
-    for i in range(num_iterations):
-        result = algo.train()
-        print(format_iteration(i + 1, num_iterations, result))
-        if progress_path is not None:
-            with progress_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(iteration_record(i + 1, result)) + "\n")
-    return algo, enc_config
+
+def load_module(checkpoint: Path, policy_id: str = DEFAULT_POLICY_ID):
+    """The trained RLModule of `policy_id` from an Algorithm checkpoint, with no Ray
+    cluster and no registered environment. The path is built from Ray's own constants
+    for the layout of a checkpoint, which a test guards."""
+    from ray.rllib.core import COMPONENT_LEARNER, COMPONENT_LEARNER_GROUP, COMPONENT_RL_MODULE
+    from ray.rllib.core.rl_module.rl_module import RLModule
+
+    path = checkpoint / COMPONENT_LEARNER_GROUP / COMPONENT_LEARNER / COMPONENT_RL_MODULE
+    return RLModule.from_checkpoint(str(path.resolve() / policy_id))
 
 
-def evaluate(algo, graph, skus, capacities, counts, config, eval_seeds: tuple[int, ...]) -> None:
-    """Runs the trained RLModule for one episode per evaluation seed, directly
-    (bypassing the Controller Protocol -- see module docstring for why),
-    checking the same correctness invariants training already enforces
-    and reporting how many tasks got completed.
+def trace_is_collision_free(steps: list[dict[str, Any]], initial: dict[str, int]) -> bool:
+    """The vertex rule and the swap rule on a written trace."""
+    before = dict(initial)
+    for step in steps:
+        after = {a: state["at"] for a, state in step["agents"].items()}
+        if len(set(after.values())) != len(after):
+            return False
+        for a, at in after.items():
+            for b, other_at in after.items():
+                if a < b and before[a] == other_at and before[b] == at and at != before[a]:
+                    return False
+        before = after
+    return True
 
-    Samples from pi_theta(.|o_i(t)) rather than taking the greedy
-    argmax: training samples (PPO's rollouts), so evaluating with a
-    different action rule than the one actually optimised is its own
-    mismatch, and controllers/decentralised.py's DecentralisedController
-    already establishes sampling as this repo's convention for actually
-    running the policy, not just training it. Greedy argmax on a
-    not-fully-converged policy can also lock onto a worse, degenerate
-    trajectory (e.g. oscillating between two vertices forever) that
-    sampling's own stochasticity would have escaped."""
-    num_episodes = len(eval_seeds)
-    print(f"\n=== Evaluating the trained policy over {num_episodes} evaluation seeds ===")
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    module = algo.get_module("shared_policy")
-    rng = np.random.default_rng(config.seed + 2000)
 
+def evaluate(
+    module,
+    instance: GeneratedInstance,
+    skus: dict[SkuId, SkuType],
+    capacities: dict[VertexId, float],
+    counts: dict[SkuId, dict[VertexId, int]],
+    arm: Arm,
+    eval_seeds: tuple[int, ...],
+    trace_dir: Path,
+) -> None:
+    """Runs `module` for one episode per evaluation seed through the evaluator, so
+    the observations are the ones it saw in training. The seeds are the evaluation half
+    of split_seeds, disjoint from the training seeds. Each episode writes a trace, and
+    the vertex rule and the swap rule are checked on it."""
+    print(f"\n=== Evaluating the trained policy over {len(eval_seeds)} evaluation seeds ===")
+    policy = ModulePolicy(module)
+    summaries = []
     for episode_idx, eval_seed in enumerate(eval_seeds):
-        # One episode per seed from split_seeds's evaluation half, which is
-        # disjoint from the training seeds. The seed is the only entry in
-        # the env's own seed cycle, so reset() resolves to exactly it.
-        episode_config = config.model_copy(update={"seed": eval_seed})
-        env = WarehouseMAPDMultiAgentEnv(
-            graph,
+        config = evaluation_config(eval_seed, arm.controller)
+        trace_path = trace_dir / f"{arm.controller}_episode_{episode_idx + 1}.jsonl"
+        metrics = run_episode(
+            instance.graph,
             skus,
             counts,
             capacities,
-            episode_config,
-            enc_config,
-            (episode_config.seed,),
+            config,
+            trace_path,
+            policy=policy,
+            encoding_config=arm.encoding,
+            zones=arm.zones,
+            pooling=arm.pooling,
         )
-        obs, _ = env.reset()
-        before_fleet = env._env.fleet
-        completed_before = sum(1 for t in env._env.tasks if t.finish_time is not None)
-
-        trace_path = TRACE_DIR / f"04_episode_{episode_idx + 1}.jsonl"
-        with EpisodeTraceWriter(trace_path, env._env) as writer:
-            for _ in range(config.horizon):
-                batch, agent_ids = _to_batch(obs)
-                fwd_out = module.forward_inference(batch)
-                logits = fwd_out["action_dist_inputs"]
-                # Pair logits[i] with agent_ids[i], NOT env.agents[i] -- obs's
-                # own key order (which _to_batch stacks in) isn't guaranteed
-                # to match env.agents's fixed order.
-                actions = {}
-                for i, aid in enumerate(agent_ids):
-                    mask = obs[aid]["action_mask"]
-                    actions[aid] = _sample_legal_slot(logits[i].detach().numpy(), mask, rng)
-                obs, rewards, terminated, truncated, infos = env.step(actions)
-                writer.record(env._env)
-                assert is_collision_free(
-                    before_fleet, env._env.fleet
-                ), "collision during evaluation"
-                assert is_feasible(env._env.storage), "infeasible storage during evaluation"
-                before_fleet = env._env.fleet
-                if truncated["__all__"] or terminated["__all__"]:
-                    break
-
-        completed_after = sum(1 for t in env._env.tasks if t.finish_time is not None)
+        header, steps = load_trace(trace_path)
+        assert trace_is_collision_free(steps, header["initial"]), "collision during evaluation"
         print(
-            f"  episode {episode_idx + 1}/{num_episodes} (seed {eval_seed}): "
-            f"tasks completed = {completed_after - completed_before}, "
-            f"collisions = none, storage feasible = yes"
+            f"  episode {episode_idx + 1}/{len(eval_seeds)} (seed {eval_seed}): "
+            f"tasks completed = {metrics.num_completed_tasks}, collisions = none"
         )
-        print(format_summary(summarise_trace(*load_trace(trace_path))))
+        summary = summarise_trace(header, steps)
+        summaries.append(summary)
+        print(format_summary(summary))
         print(f"  trace written to {trace_path}")
+    progress = pooled_progress(summaries)
+    if progress is not None:
+        print(f"\nPooled over the episodes, {progress:.0%} of goal moves bring a robot closer.")
 
 
-def _to_batch(obs: dict) -> tuple[dict, list[str]]:
-    """Stacks the per-agent dict observations into one batch, keyed by
-    the same nested structure encoded_observation_space() declares.
-    Returns the agent-id order used for stacking alongside the batch, so
-    callers can pair logits[i] with the right agent -- obs's own key
-    order is not guaranteed to match any other list of agent ids."""
-    import torch
-    from ray.rllib.core.columns import Columns
-
-    agent_ids = list(obs.keys())
-    stacked = {
-        "action_mask": torch.as_tensor(np.stack([obs[a]["action_mask"] for a in agent_ids])),
-        "observations": {
-            key: torch.as_tensor(np.stack([obs[a]["observations"][key] for a in agent_ids]))
-            for key in obs[agent_ids[0]]["observations"]
-        },
-    }
-    return {Columns.OBS: stacked}, agent_ids
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train and evaluate the decentralised controller.")
+def parse_args(
+    argv: list[str] | None = None, controller: ControllerArchitecture = "decentralised"
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=f"Train and evaluate the {controller} controller.")
     parser.add_argument("--regime", choices=["fixed_only", "matched"], default="fixed_only")
-    parser.add_argument("--iterations", type=int, default=7)
+    parser.add_argument(
+        "--budget-env-steps",
+        type=int,
+        default=ILLUSTRATIVE_BUDGET_ENV_STEPS,
+        help="training budget in environment steps (illustrative default)",
+    )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
     parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args(argv)
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
+    if args.budget_env_steps < 1:
+        parser.error("--budget-env-steps must be at least 1")
     return args
 
 
-def main() -> None:
-    args = parse_args()
+def main(controller: ControllerArchitecture = "decentralised") -> None:
+    args = parse_args(controller=controller)
     regime: TrainingRegime = args.regime
 
-    graph = build_instance()
-    skus, capacities, counts = build_storage(graph)
-    config = build_config(regime, seed=0)
+    instance = build_generated_instance()
+    skus, capacities, counts = build_storage(instance.graph)
+    config = build_config(regime, seed=0, controller=controller)
+    arm = build_arm(instance, controller, config.observation_depth)
+    print(
+        f"{controller} arm on {len(instance.graph.vertices)} vertices, "
+        f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
+        f"credit_signal={CREDIT_SIGNAL}"
+    )
 
-    algo, _ = train(
-        graph,
+    seed_split = build_seed_split(config.seed, args.eval_seeds)
+    run = train(
+        instance,
         skus,
         capacities,
         counts,
         config,
-        args.iterations,
+        arm,
+        build_hyperparameters(args.env_runners, args.budget_env_steps),
+        seed_split,
+        run_name=f"{controller}_{regime}",
         num_env_runners=args.env_runners,
         use_gpu=args.gpu,
-        eval_seed_count=args.eval_seeds,
-        progress_path=PROGRESS_FILE,
+        progress_path=OUTPUT_DIR / f"{controller}_training_progress.jsonl",
+    )
+    print(f"\nCheckpoint saved to {run.checkpoint}")
+    overshoot = run.env_steps_sampled - args.budget_env_steps
+    print(
+        f"Sampled {run.env_steps_sampled} environment steps for a budget of "
+        f"{args.budget_env_steps}, over the budget by {overshoot}."
     )
 
-    saved_path = save_checkpoint(algo, CHECKPOINT_DIR)
-    print(f"\nCheckpoint saved to {saved_path}")
-
-    _, eval_seeds = split_seeds(build_seed_split(config.seed, args.eval_seeds))
-    evaluate(algo, graph, skus, capacities, counts, config, eval_seeds)
-    algo.stop()
+    _, eval_seeds = split_seeds(seed_split)
+    module = load_module(run.checkpoint)
+    evaluate(module, instance, skus, capacities, counts, arm, eval_seeds, OUTPUT_DIR / "traces")
 
 
 if __name__ == "__main__":

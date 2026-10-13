@@ -3,8 +3,8 @@ sharing and disjoint training and evaluation seeds (sec:method:training,
 tab:trainparams, #30).
 
 Every PPO hyperparameter of tab:trainparams is TBD, so PPOHyperparameters
-has a required field for each and no defaults. `c_wait` is a parameter of
-the study, so it stays in ExperimentConfig.
+has a required field for each and no defaults, the training budget included.
+`c_wait` is a parameter of the study, so it stays in ExperimentConfig.
 
 TrainingRegime names the two regimes of sec:method:training, training under
 F_fix only or under the storage rule used at evaluation. The caller picks
@@ -65,6 +65,11 @@ class PPOHyperparameters(BaseModel):
     entropy_coeff: NonNegativeFloat
     vf_loss_coeff: PositiveFloat
     train_batch_size: PositiveInt  # RLlib API requirement, see docstring
+    # The training budget of tab:trainparams, equal across the learned arms and counted
+    # in environment steps. build_ppo_config does not read it. A run stops on it with
+    # Tune's stop={"num_env_steps_sampled_lifetime": budget}, at the first iteration at
+    # or above it, so it overshoots by up to one train_batch_size.
+    training_budget_env_steps: PositiveInt
     # No default, because the thesis leaves it open for the centralised and
     # section-based arms (#83). The decentralised arm takes "per_agent" only.
     credit_signal: CreditSignal
