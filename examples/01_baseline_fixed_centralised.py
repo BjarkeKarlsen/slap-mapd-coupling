@@ -1,16 +1,20 @@
-"""Run the reference planner with fixed storage (F_fix), no learning.
+"""Run the Token Passing reference baseline with fixed storage (F_fix), no learning.
 
-The M2 milestone's worked example. Demonstrates the milestone's own "done
-when" criteria directly -- one episode runs end-to-end through the real
-six-stage loop (environment/multi_agent_env.py) with zero collisions,
-feasible storage, correct task-set disjointness, and bit-for-bit
-deterministic replay -- not just a RunMetrics row at the end.
+Token Passing (Ma et al. 2017, planners/token_passing.py) is the reference
+baseline of the thesis. It picks its own tasks and plans each agent's path
+against the paths already committed, so on a well-formed instance no agent
+ever rests where another needs to pass. The instance below is checked for
+well-formedness, since that is what the guarantee needs. The prioritised A*
+example is 01_baseline_fixed_prioritised_astar.py.
 
-Run with `--render` for a live pygame preview of the real reference
-planner routing agents (requires the `[viz]` extra and a real
-display) -- unlike examples/00b_pygame_preview.py, which could only show
-a uniformly-random stepper because no controller existed yet when it was
-written.
+One episode runs end-to-end through the real six-stage loop
+(environment/multi_agent_env.py) with zero collisions, feasible storage,
+correct task-set disjointness and bit-for-bit deterministic replay. It also
+shows that conflict resolution never overrode a plan, which is what makes a
+Token Passing path a plan and not a proposal.
+
+Run with `--render` for a live pygame preview of the planner routing agents
+(requires the `[viz]` extra and a real display).
 """
 
 import sys
@@ -35,29 +39,33 @@ FLEET_SIZE = 6
 # (evaluation horizon) and d_obs (field-of-view depth) are sweep
 # parameters tracked in #85, and the order stream's rate lambda_task
 # waits on the demand model of #94.
-ILLUSTRATIVE_HORIZON = 150
-ILLUSTRATIVE_ARRIVAL_RATE = 0.1
+ILLUSTRATIVE_HORIZON = 2000
+ILLUSTRATIVE_ARRIVAL_RATE = 0.08
 ILLUSTRATIVE_OBSERVATION_DEPTH = 2
 
 
 def _instance_params() -> GeneratorParams:
     return GeneratorParams(
-        num_aisles=5,
-        aisle_length=4,
-        num_cross_aisles=3,
+        max_num_aisles=7,
+        max_aisle_length=7,
+        max_num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
-        num_storage_vertices=8,
-        num_delivery_vertices=3,
+        random_edge_costs=True,
+        edge_cost_range=(0.5, 2.0),
+        wait_cost=5.0,
+        num_storage_vertices=4,
+        num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
-        seed=1,
+        # At least two role vertices must have two distinct neighbours.
+        min_internal_role_vertices=2,
+        seed=42,
     )
 
 
 def build_instance() -> WarehouseGraph:
     params = _instance_params()
-    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=False)
+    graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=True)
     if not report.accepted:
         raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
     return graph
@@ -92,15 +100,10 @@ def build_storage(
 def build_config(seed: int) -> ExperimentConfig:
     return ExperimentConfig(
         storage_mode="fixed",
-        planner="prioritised_astar",
+        planner="token_passing",
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
-        # A naive prioritised planner (no deadlock detection/backtracking
-        # -- sec:method:controllers describes nothing beyond "each agent
-        # plans around already-reserved cells") can still occasionally
-        # livelock two agents facing off over a single narrow vertex
-        # (#55). Kept modest here so the demo shows completed tasks.
         arrival_rate=ILLUSTRATIVE_ARRIVAL_RATE,
         seed=seed,
         horizon=ILLUSTRATIVE_HORIZON,
@@ -139,12 +142,14 @@ def demonstrate_done_when_criteria(
     for t in range(config.horizon):
         env.step()
         assert is_collision_free(before, env.fleet), f"collision at t={t}"
+        assert not env.last_overridden, f"conflict resolution overrode a plan at t={t}"
         assert is_feasible(env.storage), f"infeasible storage at t={t}"
         for task in env.tasks:
             if task.release_time <= t + 1:
                 assert task.status(t + 1) in ("waiting", "active", "completed")
         before = env.fleet
     print(f"  zero collisions across {config.horizon} timesteps: OK")
+    print("  conflict resolution never overrode a plan: OK")
     print("  storage stayed within capacity at every step: OK")
     print("  every task had exactly one lifecycle status at every step: OK")
 
@@ -181,7 +186,7 @@ def render_live(
     *,
     delay_seconds: float = 0.15,
 ) -> None:
-    """Watch the reference planner route agents live via
+    """Watch the Token Passing planner route agents live via
     viz.pygame_renderer.WarehouseRenderer. Local import: pygame is an
     optional [viz] extra, not a hard dependency of running this example
     for its metrics/invariants (the default `main()` path)."""

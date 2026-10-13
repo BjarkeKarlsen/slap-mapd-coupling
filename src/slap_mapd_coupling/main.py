@@ -15,11 +15,15 @@ controller:
               one results table (this is what produces Section VII's data).
 """
 
+from typing import get_args
+
 import click
+
+from slap_mapd_coupling.planners.registry import PlannerName
 
 STORAGE_RULES = ["fixed", "demand", "congestion"]
 CONTROLLERS = ["centralised", "section", "decentralised"]
-PLANNERS = ["prioritised_astar"]
+PLANNERS = list(get_args(PlannerName))
 
 
 @click.group()

@@ -6,7 +6,7 @@ from typing import Protocol, Sequence, runtime_checkable
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import Action, WarehouseGraph
-from slap_mapd_coupling.core.tasks import Task
+from slap_mapd_coupling.core.tasks import Task, TaskId
 
 
 @runtime_checkable
@@ -44,4 +44,27 @@ class Controller(Protocol):
         this seed rather than a constructor-time one, so bit-for-bit
         replay under a fixed seed holds regardless of how many episodes
         the same controller instance has already run."""
+        ...
+
+
+@runtime_checkable
+class SelfAssigningRouter(Protocol):
+    """A router that picks its own tasks, in place of the shared pi_assign.
+
+    Only a reference planner whose guarantee depends on its own task rule
+    (Token Passing) does this. None of the three controllers in Pi does,
+    because the shared assignment is what keeps a controller swap down to
+    pi_route alone (sec:method:controllers). The environment loop calls
+    `assign` instead of controllers/assignment.py's assign_tasks when the
+    router has it.
+    """
+
+    def assign(
+        self,
+        graph: WarehouseGraph,
+        fleet: FleetState,
+        tasks: Sequence[Task],
+        t: int,
+    ) -> dict[TaskId, AgentId]:
+        """task_id -> agent_id for every task taken at time t."""
         ...

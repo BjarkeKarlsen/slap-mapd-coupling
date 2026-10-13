@@ -66,7 +66,7 @@ learning. Concretely:
       storage feasibility, task-lifecycle disjointness, deterministic
       replay under a fixed seed) — these are the acceptance test for
       this milestone, not optional extras
-- [ ] `examples/01_baseline_fixed_centralised.py` filled in
+- [ ] `examples/01_baseline_fixed_prioritised_astar.py` filled in
 
 **Done when:** one episode runs end-to-end through the real six-stage
 loop with zero collisions, feasible storage, correct task-set
