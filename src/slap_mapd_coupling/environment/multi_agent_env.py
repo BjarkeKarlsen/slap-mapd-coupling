@@ -157,6 +157,10 @@ class WarehouseMAPDEnv:
         self._next_task_id: int
         self._priority: tuple[AgentId, ...]
         self._order_rng: np.random.Generator
+        # What the last step proposed and what conflict resolution overrode,
+        # read by the episode trace (evaluation/trace.py). Never fed back in.
+        self.last_proposed: dict[AgentId, Action] = {}
+        self.last_overridden: frozenset[AgentId] = frozenset()
         self.reset()
 
     @property
@@ -189,6 +193,8 @@ class WarehouseMAPDEnv:
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
+        self.last_proposed = {}
+        self.last_overridden = frozenset()
 
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
@@ -274,6 +280,8 @@ class WarehouseMAPDEnv:
 
         # Stage 4: conflict resolution.
         result = resolve_conflicts(self.graph, self.fleet, proposed, self._priority)
+        self.last_proposed = dict(proposed)
+        self.last_overridden = result.overridden
 
         # Stage 5: apply the resolved joint action; advance positions, log
         # traversals against the REALISED trace (not the proposal, which

@@ -271,3 +271,16 @@ def test_step_with_external_move_action_matches_action_for_slot():
     # relative to the instance keeps this deterministic here).
     realised = env.fleet.locations()[agent_id]
     assert realised in {location, move_action.target}
+
+
+def test_last_proposed_and_overridden_start_empty_and_follow_the_step():
+    env = _env(_graph(), _config(num_agents=2, horizon=10))
+    env.reset()
+    assert env.last_proposed == {}
+    assert env.last_overridden == frozenset()
+    env.step()
+    assert set(env.last_proposed) == {1, 2}
+    assert env.last_overridden <= {1, 2}
+    env.reset()
+    assert env.last_proposed == {}
+    assert env.last_overridden == frozenset()
