@@ -7,6 +7,11 @@ on the network's weights (sec:method:model). Encoding the observation into
 tensors is the job of models/. The field of view and the communication graph
 use cost distance d_G.
 
+A robot's visible vertices are its window, the field of view by default.
+The centralised and section-based routers pass a wider window
+(sec:method:controllers). The congestion feature stays on the field of
+view whatever the window is, so it means the same under every router.
+
 The vertex features use a multi-hot role (storage, delivery, endpoint,
 transit), because VertexRole allows a vertex several roles. Transit is
 true when none of the other three apply.
@@ -43,7 +48,7 @@ class Observation:
     """o_i(t), the decentralised observation, structured
     rather than a fixed-size vector."""
 
-    visible_vertices: tuple[VertexId, ...]  # V_i^(d_obs)(t)
+    visible_vertices: tuple[VertexId, ...]  # the window, V_i^(d_obs)(t) by default
     features: dict[VertexId, VertexFeatures]
     congestion: float  # delta_i(t); always one of o_i(t)'s three pieces
 
@@ -111,8 +116,11 @@ def build_observation(
     agent_id: AgentId,
     t: int,
     config: ExperimentConfig,
+    window: Sequence[VertexId] | None = None,
 ) -> Observation:
-    """o_i(t) for one agent at one timestep."""
+    """o_i(t) for one agent at one timestep. `window` is the set of
+    visible vertices, in the order given. None means the field of view.
+    The congestion feature is always taken over the field of view."""
     if config.observation_depth is None:
         raise ValueError(
             "build_observation requires config.observation_depth (d_obs); "
@@ -124,7 +132,10 @@ def build_observation(
     location = locations[agent_id]
     target = current_target(location, active_by_agent.get(agent_id))
 
-    visible = local_subgraph(graph, location, config.observation_depth)
+    field_of_view = local_subgraph(graph, location, config.observation_depth)
+    visible = field_of_view if window is None else tuple(window)
+    if len(set(visible)) != len(visible):
+        raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
     occupied_vertices = {loc for aid, loc in locations.items() if aid != agent_id}
     features = {
         v: VertexFeatures(
@@ -135,6 +146,6 @@ def build_observation(
         for v in visible
     }
 
-    congestion = occupancy_fraction(fleet, visible, excl={agent_id})
+    congestion = occupancy_fraction(fleet, field_of_view, excl={agent_id})
 
     return Observation(visible_vertices=visible, features=features, congestion=congestion)

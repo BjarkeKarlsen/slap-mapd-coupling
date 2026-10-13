@@ -199,6 +199,11 @@ def test_sample_legal_slot_never_picks_a_masked_out_slot():
         assert mask[slot] == 1.0
 
 
+# The largest field of view of _small_instance() at d_obs = 3 has 18 vertices. A window is
+# never truncated, so the cap must fit it.
+_SMALL_INSTANCE_CAP = 18
+
+
 def _small_instance():
     params = GeneratorParams(
         max_num_aisles=6,
@@ -225,7 +230,7 @@ def test_full_episode_via_the_registry_respects_the_correctness_invariants(commu
     config = _decentralised_config(
         num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
     )
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_SMALL_INSTANCE_CAP, max_messages=2)
     module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     controller.reset(episode_seed=config.seed)
@@ -251,7 +256,7 @@ def test_run_episode_resets_the_controller_so_route_never_raises(communication):
     config = _decentralised_config(
         num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
     )
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_SMALL_INSTANCE_CAP, max_messages=2)
     module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     decentralised.set_active_decentralised_controller(controller)
@@ -265,7 +270,7 @@ def test_run_episode_is_deterministic_for_the_same_config_seed(communication):
     config = _decentralised_config(
         num_agents=3, horizon=15, arrival_rate=0.3, wait_cost=0.5, communication=communication
     )
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_SMALL_INSTANCE_CAP, max_messages=2)
     module = _build_module(graph, enc_config, communication)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     decentralised.set_active_decentralised_controller(controller)
@@ -402,7 +407,7 @@ def test_the_realised_trace_replays_bit_for_bit_with_communication_on():
     config = _decentralised_config(
         num_agents=3, horizon=20, arrival_rate=0.3, wait_cost=0.5, communication=True
     )
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_SMALL_INSTANCE_CAP, max_messages=2)
     module = _build_module(graph, enc_config, communication=True)
     controller = decentralised.DecentralisedController(module, enc_config, config)
     decentralised.set_active_decentralised_controller(controller)

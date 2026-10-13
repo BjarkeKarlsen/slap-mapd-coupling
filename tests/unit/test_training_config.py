@@ -177,7 +177,8 @@ def test_build_ppo_config_rejects_a_communication_mismatch(experiment_communicat
 def test_build_ppo_config_accepts_communication_when_both_switches_agree():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    # the largest field of view of _graph() at d_obs = 3 has 20 vertices
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True)
     head_config = PolicyValueHeadConfig(hidden_width=8)
 
@@ -271,7 +272,8 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
     config = _config()
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    # the largest field of view of _graph() at d_obs = 3 has 20 vertices
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
     head_config = PolicyValueHeadConfig(hidden_width=8)
 

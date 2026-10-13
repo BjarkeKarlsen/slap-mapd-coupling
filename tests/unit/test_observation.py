@@ -173,3 +173,57 @@ def test_communication_neighbours_are_ordered_closest_first_with_ties_by_agent_i
     fleet = _fleet({1: 4, 4: 7, 3: 2, 2: 6, 5: 5})
     heard = communication_neighbours(graph, fleet, agent_id=1, observation_depth=3)
     assert heard == (5, 2, 3, 4)
+
+
+def test_a_window_sets_the_visible_vertices_and_keeps_the_vertex_features():
+    graph = _line_graph(6)
+    fleet = _fleet({1: 2, 2: 5})
+    task = Task(task_id=1, release_time=0, pickup_vertex=0, delivery_vertex=5, sku="sku-1").assign(
+        agent_id=1, t=0
+    )
+    config = _config(observation_depth=1)
+    window = (5, 4, 3, 2, 1, 0)  # every vertex, wider than the field of view {1, 2, 3}
+
+    obs = build_observation(graph, fleet, [task], agent_id=1, t=0, config=config, window=window)
+
+    assert obs.visible_vertices == window
+    assert set(obs.features) == set(window)
+    assert [obs.features[v].eta for v in range(6)] == [0, 1, 2, 3, 4, 5]  # d_G(v, pickup=0)
+    assert obs.features[5].occupied is True  # agent 2 stands there, outside the field of view
+    assert obs.features[2].occupied is False  # the agent's own vertex
+
+
+def test_no_window_is_the_field_of_view():
+    graph = _line_graph(6)
+    fleet = _fleet({1: 2, 2: 3})
+    config = _config(observation_depth=2)
+    field_of_view = local_subgraph(graph, 2, depth=2)
+
+    default = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
+    explicit = build_observation(graph, fleet, [], 1, 0, config, window=field_of_view)
+
+    assert default == explicit
+    assert default.visible_vertices == field_of_view
+
+
+@pytest.mark.parametrize(
+    "window",
+    [None, (2,), (1, 2, 3), (0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (2, 3, 4, 5, 6, 7, 8, 9)],
+)
+def test_the_congestion_feature_does_not_change_with_the_window(window):
+    graph = _line_graph(10)
+    # agent 1 at 2. Its field of view (d_obs=1) is {1, 2, 3} and holds agent 2 at 3.
+    # Agents 3 and 4 stand outside it.
+    fleet = _fleet({1: 2, 2: 3, 3: 6, 4: 9})
+    config = _config(observation_depth=1)
+
+    obs = build_observation(graph, fleet, [], agent_id=1, t=0, config=config, window=window)
+
+    assert obs.congestion == pytest.approx(1 / 2)
+
+
+def test_a_window_that_lists_a_vertex_twice_is_rejected():
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2})
+    with pytest.raises(ValueError, match="more than once"):
+        build_observation(graph, fleet, [], 1, 0, _config(), window=(1, 2, 2, 3))

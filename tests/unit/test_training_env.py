@@ -28,6 +28,11 @@ def _graph(**overrides):
     return generate_warehouse_graph(GeneratorParams(**defaults))
 
 
+# The largest field of view of _graph() at d_obs = 3 has 20 vertices. A window is never
+# truncated, so the cap must fit it.
+_MAX_LOCAL_NODES = 20
+
+
 def _instance(graph):
     storage_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
     skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
@@ -62,7 +67,7 @@ def _env(
 ) -> WarehouseMAPDMultiAgentEnv:
     graph = _graph()
     skus, capacities, counts = _instance(graph)
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_MAX_LOCAL_NODES, max_messages=2)
     return WarehouseMAPDMultiAgentEnv(
         graph, skus, counts, capacities, _config(**config_overrides), enc_config, train_seeds
     )
@@ -112,7 +117,7 @@ def test_observations_carry_the_sender_keys_exactly_when_communication_is_on(com
 def test_communication_with_no_room_for_a_sender_is_rejected():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=0)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=_MAX_LOCAL_NODES, max_messages=0)
     with pytest.raises(ValueError, match="max_messages"):
         WarehouseMAPDMultiAgentEnv(
             graph, skus, counts, capacities, _config(communication=True), enc_config, (1,)

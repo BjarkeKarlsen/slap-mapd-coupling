@@ -7,12 +7,13 @@ from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
-from slap_mapd_coupling.environment.observation import build_observation
+from slap_mapd_coupling.environment.observation import build_observation, local_subgraph
 from slap_mapd_coupling.environment.spaces import legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
     check_slot_targets,
+    check_windows,
     encode_all_observations,
     encode_observation,
     encode_view,
@@ -174,7 +175,7 @@ def test_encode_observation_lists_a_one_way_edge_and_a_two_way_edge_once():
     assert encoded.edge_mask.sum() == 3  # four directed edges, three pairs
 
 
-def test_encode_observation_truncates_nodes_keeping_own_vertex_neighbours_and_closest_eta():
+def test_a_field_of_view_above_the_cap_raises_instead_of_being_truncated():
     graph = _line_graph(11)
     fleet = _fleet({1: 5})
     task = Task(task_id=1, release_time=0, pickup_vertex=10, delivery_vertex=0, sku="sku-1").assign(
@@ -186,21 +187,14 @@ def test_encode_observation_truncates_nodes_keeping_own_vertex_neighbours_and_cl
     d_max = max_out_degree(graph)
     mask = legality_mask(graph, vertex=5, d_max=d_max)
 
-    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=4, max_messages=1)
-    encoded = encode_observation(graph, 5, observation, mask, d_max, encoding_config)
-
-    assert encoded.node_mask.sum() == 4
-    etas = encoded.node_features[:, 4]
-    # the target is vertex 10 (eta 0 there). Vertex 5 (eta 5) and its neighbours 4 and 6
-    # (eta 6 and 4) are kept first, although 4 has a worse eta than every dropped vertex
-    # but 0 to 3. The one place left goes to the smallest eta of the rest, vertex 10.
-    assert etas[encoded.own_index] == 5.0
-    assert etas[encoded.move_target_index[:2]].tolist() == [6.0, 4.0]
-    assert sorted(etas[:4].tolist()) == [0.0, 4.0, 5.0, 6.0]
-    # edges to dropped vertices are left out, and every row stays inside the kept vertices
-    valid_rows = encoded.edge_index[encoded.edge_mask == 1.0]
-    assert (valid_rows < 4).all()
-    assert len(valid_rows) == 2  # kept vertices 4, 5, 6, 10 leave only 4-5 and 5-6
+    too_small = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=1)
+    with pytest.raises(ValueError, match="never truncated"):
+        encode_observation(graph, 5, observation, mask, d_max, too_small)
+    # a cap the field of view fits keeps every vertex
+    fits = LocalSubgraphEncodingConfig(max_local_nodes=11, max_messages=1)
+    encoded = encode_observation(graph, 5, observation, mask, d_max, fits)
+    assert encoded.node_mask.sum() == 11
+    assert encoded.edge_mask.sum() == 10
 
 
 def test_encode_observation_congestion_and_action_mask():
@@ -481,3 +475,184 @@ def test_check_slot_targets_rejects_a_neighbour_outside_the_field_of_view():
     with pytest.raises(ValueError, match="observation_depth"):
         check_slot_targets(graph, 2, encoding_config)
     check_slot_targets(graph, 3, encoding_config)  # cost distance 3 <= d_obs = 3 is inside
+
+
+def test_check_slot_targets_rejects_a_field_of_view_above_the_cap():
+    graph = _line_graph(11)  # with d_obs = 5 the field of view of vertex 5 is all 11 vertices
+    too_small = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=1)
+    with pytest.raises(ValueError, match="max_local_nodes"):
+        check_slot_targets(graph, 5, too_small)
+    check_slot_targets(graph, 5, LocalSubgraphEncodingConfig(max_local_nodes=11, max_messages=1))
+
+
+# Windows on the line graph with vertices 0 to 7 for robot 1 at vertex 3 and robot 2 at
+# vertex 5, given as explicit vertex sets. The zones are {0, 1, 2, 3} and {4, 5, 6, 7} with
+# d_obs = 1, so each halo is the one vertex across the boundary. Robot 2's halo is listed
+# last, so the padded order follows the window and not the vertex numbers.
+_WINDOW_LOCATIONS = {1: 3, 2: 5}
+_WINDOWS = {
+    "ball": {1: (2, 3, 4), 2: (4, 5, 6)},
+    "all movable vertices": {1: tuple(range(8)), 2: tuple(range(8))},
+    "zone plus halo": {1: (0, 1, 2, 3, 4), 2: (4, 5, 6, 7, 3)},
+}
+
+
+def _encode_windows(windows, observation_depth=1, max_local_nodes=8):
+    graph = _line_graph(8)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=max_local_nodes, max_messages=1)
+    config = _config(observation_depth=observation_depth)
+    return encode_all_observations(
+        graph,
+        _fleet(_WINDOW_LOCATIONS),
+        [],
+        0,
+        config,
+        encoding_config,
+        max_out_degree(graph),
+        windows=windows,
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_WINDOWS))
+def test_the_padded_arrays_follow_the_window(name):
+    windows = _WINDOWS[name]
+    encoded = _encode_windows(windows)
+
+    for agent_id, location in _WINDOW_LOCATIONS.items():
+        window = windows[agent_id]
+        other = _WINDOW_LOCATIONS[3 - agent_id]
+        item = encoded[agent_id]
+        n = len(window)
+        assert item.node_mask.tolist() == [1.0] * n + [0.0] * (8 - n)
+        # a transit vertex, eta is the distance to the robot's own vertex (no task), and
+        # occupied marks the other robot
+        expected = [[0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other)] for v in window]
+        np.testing.assert_array_equal(item.node_features[:n], expected)
+        assert not item.node_features[n:].any()
+        assert item.own_index == window.index(location)
+        # slot 1 leads to location - 1 and slot 2 to location + 1
+        assert item.move_target_index.tolist() == [
+            window.index(location - 1),
+            window.index(location + 1),
+        ]
+        assert _valid_pairs(item, window) == {
+            frozenset((v, v + 1)) for v in window if v + 1 in window
+        }
+
+
+@pytest.mark.parametrize("name", sorted(_WINDOWS))
+def test_the_congestion_feature_does_not_change_with_the_window(name):
+    # with d_obs = 2 each robot's field of view holds the other robot and three free
+    # vertices, so delta is 1/4 whatever the window
+    default = _encode_windows(None, observation_depth=2)
+    encoded = _encode_windows(_WINDOWS[name], observation_depth=2)
+
+    for agent_id in _WINDOW_LOCATIONS:
+        assert default[agent_id].congestion == pytest.approx(0.25)
+        assert encoded[agent_id].congestion == default[agent_id].congestion
+
+
+def test_a_window_above_the_cap_raises():
+    with pytest.raises(ValueError, match="never truncated"):
+        _encode_windows(_WINDOWS["all movable vertices"], max_local_nodes=7)
+
+
+def test_windows_must_name_every_robot():
+    with pytest.raises(ValueError, match="no window"):
+        _encode_windows({1: (2, 3, 4)})
+
+
+def test_check_windows_accepts_a_ball_all_movable_vertices_and_a_zone_plus_halo():
+    graph = _line_graph(8)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1)
+    zones = ((0, 1, 2, 3), (4, 5, 6, 7))
+    halos = ((4,), (3,))
+
+    check_windows(graph, {v: local_subgraph(graph, v, 1) for v in range(8)}, encoding_config)
+    check_windows(graph, {v: tuple(range(8)) for v in range(8)}, encoding_config)
+    check_windows(graph, {v: zones[v // 4] + halos[v // 4] for v in range(8)}, encoding_config)
+
+
+@pytest.mark.parametrize(
+    "window, max_local_nodes, match",
+    [
+        ((2, 4), 8, "leaves out 3 itself"),
+        ((0, 1, 2, 3), 8, r"outgoing neighbours \[4\]"),  # the zone without its halo
+        (tuple(range(8)), 7, "max_local_nodes"),
+        ((2, 3, 3, 4), 8, "more than once"),
+    ],
+)
+def test_check_windows_rejects_a_bad_window(window, max_local_nodes, match):
+    graph = _line_graph(8)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=max_local_nodes, max_messages=1)
+    with pytest.raises(ValueError, match=match):
+        check_windows(graph, {3: window}, encoding_config)
+
+
+def test_no_windows_gives_the_same_arrays_as_before_windows_existed():
+    """The arrays the encoder gave before windows existed, on a fixture whose
+    field of view fits the cap."""
+    graph = _line_graph(6)
+    fleet = _fleet({1: 2, 2: 4})
+    task = Task(task_id=1, release_time=0, pickup_vertex=5, delivery_vertex=0, sku="sku-1").assign(
+        agent_id=1, t=0
+    )
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=6, max_messages=1)
+    encoded = encode_all_observations(
+        graph, fleet, [task], 0, _config(observation_depth=2), encoding_config, 2
+    )
+
+    # robot 1 at 2 sees {0, ..., 4} with eta to its pickup at 5, and robot 2 on vertex 4.
+    # Robot 2 at 4 has no task, so eta is the distance to its own vertex.
+    first, second = encoded[1], encoded[2]
+    expected_first = [
+        [0.0, 0.0, 0.0, 1.0, 5.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 4.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 3.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 2.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ]
+    expected_second = [
+        [0.0, 0.0, 0.0, 1.0, 2.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ]
+    np.testing.assert_array_equal(first.node_features, expected_first)
+    assert first.node_mask.tolist() == [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+    assert first.edge_index.tolist() == [[0, 1], [1, 2], [2, 3], [3, 4]] + [[0, 0]] * 8
+    assert first.edge_mask.tolist() == [1.0] * 4 + [0.0] * 8
+    assert first.own_index == 2
+    assert first.move_target_index.tolist() == [1, 3]
+    assert first.congestion == pytest.approx(0.25)
+    np.testing.assert_array_equal(second.node_features, expected_second)
+    assert second.node_mask.tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    assert second.edge_index.tolist() == [[0, 1], [1, 2], [2, 3]] + [[0, 0]] * 9
+    assert second.own_index == 2
+    assert second.move_target_index.tolist() == [1, 3]
+    assert second.congestion == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_no_windows_equals_the_field_of_view_as_every_robots_window(communication):
+    graph = _line_graph(10)
+    fleet = _fleet(_FLEET_LOCATIONS)
+    config = _config(observation_depth=3, communication=communication)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    windows = {aid: local_subgraph(graph, loc, 3) for aid, loc in _FLEET_LOCATIONS.items()}
+
+    default = encode_all_observations(graph, fleet, [], 0, config, encoding_config, 2)
+    explicit = encode_all_observations(
+        graph, fleet, [], 0, config, encoding_config, 2, windows=windows
+    )
+
+    for agent_id in default:
+        expected = default[agent_id].as_rllib_dict()
+        actual = explicit[agent_id].as_rllib_dict()
+        np.testing.assert_array_equal(actual["action_mask"], expected["action_mask"])
+        assert actual["observations"].keys() == expected["observations"].keys()
+        for key, value in expected["observations"].items():
+            np.testing.assert_array_equal(actual["observations"][key], value)
