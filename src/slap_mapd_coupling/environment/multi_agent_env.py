@@ -61,6 +61,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
@@ -109,7 +110,7 @@ class EpisodeLog:
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)  # set by whoever acts
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
-    # every controller (observation_depth is required for all of them).
+    # every controller and planner (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (eq:relocation).
     relocated_units_by_update: list[int] = field(default_factory=list)
@@ -153,11 +154,19 @@ class WarehouseMAPDEnv:
         self._next_task_id: int
         self._priority: tuple[AgentId, ...]
         self._order_rng: np.random.Generator
+        self._congestion_by_agent: dict[AgentId, float] = {}
         # What the last step proposed and what conflict resolution overrode,
         # read by the episode trace (evaluation/trace.py). Never fed back in.
         self.last_proposed: dict[AgentId, Action] = {}
         self.last_overridden: frozenset[AgentId] = frozenset()
         self.reset()
+
+    @property
+    def congestion_by_agent(self) -> Mapping[AgentId, float]:
+        """delta_i(t) of every robot at the current t, the congestion feature read over the
+        field of view. Computed once per timestep. After the step that ends the episode it
+        still holds the values of the last timestep acted in."""
+        return MappingProxyType(self._congestion_by_agent)
 
     @property
     def t(self) -> int:
@@ -199,6 +208,7 @@ class WarehouseMAPDEnv:
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
         self._release_and_assign()
+        self._record_crowding()
 
         observations = dict(self.fleet.locations())
         infos: dict[AgentId, dict] = {aid: {} for aid in agent_ids}
@@ -236,7 +246,7 @@ class WarehouseMAPDEnv:
         environment/spaces.py::action_for_slot.
         """
         before_fleet = self.fleet
-        self._record_crowding(before_fleet)
+        congestion = self._congestion_by_agent  # delta_i(t), at the step the action is chosen in
 
         # Stages 1 and 2 already ran for this t, at the end of reset() or of the
         # previous step. Under the task lifecycle a task assigned at self._t is
@@ -304,13 +314,14 @@ class WarehouseMAPDEnv:
             )
 
         rewards = self._compute_rewards(
-            before_locations, active_by_agent, result.overridden, next_t
+            before_locations, active_by_agent, result.overridden, next_t, congestion
         )
 
         self._t = next_t
         episode_done = self._t >= self.config.horizon
         if not episode_done:
             self._release_and_assign()
+            self._record_crowding()
         observations = dict(self.fleet.locations())
         terminated: dict[AgentId | str, bool] = {aid: False for aid in self.fleet.agents}
         terminated["__all__"] = False
@@ -408,22 +419,19 @@ class WarehouseMAPDEnv:
             updated.append(task)
         return updated
 
-    def _record_crowding(self, fleet: FleetState) -> None:
-        """sum_i delta_i(t) for the state at timestep t (the mean
-        crowding), each delta_i(t) per the congestion feature: the other
-        agents inside a_i's window, over the vertices available to hold
-        them. Read over the field of view d_obs (config.observation_depth),
-        required for every controller, so this runs every timestep
-        regardless of architecture (sec:pf:env, sec:pf:controllers)."""
+    def _record_crowding(self) -> None:
+        """delta_i(t) of every robot for the current t, the congestion feature: the other
+        robots inside a_i's field of view over the vertices available to hold them. Read
+        over d_obs (config.observation_depth), required for every controller, so this runs
+        every timestep. Stores the mapping and logs its sum, the mean crowding."""
         depth = self.config.observation_depth
-        self.log.crowding_sum_by_t.append(
-            sum(
-                occupancy_fraction(
-                    fleet, local_subgraph(self.graph, state.location, depth), excl={agent_id}
-                )
-                for agent_id, state in fleet.agents.items()
+        self._congestion_by_agent = {
+            agent_id: occupancy_fraction(
+                self.fleet, local_subgraph(self.graph, state.location, depth), excl={agent_id}
             )
-        )
+            for agent_id, state in self.fleet.agents.items()
+        }
+        self.log.crowding_sum_by_t.append(sum(self._congestion_by_agent.values()))
 
     def _backlog(self, t: int) -> int:
         """B_t = |Q_t| + |B_t|, the backlog the keep-up check plots (eq:throughput)."""
@@ -435,19 +443,11 @@ class WarehouseMAPDEnv:
         active_by_agent: Mapping[AgentId, Task],
         overridden: frozenset[AgentId],
         next_t: int,
+        congestion: Mapping[AgentId, float],
     ) -> dict[AgentId, float]:
-        """R_i(t) (eq:reward) -- only meaningful for a LEARNED controller
-        (GAPS.tex's fix to eq:objective's scope): the four reward weights
-        are None on ExperimentConfig for every controller except
-        "decentralised" (core/experiment_config.py), so this returns an
-        all-zero reward for the reference planner and section-based baselines this
-        milestone actually runs, rather than crashing on missing weights.
-
-        `congestion` is hardcoded to 0.0 pending eq:congestion's delta_i(t)
-        (environment/observation.py, M5) -- flagged, not silently treated
-        as though congestion sensitivity were already wired in.
-        """
-        if self.config.controller != "decentralised":
+        """R_i(t), the reward, for every robot. `congestion` holds delta_i(t) at the
+        step the action was chosen in. A planner run has no reward weights and gets zero."""
+        if self.config.controller is None:
             return {aid: 0.0 for aid in self.fleet.agents}
 
         assert self.config.discount is not None
@@ -476,7 +476,7 @@ class WarehouseMAPDEnv:
                 task_next=task_next,
                 completed_task=completed,
                 overridden=agent_id in overridden,
-                congestion=0.0,
+                congestion=congestion[agent_id],
                 discount=self.config.discount,
                 deliver_reward=self.config.deliver_reward,
                 override_penalty=self.config.override_penalty,

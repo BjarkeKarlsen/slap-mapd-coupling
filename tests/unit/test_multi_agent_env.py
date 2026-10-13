@@ -8,6 +8,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
+from slap_mapd_coupling.environment.observation import build_observation
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.planners import PrioritisedAStarPlanner
 from slap_mapd_coupling.planners.driver import step_with_planner
@@ -164,12 +165,13 @@ def test_completed_tasks_stay_completed():
     assert completed_ids  # sanity: at least one task actually completed in 40 steps
 
 
-def test_reward_is_zero_for_non_decentralised_controller():
-    env = _env(_graph(), _config())
+def test_planner_runs_get_zero_rewards():
+    env = _env(_graph(), _config(horizon=40))
     env.reset()
-    for _ in range(5):
+    for _ in range(40):
         _, rewards, *_ = _step(env)
         assert all(r == 0.0 for r in rewards.values())
+    assert any(task.finish_time is not None for task in env.tasks)  # robots did deliver
 
 
 def test_edge_traversals_are_logged_for_realised_moves():
@@ -337,3 +339,82 @@ def test_last_proposed_and_overridden_start_empty_and_follow_the_step():
     env.reset()
     assert env.last_proposed == {}
     assert env.last_overridden == frozenset()
+
+
+def _wait_step(env: WarehouseMAPDEnv):
+    return env.step({agent_id: 0 for agent_id in env.fleet.agents})
+
+
+def test_congestion_term_is_in_the_reward():
+    # A field of view that covers the whole graph puts every other robot in every window.
+    # Waiting keeps the two runs identical, so the only difference is n_cng.
+    weighted = _env(_graph(), _decentralised_config(observation_depth=1000, horizon=5))
+    unweighted = _env(
+        _graph(),
+        _decentralised_config(observation_depth=1000, horizon=5, congestion_reward_weight=0.0),
+    )
+    weighted.reset()
+    unweighted.reset()
+    for _ in range(3):
+        delta = {
+            aid: build_observation(
+                weighted.graph, weighted.fleet, weighted.tasks, aid, weighted.t, weighted.config
+            ).congestion
+            for aid in weighted.fleet.agents
+        }
+        assert all(value > 0.0 for value in delta.values())
+        _, with_cng, *_ = _wait_step(weighted)
+        _, without_cng, *_ = _wait_step(unweighted)
+        for agent_id, value in delta.items():
+            assert with_cng[agent_id] == pytest.approx(without_cng[agent_id] - 0.1 * value)
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section", "decentralised"])
+def test_every_arm_gets_a_reward_when_a_robot_delivers(controller):
+    env = _env(
+        _graph(), _decentralised_config(controller=controller, deliver_reward=100.0, horizon=60)
+    )
+    env.reset()
+    delivered_reward = None
+    for _ in range(60):
+        _, rewards, *_ = _step(env)
+        for task in env.tasks:
+            if task.finish_time == env.t:
+                delivered_reward = rewards[task.assigned_agent]
+        if delivered_reward is not None:
+            break
+    assert delivered_reward is not None  # the fixture does deliver within the horizon
+    assert delivered_reward > 50.0  # the delivery bonus, less at most the other terms
+
+
+def test_congestion_by_agent_equals_the_observation_builders_value():
+    env = _env(_graph(), _decentralised_config(horizon=10))
+    env.reset()
+    for _ in range(6):
+        assert set(env.congestion_by_agent) == set(env.fleet.agents)
+        for agent_id, value in env.congestion_by_agent.items():
+            observation = build_observation(
+                env.graph, env.fleet, env.tasks, agent_id, env.t, env.config
+            )
+            assert value == observation.congestion
+        _step(env)
+
+
+def test_congestion_by_agent_is_read_only():
+    env = _env(_graph(), _config())
+    with pytest.raises(TypeError):
+        env.congestion_by_agent[1] = 0.5  # type: ignore[index]
+
+
+def test_crowding_log_has_one_entry_per_timestep_and_sums_the_mapping():
+    env = _env(_graph(), _config(horizon=6))
+    env.reset()
+    assert len(env.log.crowding_sum_by_t) == 1
+    assert env.log.crowding_sum_by_t[-1] == sum(env.congestion_by_agent.values())
+    for done in range(1, 6):
+        _step(env)
+        assert len(env.log.crowding_sum_by_t) == done + 1
+        assert env.log.crowding_sum_by_t[-1] == sum(env.congestion_by_agent.values())
+    _step(env)  # the step that ends the episode logs nothing
+    assert env.t == 6
+    assert len(env.log.crowding_sum_by_t) == 6  # horizon entries
