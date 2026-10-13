@@ -9,6 +9,7 @@ from slap_mapd_coupling.instances.generator import (
     InstanceGenerationError,
     generate_and_validate,
     generate_instance,
+    generate_valid_instance,
     generate_warehouse_graph,
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
@@ -194,3 +195,26 @@ def test_fixed_size_with_no_irregular_shape_raises_without_resampling():
     )
     with pytest.raises(InstanceGenerationError, match="Unequal aisle lengths"):
         generate_instance(params)
+
+
+def test_too_few_v_ep_vertices_for_the_fleet_are_rejected_not_accepted_then_crashed():
+    # Nine storage and delivery vertices are endpoints too, so three agents used to pass the
+    # count with only two V_ep vertices, and the environment then failed to place them.
+    params = GeneratorParams(
+        max_num_aisles=6,
+        max_aisle_length=6,
+        max_num_cross_aisles=5,
+        one_way_fraction=0.0,
+        wait_cost=0.0,
+        num_storage_vertices=6,
+        num_delivery_vertices=3,
+        num_endpoints=2,
+        seed=0,
+    )
+    _, report = generate_and_validate(params, fleet_size=3, require_well_formed=True)
+    assert report.accepted is False
+    assert report.well_formedness is not None
+    assert report.well_formedness.num_non_task_endpoints == 2
+    assert report.well_formedness.endpoint_count_ok is False
+    with pytest.raises(InstanceGenerationError, match="endpoint_count_ok=False"):
+        generate_valid_instance(params, fleet_size=3)

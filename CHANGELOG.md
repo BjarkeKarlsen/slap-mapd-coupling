@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correct).
 
 ### Changed
+- `check_well_formedness` counts non-task endpoints, the vertices of V_ep in neither
+  V_str nor V_del, against the fleet size, as the thesis says. It used to count
+  V_ep, V_str and V_del together, so an instance with fewer than m vertices in V_ep
+  could pass and then fail when the environment placed the agents. The pairwise path
+  check still takes every endpoint. `WellFormednessReport` gains
+  `num_non_task_endpoints`.
 - Run scoring follows the thesis's revised `sec:pf:measures`. `RunMetrics`
   now reports a keep-up check (`keep_up_ratio`, `keeps_up` against the new
   `ExperimentConfig.keep_up_threshold` f_up, left unset because its value
