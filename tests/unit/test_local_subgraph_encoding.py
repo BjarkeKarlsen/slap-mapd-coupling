@@ -12,6 +12,7 @@ from slap_mapd_coupling.environment.spaces import legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
+    check_slot_targets,
     encode_all_observations,
     encode_observation,
     encode_view,
@@ -173,7 +174,7 @@ def test_encode_observation_lists_a_one_way_edge_and_a_two_way_edge_once():
     assert encoded.edge_mask.sum() == 3  # four directed edges, three pairs
 
 
-def test_encode_observation_truncates_nodes_keeping_own_vertex_and_closest_eta():
+def test_encode_observation_truncates_nodes_keeping_own_vertex_neighbours_and_closest_eta():
     graph = _line_graph(11)
     fleet = _fleet({1: 5})
     task = Task(task_id=1, release_time=0, pickup_vertex=10, delivery_vertex=0, sku="sku-1").assign(
@@ -189,18 +190,17 @@ def test_encode_observation_truncates_nodes_keeping_own_vertex_and_closest_eta()
     encoded = encode_observation(graph, 5, observation, mask, d_max, encoding_config)
 
     assert encoded.node_mask.sum() == 4
-    assert encoded.node_mask[encoded.own_index] == 1.0
-    # target is vertex 10 (eta 0 there); closest-by-eta among the rest are
-    # 10, 9, 8 (eta 0, 1, 2) -- the three smallest etas other than the
-    # agent's own vertex (5, eta 5, which is force-kept regardless).
-    kept_etas = sorted(
-        float(encoded.node_features[i][4]) for i in range(4) if i != encoded.own_index
-    )
-    assert kept_etas == [0.0, 1.0, 2.0]
+    etas = encoded.node_features[:, 4]
+    # the target is vertex 10 (eta 0 there). Vertex 5 (eta 5) and its neighbours 4 and 6
+    # (eta 6 and 4) are kept first, although 4 has a worse eta than every dropped vertex
+    # but 0 to 3. The one place left goes to the smallest eta of the rest, vertex 10.
+    assert etas[encoded.own_index] == 5.0
+    assert etas[encoded.move_target_index[:2]].tolist() == [6.0, 4.0]
+    assert sorted(etas[:4].tolist()) == [0.0, 4.0, 5.0, 6.0]
     # edges to dropped vertices are left out, and every row stays inside the kept vertices
     valid_rows = encoded.edge_index[encoded.edge_mask == 1.0]
     assert (valid_rows < 4).all()
-    assert len(valid_rows) == 2  # kept vertices 5, 8, 9, 10 leave only 8-9 and 9-10
+    assert len(valid_rows) == 2  # kept vertices 4, 5, 6, 10 leave only 4-5 and 5-6
 
 
 def test_encode_observation_congestion_and_action_mask():
@@ -252,8 +252,9 @@ def test_sender_keys_are_absent_with_communication_off_and_present_with_it_on():
     off_keys = set(off[1].as_rllib_dict()["observations"])
     on_keys = set(on[1].as_rllib_dict()["observations"])
     assert off_keys.isdisjoint(SENDER_KEYS)
-    assert on_keys == off_keys | set(SENDER_KEYS)
+    assert on_keys == off_keys | set(SENDER_KEYS) | {"move_sender_index", "move_sender_mask"}
     assert off[1].sender_mask is None
+    assert off[1].move_sender_index is None
 
 
 def test_sender_arrays_have_the_documented_shapes_and_dtypes():
@@ -355,3 +356,130 @@ def test_communication_with_no_room_for_a_sender_is_rejected():
         )
     # with communication off the cap is never read
     encoded_observation_space(encoding_config, max_out_degree(graph), communication=False)
+
+
+def _star_graph() -> WarehouseGraph:
+    """Vertex 0 in the middle, leaves 1, 2 and 3 at costs 1, 2 and 3. The
+    edges are listed out of order, so slot order has to come from the
+    vertex numbers."""
+    vertices = {i: Vertex(id=i) for i in range(4)}
+    edges = tuple(
+        Edge(source=a, target=b, cost=float(leaf))
+        for leaf in (3, 1, 2)
+        for a, b in ((0, leaf), (leaf, 0))
+    )
+    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+
+
+def _encode_star(locations, communication, max_messages=2, max_local_nodes=6):
+    graph = _star_graph()
+    encoding_config = LocalSubgraphEncodingConfig(
+        max_local_nodes=max_local_nodes, max_messages=max_messages
+    )
+    config = _config(observation_depth=3, communication=communication)
+    encoded = encode_all_observations(
+        graph, _fleet(locations), [], 0, config, encoding_config, max_out_degree(graph)
+    )
+    return graph, encoding_config, encoded
+
+
+def test_move_target_index_follows_increasing_vertex_number_and_pads_with_a_mask():
+    _, _, encoded = _encode_star({1: 0, 2: 1}, communication=False)
+
+    centre, leaf = encoded[1], encoded[2]
+    assert centre.move_target_index.dtype == np.int64
+    assert centre.move_target_mask.tolist() == [1.0, 1.0, 1.0]
+    # eta is the distance back to the robot's own vertex, so it names each leaf's cost
+    assert centre.node_features[centre.move_target_index, 4].tolist() == [1.0, 2.0, 3.0]
+    assert leaf.move_target_mask.tolist() == [1.0, 0.0, 0.0]  # one neighbour, two padding slots
+    assert leaf.move_target_index[0] != leaf.own_index
+    assert leaf.move_target_index[1:].tolist() == [0, 0]
+    assert leaf.move_target_mask.tolist() == leaf.action_mask[1:].tolist()
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_encoded_observation_space_declares_the_slot_arrays(communication):
+    graph, encoding_config, encoded = _encode_star({1: 0, 2: 1, 3: 3}, communication)
+    space = encoded_observation_space(encoding_config, max_out_degree(graph), communication)
+
+    assert space["move_target_index"].shape == (3,)
+    assert space["move_target_mask"].shape == (3,)
+    assert ("move_sender_index" in space.spaces) == communication
+    assert ("move_sender_mask" in space.spaces) == communication
+    for item in encoded.values():
+        assert space.contains(item.as_rllib_dict()["observations"])
+
+
+def test_a_move_slots_sender_is_the_heard_robot_standing_on_its_vertex():
+    # robot 1 stands on the centre and hears robot 2 (distance 1), then robot 3 (distance 3).
+    # Slot 1 leads to vertex 1 (robot 2), slot 2 to vertex 2 (empty), slot 3 to vertex 3 (robot 3).
+    _, _, encoded = _encode_star({1: 0, 2: 1, 3: 3}, communication=True, max_messages=2)
+    item = encoded[1]
+
+    assert item.move_sender_index.dtype == np.int64
+    assert item.move_sender_mask.tolist() == [1.0, 0.0, 1.0]
+    assert item.move_sender_index.tolist() == [0, 0, 1]
+    # the index points at the block that holds that robot's own view
+    np.testing.assert_array_equal(
+        item.sender_node_features[item.move_sender_index[2]], encoded[3].node_features
+    )
+
+
+def test_a_robot_that_is_not_heard_gives_no_sender_for_its_slot():
+    # the cap keeps only the closest sender, robot 2, so robot 3 on vertex 3 is not heard
+    _, _, encoded = _encode_star({1: 0, 2: 1, 3: 3}, communication=True, max_messages=1)
+
+    assert encoded[1].move_sender_mask.tolist() == [1.0, 0.0, 0.0]
+    assert encoded[1].move_sender_index.tolist() == [0, 0, 0]
+
+
+def test_a_robot_with_no_neighbours_heard_has_an_all_zero_sender_slot_array():
+    _, _, encoded = _encode_star({1: 0}, communication=True)
+
+    assert not encoded[1].move_sender_mask.any()
+    assert not encoded[1].move_sender_index.any()
+
+
+def test_a_cap_below_d_max_plus_one_is_rejected():
+    graph = _star_graph()  # d_max = 3, so a view needs room for 4 vertices
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=3, max_messages=1)
+
+    with pytest.raises(ValueError, match="max_local_nodes"):
+        encoded_observation_space(encoding_config, max_out_degree(graph), communication=False)
+    with pytest.raises(ValueError, match="max_local_nodes"):
+        check_slot_targets(graph, 3, encoding_config)
+    observation = build_observation(graph, _fleet({1: 0}), [], 1, 0, _config(observation_depth=3))
+    with pytest.raises(ValueError, match="do not fit"):
+        encode_view(graph, 0, observation, max_out_degree(graph), encoding_config)
+
+
+def _far_neighbour_graph() -> WarehouseGraph:
+    """Vertices 0 and 1 are joined by an edge of cost 3, and 1 and 2 by one of cost 1."""
+    vertices = {i: Vertex(id=i) for i in range(3)}
+    edges = (
+        Edge(source=0, target=1, cost=3.0),
+        Edge(source=1, target=0, cost=3.0),
+        Edge(source=1, target=2, cost=1.0),
+        Edge(source=2, target=1, cost=1.0),
+    )
+    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+
+
+def test_a_neighbour_outside_the_field_of_view_raises_in_encode_view():
+    graph = _far_neighbour_graph()
+    config = _config(observation_depth=2)  # vertex 1 is at cost 3 from vertex 0
+    observation = build_observation(graph, _fleet({1: 0}), [], 1, 0, config)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=4, max_messages=1)
+
+    assert 1 not in observation.visible_vertices
+    with pytest.raises(ValueError, match="outside its field of view"):
+        encode_view(graph, 0, observation, max_out_degree(graph), encoding_config)
+
+
+def test_check_slot_targets_rejects_a_neighbour_outside_the_field_of_view():
+    graph = _far_neighbour_graph()
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=4, max_messages=1)
+
+    with pytest.raises(ValueError, match="observation_depth"):
+        check_slot_targets(graph, 2, encoding_config)
+    check_slot_targets(graph, 3, encoding_config)  # cost distance 3 <= d_obs = 3 is inside
