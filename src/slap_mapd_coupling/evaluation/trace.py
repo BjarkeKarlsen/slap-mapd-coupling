@@ -21,7 +21,8 @@ Summarise a file from the shell with
 
 With more than one file it also prints the fraction of episodes with a stuck
 agent and the fraction with a wandering agent (--min-progress sets the share of
-moves that must bring an agent closer to its goal). It also prints the longest
+moves that must bring an agent closer to its goal) and the share of goal moves,
+pooled over all agents and episodes, that do bring one closer. It also prints the longest
 whole-fleet still run, which is the number to choose --dead-after from. With
 --dead-after N (default 50) it also prints the fraction of episodes where the fleet
 was dead for N steps.
@@ -390,6 +391,20 @@ def format_summary(summary: TraceSummary) -> str:
     return "\n".join(lines)
 
 
+def pooled_progress(summaries: Iterable[TraceSummary]) -> float | None:
+    """Share of goal-holding moves that bring an agent closer, over all agents and episodes.
+
+    Moves are counted in each summary's window. Returns None when no agent made one.
+    """
+    closer = goal_moves = 0
+    for summary in summaries:
+        for a in summary.agents:
+            if a.progress_in_window is not None:
+                closer += round(a.progress_in_window * a.goal_moves_in_window)
+                goal_moves += a.goal_moves_in_window
+    return closer / goal_moves if goal_moves else None
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Summarise episode traces.")
     parser.add_argument("traces", type=Path, nargs="+", metavar="FILE")
@@ -424,6 +439,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         dead = sum(1 for s in summaries if s.fleet_dead_at is not None)
         print(f"{dead} of {total} episodes had a dead fleet (N = {args.dead_after})")
         print(f"{wandering} of {total} episodes had a wandering agent ({share:.0%})")
+        progress = pooled_progress(summaries)
+        print(
+            "goal moves that bring an agent closer, over all episodes: "
+            + (f"{progress:.0%}" if progress is not None else "no goal moves")
+        )
 
 
 if __name__ == "__main__":

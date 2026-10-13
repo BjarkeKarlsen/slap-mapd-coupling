@@ -53,7 +53,8 @@ tuned to the machine running this script, not study parameters.
 
 from __future__ import annotations
 
-import sys
+import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -74,12 +75,17 @@ from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
-from slap_mapd_coupling.training.callbacks import TrainingProgressCallbacks, format_iteration
+from slap_mapd_coupling.training.callbacks import (
+    TrainingProgressCallbacks,
+    format_iteration,
+    iteration_record,
+)
 from slap_mapd_coupling.training.config import (
     PPOHyperparameters,
     SeedSplitConfig,
     TrainingRegime,
     build_ppo_config,
+    split_seeds,
 )
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 from slap_mapd_coupling.training.utils import save_checkpoint
@@ -87,6 +93,7 @@ from slap_mapd_coupling.training.utils import save_checkpoint
 FLEET_SIZE = 3
 CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_checkpoint"
 TRACE_DIR = Path(__file__).parent / "output" / "traces"
+PROGRESS_FILE = Path(__file__).parent / "output" / "04_training_progress.jsonl"
 
 
 def build_instance() -> WarehouseGraph:
@@ -155,11 +162,11 @@ def build_config(regime: TrainingRegime, seed: int) -> ExperimentConfig:
     )
 
 
-def build_seed_split(base_seed: int) -> SeedSplitConfig:
+def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
     # Illustrative demo values. train/eval seed counts (tab:trainparams)
     # are TBD, tracked in #85; small here since this script is a
     # deliberately quick smoke test, not a real sweep run.
-    return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=3)
+    return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
 def build_hyperparameters(num_env_runners: int) -> PPOHyperparameters:
@@ -204,6 +211,8 @@ def train(
     num_iterations: int,
     num_env_runners: int = 0,
     use_gpu: bool = False,
+    eval_seed_count: int = 3,
+    progress_path: Path | None = None,
 ):
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32, communication=config.communication)
@@ -219,21 +228,27 @@ def train(
         gnn_config,
         head_config,
         build_hyperparameters(num_env_runners),
-        build_seed_split(config.seed),
+        build_seed_split(config.seed, eval_seed_count),
         num_env_runners=num_env_runners,
         use_gpu=use_gpu,
     ).callbacks(TrainingProgressCallbacks)
 
     algo = ppo_config.build_algo()
     print(f"=== Training the decentralised GNN+PPO controller ({num_iterations} iterations) ===")
+    if progress_path is not None:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text("", encoding="utf-8")
     for i in range(num_iterations):
         result = algo.train()
         print(format_iteration(i + 1, num_iterations, result))
+        if progress_path is not None:
+            with progress_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(iteration_record(i + 1, result)) + "\n")
     return algo, enc_config
 
 
-def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -> None:
-    """Runs the trained RLModule for a few fresh episodes directly
+def evaluate(algo, graph, skus, capacities, counts, config, eval_seeds: tuple[int, ...]) -> None:
+    """Runs the trained RLModule for one episode per evaluation seed, directly
     (bypassing the Controller Protocol -- see module docstring for why),
     checking the same correctness invariants training already enforces
     and reporting how many tasks got completed.
@@ -247,19 +262,17 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
     not-fully-converged policy can also lock onto a worse, degenerate
     trajectory (e.g. oscillating between two vertices forever) that
     sampling's own stochasticity would have escaped."""
-    print(f"\n=== Evaluating the trained policy over {num_episodes} fresh episodes ===")
+    num_episodes = len(eval_seeds)
+    print(f"\n=== Evaluating the trained policy over {num_episodes} evaluation seeds ===")
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
     module = algo.get_module("shared_policy")
     rng = np.random.default_rng(config.seed + 2000)
 
-    for episode_idx in range(num_episodes):
-        # This bypasses training/env.py's usual train_seeds cycling (see
-        # module docstring): the single seed below is the only entry in
-        # its own cycle, so reset()'s seed=None path resolves to exactly
-        # the ad hoc per-episode seed this script already used, same as
-        # before train_seeds existed. A real evaluation seed, from
-        # split_seeds's own eval half, is #68/B14's job, not this one.
-        episode_config = config.model_copy(update={"seed": config.seed + 1000 + episode_idx})
+    for episode_idx, eval_seed in enumerate(eval_seeds):
+        # One episode per seed from split_seeds's evaluation half, which is
+        # disjoint from the training seeds. The seed is the only entry in
+        # the env's own seed cycle, so reset() resolves to exactly it.
+        episode_config = config.model_copy(update={"seed": eval_seed})
         env = WarehouseMAPDMultiAgentEnv(
             graph,
             skus,
@@ -298,7 +311,7 @@ def evaluate(algo, graph, skus, capacities, counts, config, num_episodes: int) -
 
         completed_after = sum(1 for t in env._env.tasks if t.finish_time is not None)
         print(
-            f"  episode {episode_idx + 1}/{num_episodes}: "
+            f"  episode {episode_idx + 1}/{num_episodes} (seed {eval_seed}): "
             f"tasks completed = {completed_after - completed_before}, "
             f"collisions = none, storage feasible = yes"
         )
@@ -326,16 +339,22 @@ def _to_batch(obs: dict) -> tuple[dict, list[str]]:
     return {Columns.OBS: stacked}, agent_ids
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train and evaluate the decentralised controller.")
+    parser.add_argument("--regime", choices=["fixed_only", "matched"], default="fixed_only")
+    parser.add_argument("--iterations", type=int, default=7)
+    parser.add_argument("--env-runners", type=int, default=0)
+    parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
+    parser.add_argument("--gpu", action="store_true")
+    args = parser.parse_args(argv)
+    if args.eval_seeds < 1:
+        parser.error("--eval-seeds must be at least 1")
+    return args
+
+
 def main() -> None:
-    regime: TrainingRegime = "matched" if "--regime=matched" in sys.argv[1:] else "fixed_only"
-    num_iterations = 7
-    num_env_runners = 0
-    use_gpu = "--gpu" in sys.argv[1:]
-    for arg in sys.argv[1:]:
-        if arg.startswith("--iterations="):
-            num_iterations = int(arg.split("=", 1)[1])
-        elif arg.startswith("--env-runners="):
-            num_env_runners = int(arg.split("=", 1)[1])
+    args = parse_args()
+    regime: TrainingRegime = args.regime
 
     graph = build_instance()
     skus, capacities, counts = build_storage(graph)
@@ -347,15 +366,18 @@ def main() -> None:
         capacities,
         counts,
         config,
-        num_iterations,
-        num_env_runners=num_env_runners,
-        use_gpu=use_gpu,
+        args.iterations,
+        num_env_runners=args.env_runners,
+        use_gpu=args.gpu,
+        eval_seed_count=args.eval_seeds,
+        progress_path=PROGRESS_FILE,
     )
 
     saved_path = save_checkpoint(algo, CHECKPOINT_DIR)
     print(f"\nCheckpoint saved to {saved_path}")
 
-    evaluate(algo, graph, skus, capacities, counts, config, num_episodes=3)
+    _, eval_seeds = split_seeds(build_seed_split(config.seed, args.eval_seeds))
+    evaluate(algo, graph, skus, capacities, counts, config, eval_seeds)
     algo.stop()
 
 

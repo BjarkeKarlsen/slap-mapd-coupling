@@ -1,5 +1,7 @@
 """Unit tests for the progress numbers in slap_mapd_coupling.training.callbacks."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -12,6 +14,7 @@ from slap_mapd_coupling.instances.generator import GeneratorParams, generate_war
 from slap_mapd_coupling.training.callbacks import (
     StandingStillCounter,
     format_iteration,
+    iteration_record,
     progress_metrics,
 )
 
@@ -129,3 +132,26 @@ def test_format_iteration_marks_a_missing_key_instead_of_failing():
     assert "standing_still_fraction=n/a" in line
     assert "episode_return_mean=0 " in line
     assert "backlog=n/a" in format_iteration(1, 1, {})
+
+
+def test_iteration_record_keeps_numbers_and_turns_everything_else_into_none():
+    result = {
+        "env_runners": {
+            "episode_return_mean": float("nan"),
+            "tasks_completed": np.float32(3.0),
+            "tasks_released": 10.0,
+            "standing_still_fraction": 0.25,
+        }
+    }
+    record = iteration_record(4, result)
+    assert record == {
+        "iteration": 4,
+        "episode_return_mean": None,
+        "tasks_completed": 3.0,
+        "tasks_released": 10.0,
+        "backlog": None,
+        "steps_since_last_completion": None,
+        "standing_still_fraction": 0.25,
+    }
+    assert json.loads(json.dumps(record)) == record
+    assert iteration_record(1, {})["tasks_completed"] is None

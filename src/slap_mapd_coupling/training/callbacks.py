@@ -213,6 +213,21 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, numbers.Real) and math.isfinite(value)
 
 
+def iteration_record(i: int, result: Mapping[str, Any]) -> dict[str, Any]:
+    """One iteration's progress numbers as a JSON-ready dict, for a file kept beside a run.
+
+    The keys are the ones `format_iteration` prints. A value that is missing or not a
+    finite number is None, so an iteration with no finished episode stays readable.
+    """
+    runners = result.get("env_runners", {})
+    keys = ("episode_return_mean", *_COUNT_KEYS, "standing_still_fraction")
+    record: dict[str, Any] = {"iteration": i}
+    for key in keys:
+        value = runners.get(key)
+        record[key] = float(value) if _is_number(value) else None
+    return record
+
+
 def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
     """One line per training iteration, in plain numbers (no exponents).
 
