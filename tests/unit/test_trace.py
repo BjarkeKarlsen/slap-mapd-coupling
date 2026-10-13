@@ -182,6 +182,50 @@ def test_summary_flags_stuck_agents_and_the_waiting_pair_from_a_file_alone(tmp_p
     assert "STUCK" in format_summary(summary)
 
 
+def test_summary_flags_an_agent_that_moves_but_does_not_close_in_on_its_goal(tmp_path):
+    # Vertices 1 - 0 - 2 on a line, goal 2. Agent 1 shuffles between 0 and 1, so half of
+    # its moves go away from the goal. Agent 2 walks straight to it.
+    header = {
+        "type": "header",
+        "format": 1,
+        "initial": {"1": 0, "2": 1},
+        "edges": [[1, 0, 1.0], [0, 1, 1.0], [0, 2, 1.0], [2, 0, 1.0]],
+    }
+
+    def agent(at, moved):
+        return {
+            "at": at,
+            "intent": None,
+            "moved": moved,
+            "overridden": False,
+            "task": 1,
+            "phase": "to_pickup",
+            "goal": 2,
+        }
+
+    shuffle, walk = [1, 0, 1, 0], [(0, True), (2, True), (2, False), (2, False)]
+    steps = [
+        {
+            "type": "step",
+            "t": t + 1,
+            "completed": 0,
+            "released": 2,
+            "backlog": 2,
+            "agents": {"1": agent(shuffle[t], True), "2": agent(*walk[t])},
+        }
+        for t in range(4)
+    ]
+    summary = summarise_trace(header, steps, window=4)
+    shuffler, walker = summary.agents
+    assert (shuffler.goal_moves_in_window, shuffler.progress_in_window) == (4, 0.5)
+    assert shuffler.distinct_vertices_in_window == 2
+    assert (walker.goal_moves_in_window, walker.progress_in_window) == (2, 1.0)
+    assert summary.wandering_agents == ()
+    strict = summarise_trace(header, steps, window=4, min_progress=0.6)
+    assert strict.wandering_agents == (1,)
+    assert "WANDERING" in format_summary(strict)
+
+
 def test_cli_reports_the_fraction_of_episodes_with_a_stuck_agent(tmp_path, capsys):
     paths = []
     for name, moves in (("a", False), ("b", True)):
@@ -212,7 +256,9 @@ def test_cli_reports_the_fraction_of_episodes_with_a_stuck_agent(tmp_path, capsy
         )
         paths.append(str(path))
     main([*paths, "--window", "1"])
-    assert "1 of 2 episodes had a stuck agent (50%)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1 of 2 episodes had a stuck agent (50%)" in out
+    assert "0 of 2 episodes had a wandering agent (0%)" in out
 
 
 def test_same_seed_gives_byte_identical_files(tmp_path):

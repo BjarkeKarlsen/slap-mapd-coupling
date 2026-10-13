@@ -20,13 +20,15 @@ Summarise a file from the shell with
     python -m slap_mapd_coupling.evaluation.trace trace.jsonl [more.jsonl ...] [--window N]
 
 With more than one file it also prints the fraction of episodes with a stuck
-agent.
+agent and the fraction with a wandering agent (--min-progress sets the share of
+moves that must bring an agent closer to its goal).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -140,6 +142,11 @@ class AgentSummary:
     final_vertex: int
     final_task: int | None
     final_goal: int | None
+    # Moves in the window made while holding a task, and the share of them
+    # that brought the agent closer to its goal. None when there were none.
+    goal_moves_in_window: int
+    progress_in_window: float | None
+    distinct_vertices_in_window: int
 
 
 @dataclass(frozen=True)
@@ -154,19 +161,47 @@ class TraceSummary:
     agents: tuple[AgentSummary, ...]
     # Agents holding a task that did not move once in the window.
     stuck_agents: tuple[int, ...]
+    # Agents holding a task that moved in the window but mostly not towards
+    # the goal, below `min_progress`.
+    wandering_agents: tuple[int, ...]
+    min_progress: float
     # (agent, vertex, wanted vertex, agent holding it or None) at the last step.
     waiting_on: tuple[tuple[int, int, int, int | None], ...]
     # vertex -> its out-neighbours, for the vertices the stuck agents stand on.
     exits: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
 
+def _distances_to(goal: int, header: dict[str, Any], cache: dict[int, dict[int, int]]):
+    """Hop counts from every vertex to `goal`, along the directed edges."""
+    if goal not in cache:
+        into: dict[int, list[int]] = {}
+        for source, target, _ in header["edges"]:
+            into.setdefault(target, []).append(source)
+        dist = {goal: 0}
+        queue = deque([goal])
+        while queue:
+            current = queue.popleft()
+            for source in into.get(current, ()):
+                if source not in dist:
+                    dist[source] = dist[current] + 1
+                    queue.append(source)
+        cache[goal] = dist
+    return cache[goal]
+
+
 def summarise_trace(
-    header: dict[str, Any], steps: list[dict[str, Any]], window: int | None = None
+    header: dict[str, Any],
+    steps: list[dict[str, Any]],
+    window: int | None = None,
+    min_progress: float = 0.5,
 ) -> TraceSummary:
     """Reduce a trace to the facts that show whether the fleet stalled.
 
     `window` is how many final steps count as "recently". It defaults to a
-    quarter of the episode.
+    quarter of the episode. `min_progress` is the share of goal-holding moves
+    that must bring an agent closer to its goal, below which it is listed as
+    wandering. Both are display settings for a diagnostic, not study
+    parameters.
     """
     if not steps:
         raise ValueError("the trace has no steps.")
@@ -180,8 +215,21 @@ def summarise_trace(
 
     final = steps[-1]
     agents: list[AgentSummary] = []
+    distance_cache: dict[int, dict[int, int]] = {}
     for key in sorted(final["agents"], key=int):
         records = [s["agents"][key] for s in steps]
+        # Closer to the goal, counted over the moves in the window that were made
+        # while holding a task. A vertex with no path to the goal gives no verdict.
+        closer = goal_moves = 0
+        for index in range(n - window, n):
+            r = records[index]
+            before = records[index - 1]["at"] if index else header.get("initial", {}).get(key)
+            if not r["moved"] or r["goal"] is None or before is None:
+                continue
+            dist = _distances_to(r["goal"], header, distance_cache)
+            if before in dist and r["at"] in dist:
+                goal_moves += 1
+                closer += dist[r["at"]] < dist[before]
         longest = run = 0
         for r in records:
             run = 0 if r["moved"] else run + 1
@@ -196,10 +244,20 @@ def summarise_trace(
                 final_vertex=records[-1]["at"],
                 final_task=records[-1]["task"],
                 final_goal=records[-1]["goal"],
+                goal_moves_in_window=goal_moves,
+                progress_in_window=closer / goal_moves if goal_moves else None,
+                distinct_vertices_in_window=len({r["at"] for r in records[-window:]}),
             )
         )
 
     stuck = tuple(a.agent_id for a in agents if a.moves_in_window == 0 and a.final_task is not None)
+    wandering = tuple(
+        a.agent_id
+        for a in agents
+        if a.final_task is not None
+        and a.progress_in_window is not None
+        and a.progress_in_window < min_progress
+    )
     holder = {r["at"]: int(k) for k, r in final["agents"].items()}
     waiting_on = tuple(
         (int(k), r["at"], r["intent"], holder.get(r["intent"]))
@@ -225,9 +283,19 @@ def summarise_trace(
         last_completion_t=last_completion,
         agents=tuple(agents),
         stuck_agents=stuck,
+        wandering_agents=wandering,
+        min_progress=min_progress,
         waiting_on=waiting_on,
         exits=exits,
     )
+
+
+def _progress_text(a: AgentSummary) -> str:
+    if a.progress_in_window is None:
+        share = "no goal moves"
+    else:
+        share = f"{a.progress_in_window:.0%} of {a.goal_moves_in_window} goal moves closer"
+    return f"{share}, {a.distinct_vertices_in_window} distinct vertices in the window"
 
 
 def format_summary(summary: TraceSummary) -> str:
@@ -246,12 +314,17 @@ def format_summary(summary: TraceSummary) -> str:
         lines.append(
             f"  agent {a.agent_id}: {a.moves} moves ({a.moves_in_window} in the window), "
             f"overridden {a.overridden}x, longest stand still {a.longest_stand_still}, "
-            f"ends at {a.final_vertex} with {task}"
+            f"{_progress_text(a)}, ends at {a.final_vertex} with {task}"
         )
     if s.stuck_agents:
         lines.append(f"STUCK, holding a task and not moving in the window: {list(s.stuck_agents)}")
         for vertex, exits in s.exits.items():
             lines.append(f"  vertex {vertex} has out-neighbours {list(exits)}")
+    if s.wandering_agents:
+        lines.append(
+            f"WANDERING, holding a task and under {s.min_progress:.0%} of moves closer to the "
+            f"goal in the window: {list(s.wandering_agents)}"
+        )
     for agent, vertex, wanted, other in s.waiting_on:
         who = "nobody" if other is None else f"agent {other}"
         lines.append(f"  at the last step agent {agent} at {vertex} wants {wanted}, held by {who}")
@@ -262,18 +335,24 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Summarise episode traces.")
     parser.add_argument("traces", type=Path, nargs="+", metavar="FILE")
     parser.add_argument("--window", type=int, default=None, help="final steps counted as recent")
+    parser.add_argument(
+        "--min-progress", type=float, default=0.5, help="share of moves closer to the goal"
+    )
     args = parser.parse_args(None if argv is None else list(argv))
     summaries = []
     for path in args.traces:
         header, steps = load_trace(path)
-        summary = summarise_trace(header, steps, args.window)
+        summary = summarise_trace(header, steps, args.window, args.min_progress)
         summaries.append(summary)
         print(f"== {path}")
         print(format_summary(summary))
     if len(summaries) > 1:
         stuck = sum(1 for s in summaries if s.stuck_agents)
-        share = stuck / len(summaries)
-        print(f"\n{stuck} of {len(summaries)} episodes had a stuck agent ({share:.0%})")
+        wandering = sum(1 for s in summaries if s.wandering_agents)
+        total = len(summaries)
+        print(f"\n{stuck} of {total} episodes had a stuck agent ({stuck / total:.0%})")
+        share = wandering / total
+        print(f"{wandering} of {total} episodes had a wandering agent ({share:.0%})")
 
 
 if __name__ == "__main__":
