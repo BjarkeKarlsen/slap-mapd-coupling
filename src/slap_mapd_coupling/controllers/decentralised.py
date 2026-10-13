@@ -19,9 +19,8 @@ silently produce a Controller that behaves nothing like what "the
 decentralised regime" means), `set_active_decentralised_controller`
 below is the explicit bridge: callers construct a real
 DecentralisedController from a loaded model, register it as THIS
-process's active one, and get_controller("decentralised") (reached through get_router by
-environment/multi_agent_env.py and evaluation/evaluator.py)
-then returns it. Calling get_controller("decentralised") before that
+process's active one, and get_controller("decentralised") (called by
+evaluation/evaluator.py) then returns it. Calling get_controller("decentralised") before that
 raises with this explanation rather than silently returning something
 meaningless.
 """

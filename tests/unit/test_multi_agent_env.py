@@ -9,6 +9,14 @@ from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.planners import PrioritisedAStarPlanner
+from slap_mapd_coupling.planners.driver import step_with_planner
+
+_PLANNER = PrioritisedAStarPlanner()  # keeps no state, so one instance serves every test
+
+
+def _step(env: WarehouseMAPDEnv):
+    return step_with_planner(env, _PLANNER)
 
 
 def _graph(num_endpoints: int = 4, seed: int = 0) -> WarehouseGraph:
@@ -70,7 +78,7 @@ def test_reset_raises_when_fewer_endpoints_than_agents():
 def test_step_returns_dict_keyed_structures_with_all_key():
     env = _env(_graph(), _config())
     env.reset()
-    obs, rewards, terminated, truncated, infos = env.step()
+    obs, rewards, terminated, truncated, infos = _step(env)
     assert set(obs) == {1, 2, 3, 4}
     assert "__all__" in terminated and "__all__" in truncated and "__all__" in infos
     assert all(isinstance(v, bool) for k, v in terminated.items() if k != "__all__")
@@ -80,9 +88,9 @@ def test_episode_truncates_at_horizon():
     env = _env(_graph(), _config(horizon=3))
     env.reset()
     for _ in range(2):
-        _, _, _, truncated, _ = env.step()
+        _, _, _, truncated, _ = _step(env)
         assert truncated["__all__"] is False
-    _, _, _, truncated, _ = env.step()
+    _, _, _, truncated, _ = _step(env)
     assert truncated["__all__"] is True
 
 
@@ -91,7 +99,7 @@ def test_multi_step_run_stays_collision_free():
     env.reset()
     before = env.fleet
     for _ in range(40):
-        env.step()
+        _step(env)
         assert is_collision_free(before, env.fleet)
         before = env.fleet
 
@@ -102,7 +110,7 @@ def test_replay_is_bit_for_bit_deterministic_under_fixed_seed():
         env.reset()
         trace = []
         for _ in range(30):
-            obs, *_ = env.step()
+            obs, *_ = _step(env)
             trace.extend(sorted(obs.items()))
         return trace
 
@@ -115,7 +123,7 @@ def test_different_seeds_produce_different_traces():
         env.reset()
         trace = []
         for _ in range(15):
-            obs, *_ = env.step()
+            obs, *_ = _step(env)
             trace.extend(sorted(obs.items()))
         return trace
 
@@ -127,7 +135,7 @@ def test_f_fix_never_mutates_storage_counts():
     initial_counts = env.storage.counts
     env.reset()
     for _ in range(20):
-        env.step()
+        _step(env)
     assert env.storage.counts == initial_counts  # storage_epoch_length=None: F_fix, never updates
 
 
@@ -135,7 +143,7 @@ def test_every_task_has_a_single_well_defined_status_at_every_t():
     env = _env(_graph(), _config(horizon=30, arrival_rate=2.0))
     env.reset()
     for t in range(30):
-        env.step()
+        _step(env)
         for task in env.tasks:
             # status() itself would raise if release_time > t; every
             # generated task's release_time is <= the tick it was
@@ -149,7 +157,7 @@ def test_completed_tasks_stay_completed():
     env.reset()
     completed_ids: set[int] = set()
     for t in range(40):
-        env.step()
+        _step(env)
         now_completed = {task.task_id for task in env.tasks if task.finish_time is not None}
         assert completed_ids <= now_completed  # monotonic: never un-completes
         completed_ids = now_completed
@@ -160,7 +168,7 @@ def test_reward_is_zero_for_non_decentralised_controller():
     env = _env(_graph(), _config())
     env.reset()
     for _ in range(5):
-        _, rewards, *_ = env.step()
+        _, rewards, *_ = _step(env)
         assert all(r == 0.0 for r in rewards.values())
 
 
@@ -168,7 +176,7 @@ def test_edge_traversals_are_logged_for_realised_moves():
     env = _env(_graph(), _config(horizon=15))
     env.reset()
     for _ in range(15):
-        env.step()
+        _step(env)
     assert sum(env.log.edge_traversals.values()) > 0
     for (source, target), count in env.log.edge_traversals.items():
         assert count > 0
@@ -180,7 +188,7 @@ def test_backlog_logged_every_timestep_including_reset():
     env.reset()
     assert len(env.log.backlog_by_t) == 1
     for i in range(10):
-        env.step()
+        _step(env)
         assert len(env.log.backlog_by_t) == i + 2
 
 
@@ -190,7 +198,7 @@ def test_decision_runtimes_logged_once_per_step():
     env = _env(_graph(), _config(horizon=6))
     env.reset()
     for _ in range(6):
-        env.step()
+        _step(env)
     assert len(env.log.assignment_runtime_seconds) == 6
     assert len(env.log.routing_runtime_seconds) == 6
 
@@ -216,7 +224,7 @@ def test_a_step_releases_and_assigns_the_orders_of_the_new_t():
     env = _env(_graph(), _config(arrival_rate=10.0, horizon=5))
     env.reset()
     for done in range(1, 5):
-        env.step()
+        _step(env)
         assert any(task.release_time == env.t for task in env.tasks)
         assert len(env.log.assignment_runtime_seconds) == done + 1
         assert len(env.log.backlog_by_t) == done + 1
@@ -226,17 +234,11 @@ def test_the_step_that_ends_the_episode_releases_and_assigns_nothing():
     env = _env(_graph(), _config(arrival_rate=10.0, horizon=5))
     env.reset()
     for _ in range(5):
-        env.step()
+        _step(env)
     assert env.t == 5
     assert all(task.release_time < 5 for task in env.tasks)
     assert len(env.log.assignment_runtime_seconds) == 5
     assert len(env.log.backlog_by_t) == 6
-
-
-def test_a_planner_is_resolved_when_the_environment_is_built():
-    # The first assignment happens in reset, so a planner that picks its own tasks
-    # has to exist by then. A controller stays lazy (see the tests with actions below).
-    assert _env(_graph(), _config())._controller is not None
 
 
 def _decentralised_config(**overrides) -> ExperimentConfig:
@@ -260,29 +262,34 @@ def _decentralised_config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-def test_step_with_external_actions_never_resolves_a_controller():
-    """controller='decentralised' has no registered Controller (#29 isn't
-    implemented yet) -- driving every step via `actions` must not need
-    one, per the module docstring's lazy-resolution design."""
+def test_step_takes_the_slots_it_is_given():
     env = _env(_graph(), _decentralised_config())
     env.reset()
     wait_actions = {agent_id: 0 for agent_id in env.fleet.agents}  # slot 0 is always wait
     obs, rewards, terminated, truncated, infos = env.step(wait_actions)
     assert obs == dict(env.fleet.locations())
-    assert env._controller is None  # never resolved
 
 
-def test_step_without_actions_raises_for_unregistered_controller():
+def test_step_with_no_argument_is_a_type_error():
+    env = _env(_graph(), _config())
+    env.reset()
+    with pytest.raises(TypeError):
+        env.step()  # type: ignore[call-arg]
+
+
+def test_record_routing_runtime_appends_to_the_log():
+    env = _env(_graph(), _config())
+    env.log.record_routing_runtime(0.25)
+    env.log.record_routing_runtime(0.5)
+    assert env.log.routing_runtime_seconds == [0.25, 0.5]
+
+
+def test_step_does_not_time_the_actions_it_is_given():
+    # Whoever produces the actions times itself, so a bare step logs no routing time.
     env = _env(_graph(), _decentralised_config())
     env.reset()
-    # KeyError if controllers/decentralised.py (#29) hasn't been imported
-    # yet by anything else in this test session (nothing registered under
-    # "decentralised"), RuntimeError if it has (registered, but with no
-    # active model configured via set_active_decentralised_controller --
-    # see that module's docstring) -- either way, calling get_controller
-    # here must fail loudly, not silently return something meaningless.
-    with pytest.raises((KeyError, RuntimeError), match="decentralised"):
-        env.step()
+    env.step({agent_id: 0 for agent_id in env.fleet.agents})
+    assert env.log.routing_runtime_seconds == []
 
 
 def test_step_with_external_wait_actions_keeps_agents_stationary():
@@ -324,7 +331,7 @@ def test_last_proposed_and_overridden_start_empty_and_follow_the_step():
     env.reset()
     assert env.last_proposed == {}
     assert env.last_overridden == frozenset()
-    env.step()
+    _step(env)
     assert set(env.last_proposed) == {1, 2}
     assert env.last_overridden <= {1, 2}
     env.reset()

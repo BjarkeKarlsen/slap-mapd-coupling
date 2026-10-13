@@ -20,7 +20,8 @@ just a local run.
      every timestep (eq:lifecycle);
   4. bitwise replay determinism under fixed seeds.
 
-Parametrised over several seeds and instance sizes rather than a single
+Run through planners/driver.py for both reference planners, and
+parametrised over several seeds and instance sizes rather than a single
 example, since a single passing run doesn't rule out a seed-dependent
 regression (e.g. a resolution edge case that only a particular priority
 permutation triggers).
@@ -31,14 +32,19 @@ from __future__ import annotations
 import pytest
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
+from slap_mapd_coupling.controllers.assignment import Assigner
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import StorageState, is_feasible, SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.planners import get_planner
+from slap_mapd_coupling.planners.base import Planner
+from slap_mapd_coupling.planners.driver import step_with_planner
 
 SEEDS = (0, 1, 7, 42, 12345)
+PLANNERS = ("prioritised_astar", "token_passing")
 
 
 def _graph(num_endpoints: int, seed: int) -> WarehouseGraph:
@@ -62,10 +68,12 @@ def _graph(num_endpoints: int, seed: int) -> WarehouseGraph:
     return generate_warehouse_graph(params)
 
 
-def _config(seed: int, num_agents: int = 4, horizon: int = 40) -> ExperimentConfig:
+def _config(
+    seed: int, num_agents: int = 4, horizon: int = 40, planner: str = "prioritised_astar"
+) -> ExperimentConfig:
     return ExperimentConfig(
         storage_mode="fixed",
-        planner="prioritised_astar",
+        planner=planner,
         congestion_sensitive=False,
         communication=False,
         num_agents=num_agents,
@@ -77,45 +85,53 @@ def _config(seed: int, num_agents: int = 4, horizon: int = 40) -> ExperimentConf
     )
 
 
-def _env(graph: WarehouseGraph, config: ExperimentConfig) -> WarehouseMAPDEnv:
+def _env(graph: WarehouseGraph, config: ExperimentConfig) -> tuple[WarehouseMAPDEnv, Planner]:
     storage_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
     skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
     capacities = {v: 10.0 for v in storage_vertices}
     counts = {"tea": {storage_vertices[0]: 5, storage_vertices[1]: 5, storage_vertices[2]: 5}}
-    return WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+    assert config.planner is not None
+    planner = get_planner(config.planner)
+    assigner = planner if isinstance(planner, Assigner) else None
+    return WarehouseMAPDEnv(graph, skus, counts, capacities, config, assigner=assigner), planner
 
 
+@pytest.mark.parametrize("planner_name", PLANNERS)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_no_vertex_or_swap_conflicts_on_the_realised_trace(seed: int):
+def test_no_vertex_or_swap_conflicts_on_the_realised_trace(seed: int, planner_name: str):
     graph = _graph(num_endpoints=5, seed=seed)
-    env = _env(graph, _config(seed))
+    env, planner = _env(graph, _config(seed, planner=planner_name))
     env.reset()
     before = env.fleet
     for t in range(env.config.horizon):
-        env.step()
+        step_with_planner(env, planner)
         assert is_collision_free(before, env.fleet), f"collision at t={t}, seed={seed}"
         before = env.fleet
 
 
+@pytest.mark.parametrize("planner_name", PLANNERS)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_storage_stays_within_capacity_at_every_epoch_boundary(seed: int):
+def test_storage_stays_within_capacity_at_every_epoch_boundary(seed: int, planner_name: str):
     graph = _graph(num_endpoints=5, seed=seed)
-    env = _env(graph, _config(seed))
+    env, planner = _env(graph, _config(seed, planner=planner_name))
     env.reset()
     assert is_feasible(env.storage)
     for t in range(env.config.horizon):
-        env.step()
+        step_with_planner(env, planner)
         assert is_feasible(env.storage), f"infeasible storage at t={t}, seed={seed}"
         assert isinstance(env.storage, StorageState)
 
 
+@pytest.mark.parametrize("planner_name", PLANNERS)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_every_released_task_has_exactly_one_lifecycle_status_at_every_t(seed: int):
+def test_every_released_task_has_exactly_one_lifecycle_status_at_every_t(
+    seed: int, planner_name: str
+):
     graph = _graph(num_endpoints=5, seed=seed)
-    env = _env(graph, _config(seed, horizon=30))
+    env, planner = _env(graph, _config(seed, horizon=30, planner=planner_name))
     env.reset()
     for t in range(env.config.horizon):
-        env.step()
+        step_with_planner(env, planner)
         now = t + 1
         for task in env.tasks:
             if task.release_time > now:
@@ -136,15 +152,16 @@ def test_every_released_task_has_exactly_one_lifecycle_status_at_every_t(seed: i
                 assert status == "waiting"
 
 
+@pytest.mark.parametrize("planner_name", PLANNERS)
 @pytest.mark.parametrize("seed", SEEDS)
-def test_replay_is_bit_for_bit_deterministic_under_a_fixed_seed(seed: int):
+def test_replay_is_bit_for_bit_deterministic_under_a_fixed_seed(seed: int, planner_name: str):
     def run() -> list:
         graph = _graph(num_endpoints=5, seed=seed)
-        env = _env(graph, _config(seed, horizon=30))
+        env, planner = _env(graph, _config(seed, horizon=30, planner=planner_name))
         env.reset()
         trace = []
         for _ in range(env.config.horizon):
-            obs, rewards, terminated, truncated, infos = env.step()
+            obs, rewards, terminated, truncated, infos = step_with_planner(env, planner)
             trace.append(
                 (
                     tuple(sorted(obs.items())),
@@ -163,16 +180,17 @@ def test_replay_is_bit_for_bit_deterministic_under_a_fixed_seed(seed: int):
     assert first == second
 
 
-def test_all_four_invariants_hold_simultaneously_on_one_longer_run():
+@pytest.mark.parametrize("planner_name", PLANNERS)
+def test_all_four_invariants_hold_simultaneously_on_one_longer_run(planner_name: str):
     """A single, larger, denser run exercising all four checks together
     -- the closest thing to M2's literal "done when" acceptance test."""
     seed = 2024
     graph = _graph(num_endpoints=6, seed=seed)
-    env = _env(graph, _config(seed, num_agents=6, horizon=60))
+    env, planner = _env(graph, _config(seed, num_agents=6, horizon=60, planner=planner_name))
     env.reset()
     before = env.fleet
     for t in range(env.config.horizon):
-        env.step()
+        step_with_planner(env, planner)
         assert is_collision_free(before, env.fleet)
         assert is_feasible(env.storage)
         now = t + 1

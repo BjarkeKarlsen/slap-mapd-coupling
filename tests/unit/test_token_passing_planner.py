@@ -14,6 +14,7 @@ from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter, load_trace, summarise_trace
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
 from slap_mapd_coupling.planners import TokenPassingPlanner
+from slap_mapd_coupling.planners.driver import step_with_planner
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 TEA = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
@@ -60,23 +61,27 @@ def _corridor_run(config: ExperimentConfig, **kwargs):
     return run_episode(_corridor(), TEA, {"tea": {6: 50}}, {6: 100.0}, config, **kwargs)
 
 
-def _env(graph: WarehouseGraph, counts, capacities, config) -> WarehouseMAPDEnv:
-    return WarehouseMAPDEnv(graph, TEA, counts, capacities, config)
+def _env(
+    graph: WarehouseGraph, counts, capacities, config
+) -> tuple[WarehouseMAPDEnv, TokenPassingPlanner]:
+    planner = TokenPassingPlanner()
+    return WarehouseMAPDEnv(graph, TEA, counts, capacities, config, assigner=planner), planner
 
 
-def _check_run(env: WarehouseMAPDEnv, tmp_path: Path, horizon: int) -> None:
+def _check_run(
+    env_and_planner: tuple[WarehouseMAPDEnv, TokenPassingPlanner], tmp_path: Path, horizon: int
+) -> None:
     """Runs the episode and asserts what the plan promises of Token Passing."""
+    env, planner = env_and_planner
     env.reset()
     path = tmp_path / "trace.jsonl"
     with EpisodeTraceWriter(path, env) as writer:
         for _ in range(horizon):
             before = env.fleet
-            env.step()
+            step_with_planner(env, planner)
             writer.record(env)
             assert not env.last_overridden, f"conflict resolution overrode a plan at t={env.t}"
             assert is_collision_free(before, env.fleet)
-    planner = env._controller._planner  # type: ignore[union-attr]
-    assert isinstance(planner, TokenPassingPlanner)
     assert planner.num_diverged == 0
     summary = summarise_trace(*load_trace(path))
     assert summary.stuck_agents == ()
@@ -94,8 +99,7 @@ def test_it_finishes_the_dead_end_corridor_where_prioritised_astar_stalls():
 
 
 def test_it_never_needs_conflict_resolution_on_the_dead_end_corridor(tmp_path):
-    env = _env(_corridor(), {"tea": {6: 50}}, {6: 100.0}, _config())
-    _check_run(env, tmp_path, 300)
+    _check_run(_env(_corridor(), {"tea": {6: 50}}, {6: 100.0}, _config()), tmp_path, 300)
 
 
 def test_it_never_needs_conflict_resolution_on_the_example_04_instance(tmp_path):
@@ -143,13 +147,13 @@ def test_replaying_a_seed_gives_the_same_trace_and_a_second_episode_starts_clean
     assert first.read_bytes() == second.read_bytes()
 
     # The same environment run twice, with reset in between, gives the same episode.
-    env = _env(_corridor(), {"tea": {6: 50}}, {6: 100.0}, config)
+    env, planner = _env(_corridor(), {"tea": {6: 50}}, {6: 100.0}, config)
 
     def episode() -> list[dict]:
         env.reset()
         out = []
         for _ in range(config.horizon):
-            env.step()
+            step_with_planner(env, planner)
             out.append(env.fleet.locations())
         return out
 

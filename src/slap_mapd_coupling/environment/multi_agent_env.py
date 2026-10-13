@@ -48,23 +48,12 @@ agent's own current vertex. The full o_i(t) feature vector
 needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
-step() also accepts an optional `actions` mapping (issue #30): stage 3
-normally asks the registered Controller to compute u_i(t) for every
-agent from full state (`self._controller.route(...)`), but an RLlib
-rollout worker training a decentralised policy needs the OPPOSITE
-direction -- it observes o_i(t) itself (training/rllib_env.py) and
-supplies each agent's chosen action slot externally, every step, while
-gradients are live. Passing `actions` bypasses `route()` for that step
-and decodes the given slots directly (environment/spaces.py::
-action_for_slot); every other stage (assignment, conflict resolution,
-lifecycle, storage, reward) is untouched, so this is still the same
-six-stage loop, not a second one -- only stage 3's *source* differs.
-The registered-Controller path (`actions=None`) stays the only one
-reference planner and section-based ever use, unaffected by this. Router
-resolution (get_router) is therefore lazy (looked up on first `actions=None` step,
-not in `__init__`): `config.controller="decentralised"` has no
-registered Controller until #29 lands, but a run driven entirely by
-`actions` never needs one.
+step(actions) takes one action slot per robot (the action mask), decoded by
+environment/spaces.py::action_for_slot, so the simulator has one step mode.
+Whoever produces the slots, a learned policy or a planner driven from
+planners/driver.py, times itself and records the time on the log.
+The shared assignment rule of stage 2 can be replaced by an `Assigner`
+(controllers/assignment.py), which a planner that picks its own tasks is.
 """
 
 from __future__ import annotations
@@ -76,9 +65,7 @@ from typing import Mapping
 
 import numpy as np
 
-from slap_mapd_coupling.controllers.assignment import assign_tasks
-from slap_mapd_coupling.controllers.base import SelfAssigningRouter
-from slap_mapd_coupling.controllers.base import Controller
+from slap_mapd_coupling.controllers.assignment import Assigner, assign_tasks
 from slap_mapd_coupling.core.agents import AgentId, AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
@@ -91,7 +78,6 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
-from slap_mapd_coupling.routing import get_router
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
 
@@ -121,7 +107,7 @@ class EpisodeLog:
     backlog_by_t: list[int] = field(default_factory=list)  # B_t, every timestep
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
-    routing_runtime_seconds: list[float] = field(default_factory=list)
+    routing_runtime_seconds: list[float] = field(default_factory=list)  # set by whoever acts
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
     # every controller (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
@@ -134,6 +120,10 @@ class EpisodeLog:
     def record_blocked_tick(self, task_id: TaskId) -> None:
         self.blocked_ticks_by_task[task_id] = self.blocked_ticks_by_task.get(task_id, 0) + 1
 
+    def record_routing_runtime(self, seconds: float) -> None:
+        """Whoever produces the actions times itself and records it here."""
+        self.routing_runtime_seconds.append(seconds)
+
 
 class WarehouseMAPDEnv:
     """One episode of the coupled SLAP/MAPD simulation, per ExperimentConfig."""
@@ -145,20 +135,14 @@ class WarehouseMAPDEnv:
         initial_storage_counts: Mapping[SkuId, Mapping[VertexId, int]],
         storage_capacities: Mapping[VertexId, float],
         config: ExperimentConfig,
+        assigner: Assigner | None = None,
     ) -> None:
         self.graph = graph
         self.config = config
         self._skus = dict(skus)
         self._storage_capacities = dict(storage_capacities)
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
-        # Lazy for a controller: resolved on the first actions=None step, not here (see
-        # the module docstring on router resolution). A planner is resolved now,
-        # because a planner that picks its own tasks is asked for the assignment inside
-        # reset(), after its own reset(seed). Temporary: replaced by an explicit
-        # assigner argument.
-        self._controller: Controller | None = None
-        if config.planner is not None:
-            self._controller = get_router(config)
+        self._assigner = assigner
         self._storage_rule = get_storage_rule(config.storage_mode)
 
         self.fleet: FleetState
@@ -207,10 +191,10 @@ class WarehouseMAPDEnv:
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
         self.last_proposed = {}
         self.last_overridden = frozenset()
-        # A router that keeps state (Token Passing's committed paths) must not carry it
-        # into the new episode (Controller.reset).
-        if self._controller is not None:
-            self._controller.reset(episode_seed)
+        # An assigner that keeps state (Token Passing's committed paths) must not carry
+        # it into the new episode, and must be reset before the assignment of t = 0.
+        if self._assigner is not None:
+            self._assigner.reset(episode_seed)
 
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
@@ -234,7 +218,7 @@ class WarehouseMAPDEnv:
 
     def step(
         self,
-        actions: Mapping[AgentId, int] | None = None,
+        actions: Mapping[AgentId, int],
     ) -> tuple[
         dict[AgentId, VertexId],
         dict[AgentId, float],
@@ -248,44 +232,25 @@ class WarehouseMAPDEnv:
         by agent id plus an "__all__" entry (RLlib/PettingZoo convention)
         signalling whether the whole episode is done.
 
-        `actions`, if given, is a per-agent chosen slot index (eq:mask)
-        decoded via environment/spaces.py::action_for_slot and used
-        directly for stage 3 instead of asking the registered Controller
-        -- see module docstring ("step() also accepts an optional
-        `actions` mapping").
+        `actions` maps every agent id to a chosen slot (the action mask), decoded via
+        environment/spaces.py::action_for_slot.
         """
         before_fleet = self.fleet
         self._record_crowding(before_fleet)
 
         # Stages 1 and 2 already ran for this t, at the end of reset() or of the
-        # previous step. The registered router is not needed when `actions` are
-        # given, since stage 3 then decodes them instead.
-        router: Controller | None = None
-        if actions is None:
-            if self._controller is None:
-                self._controller = get_router(self.config)
-            router = self._controller
-
-        # Under the task lifecycle a task assigned at self._t is already active at
-        # self._t. This includes the task assigned at the end of the previous step,
-        # so the freshly assigned agent's action this same tick still counts
-        # towards omega_j(t) and this timestep's reward.
+        # previous step. Under the task lifecycle a task assigned at self._t is
+        # already active at self._t, so the freshly assigned agent's action this
+        # same tick still counts towards omega_j(t) and this timestep's reward.
         active_by_agent = active_tasks_by_agent(self.tasks, self._t)
 
-        # Stage 3: routing (pi_route) -- the one stage a controller swap
-        # touches, and the one stage `actions` (if given) overrides the
-        # source of, per the module docstring.
-        route_start = time.perf_counter()
-        if actions is not None:
-            locations = self.fleet.locations()
-            proposed: dict[AgentId, Action] = {
-                agent_id: action_for_slot(self.graph, locations[agent_id], slot)
-                for agent_id, slot in actions.items()
-            }
-        else:
-            assert router is not None  # resolved above whenever actions is None
-            proposed = router.route(self.graph, self.fleet, self.tasks, self._t)
-        self.log.routing_runtime_seconds.append(time.perf_counter() - route_start)
+        # Stage 3: routing (pi_route), the one stage a controller swap touches. The
+        # slots come from outside, so this only decodes them.
+        locations = self.fleet.locations()
+        proposed: dict[AgentId, Action] = {
+            agent_id: action_for_slot(self.graph, locations[agent_id], slot)
+            for agent_id, slot in actions.items()
+        }
 
         # Stage 4: conflict resolution.
         result = resolve_conflicts(self.graph, self.fleet, proposed, self._priority)
@@ -358,14 +323,13 @@ class WarehouseMAPDEnv:
         return observations, rewards, terminated, truncated, infos
 
     def _release_and_assign(self) -> None:
-        """Stage 1 (orders become tasks entering Q_t) and stage 2 (shared greedy
-        assignment, or the router's own for a planner that picks its tasks) for the
-        current t."""
+        """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
+        assignment, or the assigner's own) for the current t."""
         self.tasks.extend(self._generate_tasks())
 
         assign_start = time.perf_counter()
-        if isinstance(self._controller, SelfAssigningRouter):
-            assignments = self._controller.assign(self.graph, self.fleet, self.tasks, self._t)
+        if self._assigner is not None:
+            assignments = self._assigner.assign(self.graph, self.fleet, self.tasks, self._t)
         else:
             assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
         self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)

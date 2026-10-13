@@ -16,7 +16,7 @@ from slap_mapd_coupling.core.storage_state import SkuType, is_feasible
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.spaces import action_for_slot, action_space, max_out_degree
-from slap_mapd_coupling.evaluation.evaluator import run_episode
+from slap_mapd_coupling.evaluation.evaluator import _step_with_controller, run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
@@ -241,7 +241,7 @@ def test_full_episode_via_the_registry_respects_the_correctness_invariants(commu
     env.reset()
     before = env.fleet
     for t in range(config.horizon):
-        env.step()  # actions=None -> resolves "decentralised" via the registry
+        _step_with_controller(env, controller)
         assert is_collision_free(before, env.fleet), f"collision at t={t}"
         assert is_feasible(env.storage), f"infeasible storage at t={t}"
         before = env.fleet
@@ -435,7 +435,7 @@ def test_the_realised_trace_replays_bit_for_bit_with_communication_on():
         env.reset()
         trace = []
         for _ in range(config.horizon):
-            env.step()
+            _step_with_controller(env, controller)
             trace.append(tuple(sorted(env.fleet.locations().items())))
         return trace
 
