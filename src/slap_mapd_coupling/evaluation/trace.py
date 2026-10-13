@@ -21,7 +21,9 @@ Summarise a file from the shell with
 
 With more than one file it also prints the fraction of episodes with a stuck
 agent and the fraction with a wandering agent (--min-progress sets the share of
-moves that must bring an agent closer to its goal).
+moves that must bring an agent closer to its goal). It also prints the longest
+whole-fleet still run, which is the number to choose --dead-after from, and with
+--dead-after N the fraction of episodes where the fleet was dead for N steps.
 """
 
 from __future__ import annotations
@@ -161,6 +163,16 @@ class TraceSummary:
     agents: tuple[AgentSummary, ...]
     # Agents holding a task that did not move once in the window.
     stuck_agents: tuple[int, ...]
+    # The longest run of steps in which no agent moved while some agent held a task.
+    # Read it off healthy runs to choose `dead_after`.
+    longest_fleet_still_run: int
+    # With `dead_after` = N, the first time t at which the whole fleet had stood still for
+    # N steps in a row while a task was active, and the first (agent, t) at which one
+    # agent holding a task had not moved for N steps. None when it never happened or
+    # when `dead_after` was not given.
+    dead_after: int | None
+    fleet_dead_at: int | None
+    first_agent_dead: tuple[int, int] | None
     # Agents holding a task that moved in the window but mostly not towards
     # the goal, below `min_progress`.
     wandering_agents: tuple[int, ...]
@@ -194,6 +206,7 @@ def summarise_trace(
     steps: list[dict[str, Any]],
     window: int | None = None,
     min_progress: float = 0.5,
+    dead_after: int | None = None,
 ) -> TraceSummary:
     """Reduce a trace to the facts that show whether the fleet stalled.
 
@@ -201,7 +214,9 @@ def summarise_trace(
     quarter of the episode. `min_progress` is the share of goal-holding moves
     that must bring an agent closer to its goal, below which it is listed as
     wandering. Both are display settings for a diagnostic, not study
-    parameters.
+    parameters. `dead_after` has no default because the thesis leaves the
+    number open. Without it the summary still reports the longest run in which
+    the whole fleet stood still, which is the number to choose it from.
     """
     if not steps:
         raise ValueError("the trace has no steps.")
@@ -214,6 +229,23 @@ def summarise_trace(
             last_completion = steps[i]["t"]
 
     final = steps[-1]
+    fleet_run = longest_fleet_run = 0
+    fleet_dead_at: int | None = None
+    agent_run = {key: 0 for key in final["agents"]}
+    first_agent_dead: tuple[int, int] | None = None
+    for step in steps:
+        records = step["agents"]
+        busy = any(r["task"] is not None for r in records.values())
+        fleet_run = fleet_run + 1 if busy and not any(r["moved"] for r in records.values()) else 0
+        longest_fleet_run = max(longest_fleet_run, fleet_run)
+        if dead_after is not None:
+            if fleet_dead_at is None and fleet_run >= dead_after:
+                fleet_dead_at = step["t"]
+            for key, r in records.items():
+                held_still = r["task"] is not None and not r["moved"]
+                agent_run[key] = agent_run[key] + 1 if held_still else 0
+                if first_agent_dead is None and agent_run[key] >= dead_after:
+                    first_agent_dead = (int(key), step["t"])
     agents: list[AgentSummary] = []
     distance_cache: dict[int, dict[int, int]] = {}
     for key in sorted(final["agents"], key=int):
@@ -283,6 +315,10 @@ def summarise_trace(
         last_completion_t=last_completion,
         agents=tuple(agents),
         stuck_agents=stuck,
+        longest_fleet_still_run=longest_fleet_run,
+        dead_after=dead_after,
+        fleet_dead_at=fleet_dead_at,
+        first_agent_dead=first_agent_dead,
         wandering_agents=wandering,
         min_progress=min_progress,
         waiting_on=waiting_on,
@@ -320,6 +356,20 @@ def format_summary(summary: TraceSummary) -> str:
         lines.append(f"STUCK, holding a task and not moving in the window: {list(s.stuck_agents)}")
         for vertex, exits in s.exits.items():
             lines.append(f"  vertex {vertex} has out-neighbours {list(exits)}")
+    lines.append(
+        f"longest run with the whole fleet standing still and a task active: "
+        f"{s.longest_fleet_still_run}"
+    )
+    if s.dead_after is not None:
+        when_fleet = "never" if s.fleet_dead_at is None else f"t = {s.fleet_dead_at}"
+        if s.first_agent_dead is None:
+            when_agent = "never"
+        else:
+            when_agent = f"agent {s.first_agent_dead[0]} at t = {s.first_agent_dead[1]}"
+        lines.append(
+            f"dead for {s.dead_after} steps, whole fleet: {when_fleet}, "
+            f"first agent holding a task: {when_agent}"
+        )
     if s.wandering_agents:
         lines.append(
             f"WANDERING, holding a task and under {s.min_progress:.0%} of moves closer to the "
@@ -338,11 +388,14 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument(
         "--min-progress", type=float, default=0.5, help="share of moves closer to the goal"
     )
+    parser.add_argument(
+        "--dead-after", type=int, default=None, help="steps standing still that count as dead"
+    )
     args = parser.parse_args(None if argv is None else list(argv))
     summaries = []
     for path in args.traces:
         header, steps = load_trace(path)
-        summary = summarise_trace(header, steps, args.window, args.min_progress)
+        summary = summarise_trace(header, steps, args.window, args.min_progress, args.dead_after)
         summaries.append(summary)
         print(f"== {path}")
         print(format_summary(summary))
@@ -352,6 +405,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         total = len(summaries)
         print(f"\n{stuck} of {total} episodes had a stuck agent ({stuck / total:.0%})")
         share = wandering / total
+        longest = max(s.longest_fleet_still_run for s in summaries)
+        print(f"longest whole-fleet still run over all episodes: {longest}")
+        if args.dead_after is not None:
+            dead = sum(1 for s in summaries if s.fleet_dead_at is not None)
+            print(f"{dead} of {total} episodes had a dead fleet (N = {args.dead_after})")
         print(f"{wandering} of {total} episodes had a wandering agent ({share:.0%})")
 
 

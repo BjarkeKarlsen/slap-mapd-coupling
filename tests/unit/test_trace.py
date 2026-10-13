@@ -226,6 +226,55 @@ def test_summary_flags_an_agent_that_moves_but_does_not_close_in_on_its_goal(tmp
     assert "WANDERING" in format_summary(strict)
 
 
+def test_dead_fleet_needs_a_task_and_is_reported_for_the_whole_fleet_and_per_agent():
+    header = {"type": "header", "format": 1, "edges": []}
+
+    def agent(at, moved, task):
+        return {
+            "at": at,
+            "intent": None,
+            "moved": moved,
+            "overridden": False,
+            "task": task,
+            "phase": None if task is None else "to_pickup",
+            "goal": None if task is None else 9,
+        }
+
+    def steps(first_moves, task):
+        return [
+            {
+                "type": "step",
+                "t": t + 1,
+                "completed": 0,
+                "released": 2,
+                "backlog": 2,
+                "agents": {
+                    "1": agent(t, t < first_moves, task),
+                    "2": agent(50, False, task),
+                },
+            }
+            for t in range(8)
+        ]
+
+    # Agent 1 moves for two steps and then stops. Agent 2 never moves. Both hold tasks.
+    busy = summarise_trace(header, steps(2, task=1), window=4, dead_after=3)
+    assert busy.longest_fleet_still_run == 6
+    assert busy.fleet_dead_at == 5
+    assert busy.first_agent_dead == (2, 3)
+    assert "dead for 3 steps" in format_summary(busy)
+    # Without dead_after the longest run is still reported and nothing fires.
+    open_ = summarise_trace(header, steps(2, task=1), window=4)
+    assert (open_.longest_fleet_still_run, open_.fleet_dead_at) == (6, None)
+    assert open_.first_agent_dead is None
+    # A still fleet with no task active is normal and does not count.
+    idle = summarise_trace(header, steps(2, task=None), window=4, dead_after=3)
+    assert (idle.longest_fleet_still_run, idle.fleet_dead_at, idle.first_agent_dead) == (
+        0,
+        None,
+        None,
+    )
+
+
 def test_cli_reports_the_fraction_of_episodes_with_a_stuck_agent(tmp_path, capsys):
     paths = []
     for name, moves in (("a", False), ("b", True)):
