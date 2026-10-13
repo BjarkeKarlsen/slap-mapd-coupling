@@ -32,7 +32,6 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Iterable
 
-from slap_mapd_coupling.core.agents import AgentId
 from slap_mapd_coupling.core.tasks import active_tasks_by_agent
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 
