@@ -27,6 +27,7 @@ through it would only hide the bug, not route around it.
 from __future__ import annotations
 
 import math
+import numbers
 from typing import Any, Mapping, Optional
 
 import gymnasium as gym
@@ -208,7 +209,8 @@ _COUNT_KEYS = (
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and math.isfinite(value)
+    # numbers.Real, not (int, float), so a numpy float32 counts as a number too.
+    return isinstance(value, numbers.Real) and math.isfinite(value)
 
 
 def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
@@ -216,14 +218,15 @@ def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
 
     The episode return mean comes first because it is the number PPO
     reports. Most iterations have none, since an episode is longer than an
-    iteration, and then the line says so.
+    iteration, and then the line shows 0. A real return of 0 prints as 0.0,
+    so the two can still be told apart.
     """
     runners = result.get("env_runners", {})
     episode_return = runners.get("episode_return_mean")
     parts = [
         f"episode_return_mean={episode_return:.1f}"
         if _is_number(episode_return)
-        else "no episode ended"
+        else "episode_return_mean=0"
     ]
     for key in _COUNT_KEYS:
         value = runners.get(key)

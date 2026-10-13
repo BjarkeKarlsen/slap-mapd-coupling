@@ -1,5 +1,6 @@
 """Unit tests for the progress numbers in slap_mapd_coupling.training.callbacks."""
 
+import numpy as np
 import pytest
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -109,9 +110,16 @@ def test_format_iteration_prints_the_return_only_when_it_is_a_finite_number():
     assert "episode_return_mean=1390.0" in line and "e+" not in line
     for missing in (None, float("nan")):
         line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": missing}})
-        assert "no episode ended" in line and "episode_return_mean" not in line
+        assert "episode_return_mean=0 " in line and "no episode ended" not in line
     line = format_iteration(2, 5, {"env_runners": full})
-    assert "no episode ended" in line
+    assert "episode_return_mean=0 " in line
+    # A real return of 0 prints as 0.0, so it differs from "no episode ended yet".
+    line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": 0.0}})
+    assert "episode_return_mean=0.0 " in line
+    # A numpy float32 is a number, not a missing value.
+    value = np.float32(502.6)
+    line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": value}})
+    assert "episode_return_mean=502.6 " in line
 
 
 def test_format_iteration_marks_a_missing_key_instead_of_failing():
@@ -119,5 +127,5 @@ def test_format_iteration_marks_a_missing_key_instead_of_failing():
     assert "tasks_completed=1" in line
     assert "backlog=n/a" in line
     assert "standing_still_fraction=n/a" in line
-    assert "no episode ended" in line
+    assert "episode_return_mean=0 " in line
     assert "backlog=n/a" in format_iteration(1, 1, {})
