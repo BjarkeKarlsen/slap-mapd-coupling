@@ -49,7 +49,8 @@ def _network(input_dim: int, hidden_width: int) -> nn.Sequential:
 
 class PolicyValueHead(nn.Module):
     """The move score, the wait score and the value, three networks with no
-    shared trunk. `input_dim` is the width of z_i, `embedding_dim` the width of
+    shared trunk. `input_dim` is the width of z_i (GNNEncoder.output_dim,
+    which grows with the pooled term), `embedding_dim` the width of
     h^(L) and of a message (GNNEncoder.embedding_dim), and `communication`
     must equal the encoder's switch."""
 
@@ -145,9 +146,11 @@ class GNNPolicyValueModel(nn.Module):
         own_index: torch.Tensor,
         congestion: torch.Tensor,
         move_target_index: torch.Tensor,
+        pool_mask: Optional[torch.Tensor] = None,
         **sender_blocks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """`sender_blocks` are the GNNEncoder.forward_padded sender tensors and
+        """`pool_mask` is given exactly when pooling is on. `sender_blocks`
+        are the GNNEncoder.forward_padded sender tensors and
         MOVE_SENDER_KEYS, given exactly when communication is on."""
         move_sender = {
             key: sender_blocks.pop(key) for key in MOVE_SENDER_KEYS if key in sender_blocks
@@ -160,6 +163,7 @@ class GNNPolicyValueModel(nn.Module):
             own_index,
             congestion,
             **sender_blocks,
+            pool_mask=pool_mask,
         )
         logits, value = self.head(
             out.z, out.node_embeddings, move_target_index, out.messages, **move_sender

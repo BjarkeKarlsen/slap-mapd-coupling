@@ -197,7 +197,9 @@ def train(
     use_gpu: bool = False,
 ):
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32, communication=config.communication)
+    gnn_config = GNNEncoderConfig(
+        num_rounds=2, hidden_width=32, communication=config.communication, pooling="none"
+    )
     head_config = PolicyValueHeadConfig(hidden_width=32)
 
     ppo_config = build_ppo_config(

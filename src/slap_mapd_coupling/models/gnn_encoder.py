@@ -19,6 +19,15 @@ The move score (sec:method:model) also needs h^(L) at every vertex of the
 field of view, not only at the robot's own, and the message of the robot
 standing on a neighbour. `encode_padded` returns them next to z_i.
 
+With pooling on, the readout also carries the mean of h^(L) over the
+vertices the robot's router pools over, its whole window for the
+centralised router and its zone for the section-based one. The
+decentralised router does not pool. The mean is over real vertices
+only, never padding. The thesis leaves pooling TBD (tab:modelparams,
+issue #82), so GNNEncoderConfig.pooling has no default. The readout is the own embedding,
+then the message mean if communication is on, then the pooled mean, then
+the congestion feature last.
+
 `forward` is the unbatched oracle, one Observation (and its senders'
 Observations) in, one z_i out, and `embed_moves` gives its h_w and message
 per move slot. `forward_padded` and `encode_padded` are the batched paths
@@ -29,7 +38,7 @@ that both paths agree.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence
+from typing import Collection, Literal, Optional, Sequence
 
 import torch
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
@@ -57,7 +66,8 @@ Pooling = Literal["none", "mean"]
 
 
 class GNNEncoderConfig(BaseModel):
-    """L, the hidden width (tab:modelparams) and the communication switch."""
+    """L, the hidden width, the pooling (tab:modelparams) and the
+    communication switch."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -66,6 +76,8 @@ class GNNEncoderConfig(BaseModel):
     # No default. It must equal ExperimentConfig.communication, which
     # training/config.py::build_ppo_config checks.
     communication: bool
+    # No default, because the thesis leaves global pooling TBD (issue #82).
+    pooling: Pooling
 
 
 def _node_feature_vector(features: VertexFeatures) -> list[float]:
@@ -136,9 +148,11 @@ class GNNEncoder(nn.Module):
     @property
     def output_dim(self) -> int:
         """z_i's dimension: the own embedding, the mean of the messages
-        (only with communication on) and the congestion scalar."""
+        (only with communication on), the pooled mean (only with pooling on)
+        and the congestion scalar."""
         message_dim = self._node_embedding_dim if self.config.communication else 0
-        return self._node_embedding_dim + message_dim + 1
+        pooled_dim = self._node_embedding_dim if self.config.pooling == "mean" else 0
+        return self._node_embedding_dim + message_dim + pooled_dim + 1
 
     def _embed_vertices(
         self, graph: WarehouseGraph, observation: Observation
@@ -180,13 +194,19 @@ class GNNEncoder(nn.Module):
         agent_location: VertexId,
         observation: Observation,
         senders: Sequence[tuple[VertexId, Observation]] = (),
+        pool_vertices: Optional[Collection[VertexId]] = None,
     ) -> torch.Tensor:
         """z_i for one agent. `senders` holds the vertex and the own
         Observation of each agent it hears, and must stay empty with
-        communication off."""
+        communication off. `pool_vertices` are the vertices of the window to
+        pool over, the whole window if None, and must be None with pooling
+        off."""
         if senders and not self.config.communication:
             raise ValueError("senders were given but the encoder has communication off")
-        parts = [self._embed_view(graph, agent_location, observation)]
+        if pool_vertices is not None and self.config.pooling == "none":
+            raise ValueError("pool_vertices were given but the encoder has pooling off")
+        h, index = self._embed_vertices(graph, observation)
+        parts = [h[index[agent_location]]]
 
         if self.config.communication:
             if senders:
@@ -196,6 +216,14 @@ class GNNEncoder(nn.Module):
                 parts.append(messages.mean(dim=0))
             else:
                 parts.append(torch.zeros(self._node_embedding_dim))
+
+        if self.config.pooling == "mean":
+            pooled = set(observation.visible_vertices if pool_vertices is None else pool_vertices)
+            if not pooled or not pooled <= index.keys():
+                raise ValueError(
+                    f"pool_vertices must be a non-empty part of the window, got {pooled}"
+                )
+            parts.append(h[sorted(index[v] for v in pooled)].mean(dim=0))
 
         # the readout always includes delta_i(t); Observation.congestion is
         # always a concrete scalar (environment/observation.py), whether or
@@ -285,6 +313,7 @@ class GNNEncoder(nn.Module):
         sender_edge_mask: Optional[torch.Tensor] = None,
         sender_own_index: Optional[torch.Tensor] = None,
         sender_mask: Optional[torch.Tensor] = None,
+        pool_mask: Optional[torch.Tensor] = None,
     ) -> EncoderOutput:
         """Batched z_i (the readout), h^(L) at every vertex and the messages,
         over padded tensors. B is the batch size, N max_local_nodes, E the
@@ -303,6 +332,11 @@ class GNNEncoder(nn.Module):
         embedding as it is, and the receiver takes the mean over its masked
         senders, zero when there are none. `messages` holds the embedding of
         every sender block, padded ones included, so the caller masks them.
+
+        pool_mask [B,N] (1 to pool over, 0 otherwise) is given exactly when
+        pooling is on. The pooled term is the mean of h^(L) over the vertices
+        it marks, times node_mask so that padding never counts. The senders
+        get no pooled term, since a message is the sender's own embedding.
         """
         sender_tensors = (
             sender_node_features,
@@ -314,42 +348,48 @@ class GNNEncoder(nn.Module):
         )
         batch_size = node_features.shape[0]
         rows = torch.arange(batch_size, device=node_features.device)
+        if (pool_mask is None) != (self.config.pooling == "none"):
+            raise ValueError("pool_mask must be given exactly when pooling is on")
 
+        messages: Optional[torch.Tensor] = None
         if not self.config.communication:
             if any(tensor is not None for tensor in sender_tensors):
                 raise ValueError("sender tensors were given but the encoder has communication off")
             node_embeddings = self._embed_padded(node_features, node_mask, edge_index, edge_mask)
-            own_embedding = node_embeddings[rows, own_index]
-            z = torch.cat([own_embedding, congestion.unsqueeze(-1)], dim=-1)
-            return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=None)
+            parts = [node_embeddings[rows, own_index]]
+        else:
+            if (
+                sender_node_features is None
+                or sender_node_mask is None
+                or sender_edge_index is None
+                or sender_edge_mask is None
+                or sender_own_index is None
+                or sender_mask is None
+            ):
+                raise ValueError(f"communication is on, so all of {SENDER_KEYS} are required")
 
-        if (
-            sender_node_features is None
-            or sender_node_mask is None
-            or sender_edge_index is None
-            or sender_edge_mask is None
-            or sender_own_index is None
-            or sender_mask is None
-        ):
-            raise ValueError(f"communication is on, so all of {SENDER_KEYS} are required")
+            num_senders = sender_mask.shape[1]
+            embeddings = self._embed_padded(
+                torch.cat([node_features, sender_node_features.flatten(0, 1)]),
+                torch.cat([node_mask, sender_node_mask.flatten(0, 1)]),
+                torch.cat([edge_index, sender_edge_index.flatten(0, 1)]),
+                torch.cat([edge_mask, sender_edge_mask.flatten(0, 1)]),
+            )
+            node_embeddings = embeddings[:batch_size]  # [B,N,D]
+            sender_rows = torch.arange(embeddings.shape[0] - batch_size, device=embeddings.device)
+            messages = embeddings[batch_size:][sender_rows, sender_own_index.flatten()]
+            messages = messages.reshape(batch_size, num_senders, -1)  # [B,M,D]
 
-        num_senders = sender_mask.shape[1]
-        embeddings = self._embed_padded(
-            torch.cat([node_features, sender_node_features.flatten(0, 1)]),
-            torch.cat([node_mask, sender_node_mask.flatten(0, 1)]),
-            torch.cat([edge_index, sender_edge_index.flatten(0, 1)]),
-            torch.cat([edge_mask, sender_edge_mask.flatten(0, 1)]),
-        )
-        node_embeddings = embeddings[:batch_size]  # [B,N,D]
-        own_embedding = node_embeddings[rows, own_index]
-        sender_rows = torch.arange(embeddings.shape[0] - batch_size, device=embeddings.device)
-        messages = embeddings[batch_size:][sender_rows, sender_own_index.flatten()]
-        messages = messages.reshape(batch_size, num_senders, -1)  # [B,M,D]
+            count = sender_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
+            mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
+            parts = [node_embeddings[rows, own_index], mean_message]
 
-        count = sender_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
-        mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
+        if pool_mask is not None:
+            weight = (pool_mask * node_mask).unsqueeze(-1)  # [B,N,1]
+            pooled = (node_embeddings * weight).sum(dim=1) / weight.sum(dim=1).clamp(min=1.0)
+            parts.append(pooled)  # [B,D]
 
-        z = torch.cat([own_embedding, mean_message, congestion.unsqueeze(-1)], dim=-1)
+        z = torch.cat([*parts, congestion.unsqueeze(-1)], dim=-1)
         return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=messages)
 
     def forward_padded(
@@ -366,6 +406,7 @@ class GNNEncoder(nn.Module):
         sender_edge_mask: Optional[torch.Tensor] = None,
         sender_own_index: Optional[torch.Tensor] = None,
         sender_mask: Optional[torch.Tensor] = None,
+        pool_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Batched z_i (the readout), the `z` of `encode_padded`, which
         documents the arguments."""
@@ -382,4 +423,5 @@ class GNNEncoder(nn.Module):
             sender_edge_mask,
             sender_own_index,
             sender_mask,
+            pool_mask,
         ).z

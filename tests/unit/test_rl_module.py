@@ -32,9 +32,14 @@ def _line_graph(n: int) -> WarehouseGraph:
     return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
 
 
-def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig, communication):
+def _build_module(
+    graph: WarehouseGraph,
+    enc_config: LocalSubgraphEncodingConfig,
+    communication,
+    pooling: str = "none",
+):
     d_max = max_out_degree(graph)
-    base_space = encoded_observation_space(enc_config, d_max, communication)
+    base_space = encoded_observation_space(enc_config, d_max, communication, pooling=pooling)
     obs_space = masked_observation_space(base_space, d_max + 1)
     spec = RLModuleSpec(
         module_class=GNNActionMaskingRLModule,
@@ -45,6 +50,7 @@ def _build_module(graph: WarehouseGraph, enc_config: LocalSubgraphEncodingConfig
                 "num_rounds": 2,
                 "hidden_width": 8,
                 "communication": communication,
+                "pooling": pooling,
             },
             "policy_value_head_config": {"hidden_width": 8},
         },
@@ -106,7 +112,7 @@ def _stack(rows):
     return torch.as_tensor(np.stack(rows))
 
 
-def _two_robot_batch(graph, enc_config, communication, d_max):
+def _two_robot_batch(graph, enc_config, communication, d_max, pooling="none"):
     fleet = FleetState(
         agents={1: AgentState(agent_id=1, location=2), 2: AgentState(agent_id=2, location=3)}
     )
@@ -126,7 +132,9 @@ def _two_robot_batch(graph, enc_config, communication, d_max):
         override_penalty=0.5,
         congestion_reward_weight=0.1,
     )
-    encoded = encode_all_observations(graph, fleet, [], 0, config, enc_config, d_max)
+    encoded = encode_all_observations(
+        graph, fleet, [], 0, config, enc_config, d_max, pooling=pooling
+    )
     return {Columns.OBS: _stack([item.as_rllib_dict() for item in encoded.values()])}
 
 
@@ -148,15 +156,16 @@ def test_the_actor_gets_the_slot_inputs_and_the_critic_only_z(communication):
     assert (set(MOVE_SENDER_KEYS) | {"messages"} <= set(actor)) == communication
 
 
+@pytest.mark.parametrize("pooling", ["none", "mean"])
 @pytest.mark.parametrize("communication", [False, True])
-def test_every_forward_mode_and_the_value_run_with_the_dict_actor_output(communication):
+def test_every_forward_mode_and_the_value_run_with_the_dict_actor_output(communication, pooling):
     graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
-    module, d_max = _build_module(graph, enc_config, communication)
+    module, d_max = _build_module(graph, enc_config, communication, pooling)
 
     def fresh_batch():
         # the masking module strips the action mask off the batch it is given
-        return _two_robot_batch(graph, enc_config, communication, d_max)
+        return _two_robot_batch(graph, enc_config, communication, d_max, pooling)
 
     with torch.no_grad():
         inference = module.forward_inference(fresh_batch())[Columns.ACTION_DIST_INPUTS]
@@ -166,3 +175,28 @@ def test_every_forward_mode_and_the_value_run_with_the_dict_actor_output(communi
     assert inference.shape == exploration.shape == (2, d_max + 1)
     assert torch.equal(inference, exploration)
     assert values.shape == (2,)
+
+
+def test_the_module_passes_the_pool_mask_to_the_encoder():
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    module, d_max = _build_module(graph, enc_config, False, "mean")
+    batch = _two_robot_batch(graph, enc_config, False, d_max, "mean")
+    observations = batch[Columns.OBS]["observations"]
+    gnn = module.encoder.gnn
+    keys = ("node_features", "node_mask", "edge_index", "edge_mask", "own_index", "congestion")
+
+    def z_of(obs):
+        with torch.no_grad():
+            z = module.encoder({Columns.OBS: obs})[ENCODER_OUT][CRITIC]
+            expected = gnn.encode_padded(*(obs[k] for k in keys), pool_mask=obs["pool_mask"]).z
+        assert torch.equal(z, expected)
+        return z
+
+    z = z_of(observations)
+    assert z.shape == (2, gnn.output_dim)
+    own_vertex_only = dict(observations)
+    own_vertex_only["pool_mask"] = torch.nn.functional.one_hot(
+        observations["own_index"], num_classes=8
+    ).float()
+    assert not torch.allclose(z, z_of(own_vertex_only))

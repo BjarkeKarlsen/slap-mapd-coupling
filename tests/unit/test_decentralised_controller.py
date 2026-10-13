@@ -82,6 +82,7 @@ def _build_module(
                 "num_rounds": 1,
                 "hidden_width": 8,
                 "communication": communication,
+                "pooling": "none",
             },
             "policy_value_head_config": {"hidden_width": 8},
         },
