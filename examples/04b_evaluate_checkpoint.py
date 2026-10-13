@@ -51,7 +51,6 @@ from pathlib import Path
 import numpy as np
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
-from slap_mapd_coupling.controllers.decentralised import _sample_legal_slot
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -64,6 +63,7 @@ from slap_mapd_coupling.instances.generator import (
 )
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
+from slap_mapd_coupling.training.policy import _sample_legal_slot
 
 FLEET_SIZE = 3
 CHECKPOINT_DIR = Path(__file__).parent / "output" / "04_decentralised_training_checkpoint"

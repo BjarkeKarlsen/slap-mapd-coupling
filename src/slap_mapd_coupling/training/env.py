@@ -30,12 +30,17 @@ Every window is checked when the adapter is built, so a rollout never meets a
 window above max_local_nodes or a move that leads outside the window. A
 window is never truncated (#66).
 
+Each observation build that feeds a decision is timed and recorded on the
+core's log as routing time, so the mean decision runtime of a learned arm
+covers producing the joint action and not only decoding slots.
+
 Training episodes cycle through `train_seeds` in order, so every training
 seed is used equally often. The thesis fixes the split, not the order.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Optional, Sequence
 
@@ -282,6 +287,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         # One window and one pool for every robot, since the builder raises
         # if a robot is missing. The decentralised arm passes None, which is
         # the field of view.
+        start = time.perf_counter()
         locations = self.core.fleet.locations()
         windows: Optional[dict[AgentId, tuple[VertexId, ...]]] = None
         pool_vertices: Optional[dict[AgentId, frozenset[VertexId]]] = None
@@ -301,4 +307,9 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             pooling=self._pooling,
             pool_vertices=pool_vertices,
         )
-        return {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}
+        observations = {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}
+        # The build is part of producing the joint action, so it counts as routing time
+        # (sec:impl:cost). The observation after the last step feeds no decision.
+        if self.core.t < self._config.horizon:
+            self.core.log.record_routing_runtime(time.perf_counter() - start)
+        return observations

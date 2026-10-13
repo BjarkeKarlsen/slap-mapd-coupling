@@ -1,6 +1,8 @@
 """Unit tests for slap_mapd_coupling.evaluation.evaluator."""
 
 import json
+import subprocess
+import sys
 
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -166,3 +168,33 @@ def _run_traced(graph: WarehouseGraph, config: ExperimentConfig, path):
     capacities = {v: 10.0 for v in storage_vertices}
     counts = {"tea": {storage_vertices[0]: 5, storage_vertices[1]: 5}}
     return run_episode(graph, skus, counts, capacities, config, trace_path=path)
+
+
+def test_a_planner_episode_never_imports_ray():
+    """A planner run stays free of Ray. The adapter that a learned arm runs through is
+    imported inside that branch of run_episode only. A fresh process is needed, since
+    this one has imported Ray for other tests."""
+    code = """
+import sys
+import slap_mapd_coupling.storage.fixed
+from slap_mapd_coupling.core.experiment_config import ExperimentConfig
+from slap_mapd_coupling.core.storage_state import SkuType
+from slap_mapd_coupling.evaluation.evaluator import run_episode
+from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+
+graph = generate_warehouse_graph(GeneratorParams(
+    max_num_aisles=6, max_aisle_length=6, max_num_cross_aisles=5, one_way_fraction=0.0,
+    wait_cost=0.0, num_storage_vertices=6, num_delivery_vertices=2, num_endpoints=4, seed=0))
+storage = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
+config = ExperimentConfig(
+    storage_mode="fixed", planner="token_passing", congestion_sensitive=False,
+    communication=False, num_agents=3, arrival_rate=1.0, seed=7, horizon=10, wait_cost=0.0,
+    observation_depth=2)
+metrics = run_episode(
+    graph, {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}, {"tea": {storage[0]: 5}},
+    {v: 10.0 for v in storage}, config)
+assert metrics.horizon == 10
+assert "ray" not in sys.modules, "a planner episode imported ray"
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

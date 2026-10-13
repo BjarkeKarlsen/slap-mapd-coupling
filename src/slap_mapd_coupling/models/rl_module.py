@@ -138,7 +138,7 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
 
 
 class GNNActionMaskingRLModule(ActionMaskingTorchRLModule, GNNPPOTorchRLModule):
-    """The actual RLModule class passed to RLlib's RLModuleSpec for the
-    decentralised regime's training (training/config.py, #30): #26's
-    masking wrapper composed with the GNN architecture (#27/#28) instead
-    of RLlib's Catalog-built default -- see module docstring for how."""
+    """The RLModule class passed to RLlib's RLModuleSpec for every learned arm
+    (training/config.py): #26's masking wrapper composed with the GNN
+    architecture (#27/#28) instead of RLlib's Catalog-built default. See the
+    module docstring for how."""
