@@ -22,8 +22,9 @@ Summarise a file from the shell with
 With more than one file it also prints the fraction of episodes with a stuck
 agent and the fraction with a wandering agent (--min-progress sets the share of
 moves that must bring an agent closer to its goal). It also prints the longest
-whole-fleet still run, which is the number to choose --dead-after from, and with
---dead-after N the fraction of episodes where the fleet was dead for N steps.
+whole-fleet still run, which is the number to choose --dead-after from. With
+--dead-after N (default 50) it also prints the fraction of episodes where the fleet
+was dead for N steps.
 """
 
 from __future__ import annotations
@@ -40,6 +41,13 @@ from slap_mapd_coupling.core.tasks import active_tasks_by_agent
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 
 TRACE_FORMAT = 1
+
+# Steps of standing still that the command line counts as dead when --dead-after is not
+# given. It is a display setting for reading a trace, not a study parameter. It is about
+# 3.5 times the longest whole-fleet still run seen in a healthy episode (14 steps, example
+# 04 after 7 training iterations), and that is one episode of a barely trained policy, so
+# a trained policy may wait longer. The study value, if there is one, is still open.
+DEFAULT_DEAD_AFTER = 50
 
 
 class EpisodeTraceWriter:
@@ -214,9 +222,10 @@ def summarise_trace(
     quarter of the episode. `min_progress` is the share of goal-holding moves
     that must bring an agent closer to its goal, below which it is listed as
     wandering. Both are display settings for a diagnostic, not study
-    parameters. `dead_after` has no default because the thesis leaves the
-    number open. Without it the summary still reports the longest run in which
-    the whole fleet stood still, which is the number to choose it from.
+    parameters. `dead_after` is off unless given, and the command line passes
+    DEFAULT_DEAD_AFTER. The thesis leaves the study value open. Without it the
+    summary still reports the longest run in which the whole fleet stood
+    still, which is the number to choose it from.
     """
     if not steps:
         raise ValueError("the trace has no steps.")
@@ -389,9 +398,14 @@ def main(argv: Iterable[str] | None = None) -> None:
         "--min-progress", type=float, default=0.5, help="share of moves closer to the goal"
     )
     parser.add_argument(
-        "--dead-after", type=int, default=None, help="steps standing still that count as dead"
+        "--dead-after",
+        type=int,
+        default=DEFAULT_DEAD_AFTER,
+        help=f"steps standing still that count as dead (default {DEFAULT_DEAD_AFTER})",
     )
     args = parser.parse_args(None if argv is None else list(argv))
+    if args.dead_after < 1:
+        parser.error("--dead-after must be at least 1")
     summaries = []
     for path in args.traces:
         header, steps = load_trace(path)
@@ -407,9 +421,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         share = wandering / total
         longest = max(s.longest_fleet_still_run for s in summaries)
         print(f"longest whole-fleet still run over all episodes: {longest}")
-        if args.dead_after is not None:
-            dead = sum(1 for s in summaries if s.fleet_dead_at is not None)
-            print(f"{dead} of {total} episodes had a dead fleet (N = {args.dead_after})")
+        dead = sum(1 for s in summaries if s.fleet_dead_at is not None)
+        print(f"{dead} of {total} episodes had a dead fleet (N = {args.dead_after})")
         print(f"{wandering} of {total} episodes had a wandering agent ({share:.0%})")
 
 

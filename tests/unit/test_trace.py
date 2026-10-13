@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -12,6 +14,7 @@ from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.spaces import slot_for_action
 from slap_mapd_coupling.evaluation.evaluator import _to_run_metrics
 from slap_mapd_coupling.evaluation.trace import (
+    DEFAULT_DEAD_AFTER,
     EpisodeTraceWriter,
     format_summary,
     load_trace,
@@ -335,3 +338,42 @@ def test_writing_a_trace_does_not_change_the_run_metrics(tmp_path):
         return _to_run_metrics(env, config).model_dump(exclude={"mean_decision_runtime_seconds"})
 
     assert run(None) == run(tmp_path / "trace.jsonl")
+
+
+def _still_trace(tmp_path: Path, num_steps: int) -> str:
+    """A one-agent trace in which the agent holds a task and never moves."""
+    lines = [json.dumps({"type": "header", "format": 1, "edges": []})]
+    for t in range(1, num_steps + 1):
+        agent = {
+            "at": 1,
+            "intent": None,
+            "moved": False,
+            "overridden": False,
+            "task": 1,
+            "phase": "to_pickup",
+            "goal": 2,
+        }
+        step = {"type": "step", "t": t, "completed": 0, "released": 1, "backlog": 1}
+        lines.append(json.dumps({**step, "agents": {"1": agent}}))
+    path = tmp_path / "still.jsonl"
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_cli_counts_the_fleet_as_dead_after_50_still_steps_unless_told_otherwise(
+    tmp_path, capsys
+):
+    assert DEFAULT_DEAD_AFTER == 50
+    path = _still_trace(tmp_path, 60)
+    main([path])
+    assert "dead for 50 steps, whole fleet: t = 50" in capsys.readouterr().out
+    main([path, "--dead-after", "10"])
+    assert "dead for 10 steps, whole fleet: t = 10" in capsys.readouterr().out
+    # A run that is still for fewer steps than N is not dead.
+    main([_still_trace(tmp_path, 49)])
+    assert "whole fleet: never" in capsys.readouterr().out
+
+
+def test_cli_rejects_a_dead_after_below_one(tmp_path):
+    with pytest.raises(SystemExit):
+        main([_still_trace(tmp_path, 3), "--dead-after", "0"])
