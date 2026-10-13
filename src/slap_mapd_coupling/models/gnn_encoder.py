@@ -15,14 +15,20 @@ embeddings are recomputed with the current weights, so the receiver's loss
 reaches the sender's embedding through the shared encoder (issue #91).
 `forward_padded` embeds the receivers and their senders in one pass.
 
+The move score (sec:method:model) also needs h^(L) at every vertex of the
+field of view, not only at the robot's own, and the message of the robot
+standing on a neighbour. `encode_padded` returns them next to z_i.
+
 `forward` is the unbatched oracle, one Observation (and its senders'
-Observations) in, one z_i out. `forward_padded` is the batched path over the
-padded tensors of models/local_subgraph_encoding.py. Tests check that both
-paths agree.
+Observations) in, one z_i out, and `embed_moves` gives its h_w and message
+per move slot. `forward_padded` and `encode_padded` are the batched paths
+over the padded tensors of models/local_subgraph_encoding.py. Tests check
+that both paths agree.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import torch
@@ -83,6 +89,16 @@ def _local_undirected_neighbours(
     return neighbours
 
 
+@dataclass(frozen=True)
+class EncoderOutput:
+    """What GNNEncoder.encode_padded returns. B is the batch size, N
+    max_local_nodes, M max_messages and D the embedding width."""
+
+    z: torch.Tensor  # [B, output_dim], the readout
+    node_embeddings: torch.Tensor  # [B, N, D], h^(L) at every vertex of each field of view
+    messages: Optional[torch.Tensor]  # [B, M, D], the sender blocks' embeddings, None if off
+
+
 class GNNEncoder(nn.Module):
     """z_i (the readout), via L rounds of the message-passing step over
     the field of view. L = 0 skips the rounds, so the embedding is the raw
@@ -120,10 +136,11 @@ class GNNEncoder(nn.Module):
         message_dim = self._node_embedding_dim if self.config.communication else 0
         return self._node_embedding_dim + message_dim + 1
 
-    def _embed_view(
-        self, graph: WarehouseGraph, location: VertexId, observation: Observation
-    ) -> torch.Tensor:
-        """h^(L) at `location`, from the field of view in `observation`."""
+    def _embed_vertices(
+        self, graph: WarehouseGraph, observation: Observation
+    ) -> tuple[torch.Tensor, dict[VertexId, int]]:
+        """h^(L) at every visible vertex of `observation`, [V, D], and the
+        row of each vertex."""
         visible = observation.visible_vertices
         index = {v: i for i, v in enumerate(visible)}
         h = torch.tensor(
@@ -144,6 +161,13 @@ class GNNEncoder(nn.Module):
                     messages[i] = phi_r(pairwise).mean(dim=0)
                 h = psi_r(torch.cat([h, messages], dim=-1))
 
+        return h, index
+
+    def _embed_view(
+        self, graph: WarehouseGraph, location: VertexId, observation: Observation
+    ) -> torch.Tensor:
+        """h^(L) at `location`, from the field of view in `observation`."""
+        h, index = self._embed_vertices(graph, observation)
         return h[index[location]]
 
     def forward(
@@ -176,15 +200,38 @@ class GNNEncoder(nn.Module):
         parts.append(torch.tensor([observation.congestion], dtype=torch.float32))
         return torch.cat(parts, dim=-1)
 
+    def embed_moves(
+        self,
+        graph: WarehouseGraph,
+        agent_location: VertexId,
+        observation: Observation,
+        senders: Sequence[tuple[VertexId, Observation]] = (),
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """The inputs of the move score besides z_i, for each outgoing
+        neighbour w of `agent_location` in slot order. Returns h_w^(L) from
+        the agent's own field of view, [K, D], and the message of the sender
+        standing on w, [K, D], zero where nobody it hears stands there. The
+        message is None with communication off. `senders` is as in forward."""
+        if senders and not self.config.communication:
+            raise ValueError("senders were given but the encoder has communication off")
+        h, index = self._embed_vertices(graph, observation)
+        targets = graph.out_neighbours(agent_location)
+        h_w = h[[index[w] for w in targets]]
+        if not self.config.communication:
+            return h_w, None
+
+        sent = {location: self._embed_view(graph, location, view) for location, view in senders}
+        zero = torch.zeros(self._node_embedding_dim)
+        return h_w, torch.stack([sent.get(w, zero) for w in targets])
+
     def _embed_padded(
         self,
         node_features: torch.Tensor,
         node_mask: torch.Tensor,
         edge_index: torch.Tensor,
         edge_mask: torch.Tensor,
-        own_index: torch.Tensor,
     ) -> torch.Tensor:
-        """h^(L) at the own vertex of each of R padded views, [R, D]. Each
+        """h^(L) at every vertex of each of R padded views, [R, N, D]. Each
         edge gives both directions, phi_r runs once per directed edge, and
         the results are summed per receiving vertex and divided by its masked
         degree (minimum 1). This equals the mean over each vertex's neighbour
@@ -218,9 +265,9 @@ class GNNEncoder(nn.Module):
                 m = (summed / degree).reshape(num_views, max_nodes, -1)
                 h = psi_r(torch.cat([h, m], dim=-1))
 
-        return h[torch.arange(num_views, device=h.device), own_index]
+        return h
 
-    def forward_padded(
+    def encode_padded(
         self,
         node_features: torch.Tensor,
         node_mask: torch.Tensor,
@@ -234,9 +281,10 @@ class GNNEncoder(nn.Module):
         sender_edge_mask: Optional[torch.Tensor] = None,
         sender_own_index: Optional[torch.Tensor] = None,
         sender_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Batched z_i (the readout) over padded tensors. B is the batch
-        size, N max_local_nodes, E the edge list length, M max_messages.
+    ) -> EncoderOutput:
+        """Batched z_i (the readout), h^(L) at every vertex and the messages,
+        over padded tensors. B is the batch size, N max_local_nodes, E the
+        edge list length, M max_messages.
 
         node_features [B,N,NODE_FEATURE_DIM], node_mask [B,N], edge_index
         [B,E,2] (int64, one row per undirected pair, padded rows point at
@@ -249,7 +297,8 @@ class GNNEncoder(nn.Module):
         are given exactly when communication is on. The B receivers and the
         B*M senders share one embedding pass. A message is the sender's
         embedding as it is, and the receiver takes the mean over its masked
-        senders, zero when there are none.
+        senders, zero when there are none. `messages` holds the embedding of
+        every sender block, padded ones included, so the caller masks them.
         """
         sender_tensors = (
             sender_node_features,
@@ -260,14 +309,15 @@ class GNNEncoder(nn.Module):
             sender_mask,
         )
         batch_size = node_features.shape[0]
+        rows = torch.arange(batch_size, device=node_features.device)
 
         if not self.config.communication:
             if any(tensor is not None for tensor in sender_tensors):
                 raise ValueError("sender tensors were given but the encoder has communication off")
-            own_embedding = self._embed_padded(
-                node_features, node_mask, edge_index, edge_mask, own_index
-            )
-            return torch.cat([own_embedding, congestion.unsqueeze(-1)], dim=-1)
+            node_embeddings = self._embed_padded(node_features, node_mask, edge_index, edge_mask)
+            own_embedding = node_embeddings[rows, own_index]
+            z = torch.cat([own_embedding, congestion.unsqueeze(-1)], dim=-1)
+            return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=None)
 
         if (
             sender_node_features is None
@@ -285,12 +335,47 @@ class GNNEncoder(nn.Module):
             torch.cat([node_mask, sender_node_mask.flatten(0, 1)]),
             torch.cat([edge_index, sender_edge_index.flatten(0, 1)]),
             torch.cat([edge_mask, sender_edge_mask.flatten(0, 1)]),
-            torch.cat([own_index, sender_own_index.flatten()]),
         )
-        own_embedding = embeddings[:batch_size]
-        messages = embeddings[batch_size:].reshape(batch_size, num_senders, -1)  # [B,M,D]
+        node_embeddings = embeddings[:batch_size]  # [B,N,D]
+        own_embedding = node_embeddings[rows, own_index]
+        sender_rows = torch.arange(embeddings.shape[0] - batch_size, device=embeddings.device)
+        messages = embeddings[batch_size:][sender_rows, sender_own_index.flatten()]
+        messages = messages.reshape(batch_size, num_senders, -1)  # [B,M,D]
 
         count = sender_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
         mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
 
-        return torch.cat([own_embedding, mean_message, congestion.unsqueeze(-1)], dim=-1)
+        z = torch.cat([own_embedding, mean_message, congestion.unsqueeze(-1)], dim=-1)
+        return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=messages)
+
+    def forward_padded(
+        self,
+        node_features: torch.Tensor,
+        node_mask: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_mask: torch.Tensor,
+        own_index: torch.Tensor,
+        congestion: torch.Tensor,
+        sender_node_features: Optional[torch.Tensor] = None,
+        sender_node_mask: Optional[torch.Tensor] = None,
+        sender_edge_index: Optional[torch.Tensor] = None,
+        sender_edge_mask: Optional[torch.Tensor] = None,
+        sender_own_index: Optional[torch.Tensor] = None,
+        sender_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Batched z_i (the readout), the `z` of `encode_padded`, which
+        documents the arguments."""
+        return self.encode_padded(
+            node_features,
+            node_mask,
+            edge_index,
+            edge_mask,
+            own_index,
+            congestion,
+            sender_node_features,
+            sender_node_mask,
+            sender_edge_index,
+            sender_edge_mask,
+            sender_own_index,
+            sender_mask,
+        ).z
