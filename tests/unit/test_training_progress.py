@@ -99,7 +99,14 @@ def test_format_iteration_prints_the_return_only_when_it_is_a_finite_number():
     }
     line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": 1.5}})
     assert line.startswith("  iter 2/5:")
-    assert "tasks_completed=3" in line and "episode_return_mean=1.5" in line
+    assert line == (
+        "  iter 2/5: episode_return_mean=1.5 tasks_completed=3 tasks_released=10 backlog=7 "
+        "steps_since_last_completion=120 standing_still_fraction=0.25"
+    )
+    big = {**full, "tasks_released": 1234.5, "episode_return_mean": 1390.04}
+    line = format_iteration(1, 1, {"env_runners": big})
+    assert "tasks_released=1234" in line or "tasks_released=1235" in line
+    assert "episode_return_mean=1390.0" in line and "e+" not in line
     for missing in (None, float("nan")):
         line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": missing}})
         assert "no episode ended" in line and "episode_return_mean" not in line

@@ -199,12 +199,11 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         )
 
 
-_ITERATION_KEYS = (
+_COUNT_KEYS = (
     "tasks_completed",
     "tasks_released",
     "backlog",
     "steps_since_last_completion",
-    "standing_still_fraction",
 )
 
 
@@ -213,17 +212,26 @@ def _is_number(value: Any) -> bool:
 
 
 def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
-    """One line per training iteration. The episode return is printed only
-    when an episode ended, since most iterations have none."""
+    """One line per training iteration, in plain numbers (no exponents).
+
+    The episode return mean comes first because it is the number PPO
+    reports. Most iterations have none, since an episode is longer than an
+    iteration, and then the line says so.
+    """
     runners = result.get("env_runners", {})
-    parts = []
-    for key in _ITERATION_KEYS:
-        value = runners.get(key)
-        parts.append(f"{key}={value:.3g}" if _is_number(value) else f"{key}=n/a")
     episode_return = runners.get("episode_return_mean")
-    parts.append(
-        f"episode_return_mean={episode_return:.3g}"
+    parts = [
+        f"episode_return_mean={episode_return:.1f}"
         if _is_number(episode_return)
         else "no episode ended"
+    ]
+    for key in _COUNT_KEYS:
+        value = runners.get(key)
+        parts.append(f"{key}={value:.0f}" if _is_number(value) else f"{key}=n/a")
+    fraction = runners.get("standing_still_fraction")
+    parts.append(
+        f"standing_still_fraction={fraction:.2f}"
+        if _is_number(fraction)
+        else "standing_still_fraction=n/a"
     )
     return f"  iter {i}/{n}: " + " ".join(parts)
