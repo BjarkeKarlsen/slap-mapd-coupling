@@ -103,7 +103,7 @@ def test_observations_carry_the_sender_keys_exactly_when_communication_is_on(com
         for aid in env.agents:
             keys = set(obs[aid]["observations"])
             assert (set(SENDER_KEYS) <= keys) == communication
-            assert {"move_target_index", "move_target_mask"} <= keys
+            assert "move_target_index" in keys
             assert ({"move_sender_index", "move_sender_mask"} <= keys) == communication
             assert env.observation_spaces[aid].contains(obs[aid])
         obs, *_ = env.step({aid: 0 for aid in env.agents})

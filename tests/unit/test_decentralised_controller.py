@@ -382,7 +382,6 @@ def test_batch_stacks_every_observation_key_including_the_move_slot_arrays(commu
     assert set(observations) == set(encoded[1].as_rllib_dict()["observations"])
     assert observations["move_target_index"].shape == (3, d_max)
     assert observations["move_target_index"].dtype == torch.int64
-    assert observations["move_target_mask"].shape == (3, d_max)
     assert ("move_sender_index" in observations) == communication
     assert ("move_sender_mask" in observations) == communication
 

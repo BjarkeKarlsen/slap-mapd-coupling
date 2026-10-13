@@ -110,20 +110,6 @@ def check_slot_targets(
                 )
 
 
-def check_move_slots(observation_space: gym.spaces.Dict, num_actions: int) -> None:
-    """The move score gives one logit per move slot, so the slot arrays of
-    `observation_space` must have length d_max = num_actions - 1, the size of
-    the action mask minus the wait slot."""
-    shape = observation_space["move_target_index"].shape
-    length = shape[0] if shape else 0
-    if length != num_actions - 1:
-        raise ValueError(
-            f"the observation's move slot arrays have length {length} but the action space has "
-            f"{num_actions} actions, so d_max={num_actions - 1}. They must be built from the "
-            "same graph (environment/spaces.py::max_out_degree)."
-        )
-
-
 @dataclass(frozen=True)
 class EncodedView:
     """One robot's padded field of view, without a batch dimension. It is
@@ -137,7 +123,6 @@ class EncodedView:
     location: VertexId  # l_i(t)
     move_targets: tuple[VertexId, ...]  # N+(l_i(t)) in slot order
     move_target_index: np.ndarray  # [d_max] int64, local index of the vertex slot k leads to
-    move_target_mask: np.ndarray  # [d_max], 1.0 where the slot exists
 
 
 @dataclass(frozen=True)
@@ -153,7 +138,6 @@ class EncodedObservation:
     congestion: float
     action_mask: np.ndarray  # [num_actions], {0.0, 1.0}, to_action_mask(mask)
     move_target_index: np.ndarray  # [d_max] int64, local index of the vertex slot k leads to
-    move_target_mask: np.ndarray  # [d_max], 1.0 where the slot exists (repeats action_mask[1:])
     sender_node_features: Optional[np.ndarray] = None  # [max_messages, N, NODE_FEATURE_DIM]
     sender_node_mask: Optional[np.ndarray] = None  # [max_messages, N]
     sender_edge_index: Optional[np.ndarray] = None  # [max_messages, E_max, 2] int64
@@ -174,7 +158,6 @@ class EncodedObservation:
             "own_index": self.own_index,
             "congestion": np.float32(self.congestion),
             "move_target_index": self.move_target_index,
-            "move_target_mask": self.move_target_mask,
         }
         if self.sender_mask is not None:
             observations.update(
@@ -220,7 +203,6 @@ def encoded_observation_space(
         "move_target_index": gym.spaces.Box(
             low=0, high=num_nodes - 1, shape=(d_max,), dtype=np.int64
         ),
-        "move_target_mask": gym.spaces.Box(low=0.0, high=1.0, shape=(d_max,), dtype=np.float32),
     }
     if communication:
         m = config.max_messages
@@ -321,10 +303,8 @@ def encode_view(
                 pairs.add(pair)
 
     move_target_index = np.zeros(d_max, dtype=np.int64)
-    move_target_mask = np.zeros(d_max, dtype=np.float32)
     for k, w in enumerate(move_targets):
         move_target_index[k] = index[w]
-        move_target_mask[k] = 1.0
 
     return EncodedView(
         node_features=node_features,
@@ -335,7 +315,6 @@ def encode_view(
         location=location,
         move_targets=move_targets,
         move_target_index=move_target_index,
-        move_target_mask=move_target_mask,
     )
 
 
@@ -400,7 +379,6 @@ def _assemble(
         congestion=observation.congestion,
         action_mask=to_action_mask(mask),
         move_target_index=view.move_target_index,
-        move_target_mask=view.move_target_mask,
         **senders,
     )
 

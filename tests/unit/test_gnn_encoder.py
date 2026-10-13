@@ -786,7 +786,7 @@ def test_encode_padded_move_inputs_match_the_unbatched_embed_moves(num_rounds, c
                 observation,
                 _heard_senders(scenario, agent_id),
             )
-        slots = int(tensors["move_target_mask"][row].sum())
+        slots = len(graph.out_neighbours(fleet.locations()[agent_id]))
         assert h_w.shape == (slots, encoder.embedding_dim)
         gathered_h = out.node_embeddings[row, tensors["move_target_index"][row]][:slots]
         assert torch.allclose(gathered_h, h_w, atol=1e-5)

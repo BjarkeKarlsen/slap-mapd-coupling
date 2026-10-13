@@ -383,18 +383,17 @@ def _encode_star(locations, communication, max_messages=2, max_local_nodes=6):
     return graph, encoding_config, encoded
 
 
-def test_move_target_index_follows_increasing_vertex_number_and_pads_with_a_mask():
+def test_move_target_index_follows_increasing_vertex_number_and_pads_with_zero():
     _, _, encoded = _encode_star({1: 0, 2: 1}, communication=False)
 
     centre, leaf = encoded[1], encoded[2]
     assert centre.move_target_index.dtype == np.int64
-    assert centre.move_target_mask.tolist() == [1.0, 1.0, 1.0]
+    assert centre.action_mask[1:].tolist() == [1.0, 1.0, 1.0]
     # eta is the distance back to the robot's own vertex, so it names each leaf's cost
     assert centre.node_features[centre.move_target_index, 4].tolist() == [1.0, 2.0, 3.0]
-    assert leaf.move_target_mask.tolist() == [1.0, 0.0, 0.0]  # one neighbour, two padding slots
+    assert leaf.action_mask[1:].tolist() == [1.0, 0.0, 0.0]  # one neighbour, two padding slots
     assert leaf.move_target_index[0] != leaf.own_index
     assert leaf.move_target_index[1:].tolist() == [0, 0]
-    assert leaf.move_target_mask.tolist() == leaf.action_mask[1:].tolist()
 
 
 @pytest.mark.parametrize("communication", [False, True])
@@ -403,7 +402,6 @@ def test_encoded_observation_space_declares_the_slot_arrays(communication):
     space = encoded_observation_space(encoding_config, max_out_degree(graph), communication)
 
     assert space["move_target_index"].shape == (3,)
-    assert space["move_target_mask"].shape == (3,)
     assert ("move_sender_index" in space.spaces) == communication
     assert ("move_sender_mask" in space.spaces) == communication
     for item in encoded.values():

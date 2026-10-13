@@ -9,11 +9,7 @@ from slap_mapd_coupling.environment.spaces import max_out_degree
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
-from slap_mapd_coupling.models.local_subgraph_encoding import (
-    LocalSubgraphEncodingConfig,
-    check_move_slots,
-    encoded_observation_space,
-)
+from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.config import (
     PPOHyperparameters,
     SeedSplitConfig,
@@ -146,20 +142,10 @@ def test_build_ppo_config_rejects_a_neighbour_outside_the_field_of_view():
         )
 
 
-def test_the_head_config_has_no_action_count_and_the_slot_arrays_must_match_the_action_space():
-    """The head's size follows the observation's slot arrays, so the only
-    mismatch left to catch is between those arrays and the action space."""
+def test_the_head_config_has_no_action_count():
+    """The head's size follows the observation's slot arrays."""
     with pytest.raises(ValueError):
         PolicyValueHeadConfig(hidden_width=8, num_actions=5)  # type: ignore[call-arg]
-
-    graph = _graph()
-    d_max = max_out_degree(graph)
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
-    space = encoded_observation_space(enc_config, d_max, communication=False)
-
-    check_move_slots(space, d_max + 1)
-    with pytest.raises(ValueError, match="move slot arrays"):
-        check_move_slots(space, d_max + 2)
 
 
 @pytest.mark.parametrize("experiment_communication", [False, True])

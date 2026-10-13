@@ -25,7 +25,7 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
 )
 
 _ENCODER_KEYS = ("node_features", "node_mask", "edge_index", "edge_mask", "own_index", "congestion")
-_SLOT_KEYS = ("move_target_index", "move_target_mask", *MOVE_SENDER_KEYS)
+_SLOT_KEYS = ("move_target_index", *MOVE_SENDER_KEYS)
 
 
 def _star_graph() -> WarehouseGraph:
@@ -107,8 +107,8 @@ def _model(num_rounds: int, communication: bool, hidden_width: int = 8) -> GNNPo
 
 
 def _call(model: GNNPolicyValueModel, tensors: dict[str, torch.Tensor]):
-    """The model on a batch. The head reads the slot arrays but not the target mask."""
-    return model(**{key: value for key, value in tensors.items() if key != "move_target_mask"})
+    """The model on a batch."""
+    return model(**tensors)
 
 
 def _encode(model: GNNPolicyValueModel, tensors: dict[str, torch.Tensor]):
@@ -198,7 +198,6 @@ def test_gnn_policy_value_model_logits_are_unmasked_raw_values():
     tensors = _batch(False)
     logits, _ = _call(_model(0, False), tensors)
     assert torch.isfinite(logits).all()
-    assert tensors["move_target_mask"][1].tolist() == [1.0, 0.0, 0.0]  # a leaf has one slot
 
 
 @pytest.mark.parametrize("num_rounds", [0, 2])
