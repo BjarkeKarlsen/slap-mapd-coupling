@@ -29,25 +29,29 @@ class ConnectivityReport(BaseModel):
 
 
 class WellFormednessReport(BaseModel):
-    """(b) well-formedness (Ma et al. 2017), adapted for a directed graph:
-    every pair of endpoints needs a path in BOTH directions, each
-    avoiding every third endpoint.
+    """(b) well-formedness (Ma et al. 2017, sec:pf:agents), adapted for a
+    directed graph: there are at least m non-task endpoints, and every pair of
+    endpoints needs a path in BOTH directions, each avoiding every third
+    endpoint. A non-task endpoint is a vertex of V_ep in neither V_str nor
+    V_del. The pairwise check takes the endpoints to be V_ep u V_str u V_del.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ok: bool
-    num_endpoints: NonNegativeInt  # |V_ep u V_str u V_del|
-    required_endpoints: NonNegativeInt  # m (fleet size)
-    endpoint_count_ok: bool
+    num_endpoints: NonNegativeInt  # |V_ep u V_str u V_del|, for the pairwise check
+    num_non_task_endpoints: NonNegativeInt  # |V_ep minus (V_str u V_del)|
+    required_endpoints: NonNegativeInt  # m (fleet size), the least number of non-task endpoints
+    endpoint_count_ok: bool  # num_non_task_endpoints >= required_endpoints
     blocked_pairs: tuple[tuple[VertexId, VertexId, VertexId], ...]  # (v, w, blocking_endpoint)
 
     @property
     def failure_rate(self) -> float:
         """Fraction of ordered endpoint pairs that are blocked.
 
-        0.0 if endpoint_count_ok is False (the pairwise check isn't
-        meaningful below m endpoints) or fewer than 2 endpoints exist.
+        0.0 if endpoint_count_ok is False (the pairwise check is skipped
+        when there are too few non-task endpoints) or fewer than 2
+        endpoints exist.
         """
         if not self.endpoint_count_ok or self.num_endpoints < 2:
             return 0.0
@@ -120,9 +124,14 @@ def check_connectivity(
 
 
 def check_well_formedness(graph: WarehouseGraph, fleet_size: int) -> WellFormednessReport:
-    """(b): endpoints := V_ep | V_str | V_del. Requires |endpoints| >=
-    fleet_size AND, for every ordered pair of distinct endpoints (v, w):
-    a v->w path AND a w->v path, each avoiding every other endpoint.
+    """(b): requires at least fleet_size non-task endpoints, the vertices of
+    V_ep in neither V_str nor V_del, AND, with endpoints := V_ep | V_str |
+    V_del, for every ordered pair of distinct endpoints (v, w): a v->w path
+    AND a w->v path, each avoiding every other endpoint (sec:pf:agents).
+
+    Token Passing parks an agent on a non-task endpoint where no other path
+    ends. Fewer than m of them can leave none free (Ma et al. 2017, Property 2),
+    and the environment places the agents on V_ep, so it needs m of those.
     """
     endpoints = sorted(
         v
@@ -130,7 +139,12 @@ def check_well_formedness(graph: WarehouseGraph, fleet_size: int) -> WellFormedn
         if vertex.role.endpoint or vertex.role.storage or vertex.role.delivery
     )
     num_endpoints = len(endpoints)
-    endpoint_count_ok = num_endpoints >= fleet_size
+    num_non_task_endpoints = sum(
+        1
+        for vertex in graph.vertices.values()
+        if vertex.role.endpoint and not vertex.role.storage and not vertex.role.delivery
+    )
+    endpoint_count_ok = num_non_task_endpoints >= fleet_size
 
     blocked_pairs: list[tuple[VertexId, VertexId, VertexId]] = []
     if endpoint_count_ok:
@@ -156,6 +170,7 @@ def check_well_formedness(graph: WarehouseGraph, fleet_size: int) -> WellFormedn
     return WellFormednessReport(
         ok=ok,
         num_endpoints=num_endpoints,
+        num_non_task_endpoints=num_non_task_endpoints,
         required_endpoints=fleet_size,
         endpoint_count_ok=endpoint_count_ok,
         blocked_pairs=tuple(blocked_pairs),

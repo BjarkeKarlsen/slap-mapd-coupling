@@ -75,3 +75,59 @@ def test_a_graph_with_a_blocking_third_endpoint_cannot_be_constructed():
     edges = tuple(Edge(source=a, target=b, cost=1.0) for a, b in ((1, 2), (2, 1), (2, 3), (3, 2)))
     with pytest.raises(ValueError, match="not endpoint-safe"):
         WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+
+
+def _triangle(roles: dict[int, VertexRole]) -> WarehouseGraph:
+    vertices = {i: Vertex(id=i, role=role) for i, role in roles.items()}
+    edges = []
+    for a, b in [(1, 2), (2, 3), (3, 1)]:
+        edges.append(Edge(source=a, target=b, cost=1.0))
+        edges.append(Edge(source=b, target=a, cost=1.0))
+    return WarehouseGraph(vertices=vertices, edges=tuple(edges), wait_cost=0.0)
+
+
+def test_only_non_task_endpoints_count_towards_the_fleet_size():
+    # Three endpoints in all, but two are task vertices. One agent has a place to park, two do not.
+    graph = _triangle(
+        {
+            1: VertexRole(endpoint=True),
+            2: VertexRole(storage=True),
+            3: VertexRole(delivery=True),
+        }
+    )
+    enough = check_well_formedness(graph, fleet_size=1)
+    assert (enough.num_endpoints, enough.num_non_task_endpoints) == (3, 1)
+    assert enough.endpoint_count_ok is True and enough.ok is True
+
+    too_few = check_well_formedness(graph, fleet_size=2)
+    assert too_few.num_non_task_endpoints == 1
+    assert too_few.endpoint_count_ok is False and too_few.ok is False
+
+
+def test_a_vertex_in_v_ep_and_a_task_role_is_not_a_non_task_endpoint():
+    graph = _triangle(
+        {
+            1: VertexRole(endpoint=True, storage=True),
+            2: VertexRole(endpoint=True, delivery=True),
+            3: VertexRole(endpoint=True),
+        }
+    )
+    report = check_well_formedness(graph, fleet_size=2)
+    assert (report.num_endpoints, report.num_non_task_endpoints) == (3, 1)
+    assert report.endpoint_count_ok is False
+
+
+def test_the_pairwise_check_still_takes_every_endpoint():
+    # The middle vertex is a delivery vertex, so it is not a non-task endpoint, but it still blocks
+    # the only route between the other two, which are enough in number for the fleet.
+    vertices = {
+        1: Vertex(id=1, role=VertexRole(endpoint=True)),
+        2: Vertex(id=2, role=VertexRole(delivery=True)),
+        3: Vertex(id=3, role=VertexRole(endpoint=True)),
+    }
+    edges = tuple(Edge(source=a, target=b, cost=1.0) for a, b in ((1, 2), (2, 1), (2, 3), (3, 2)))
+    graph = WarehouseGraph.model_construct(vertices=vertices, edges=edges, wait_cost=0.0)
+    report = check_well_formedness(graph, fleet_size=2)
+    assert report.endpoint_count_ok is True
+    assert report.ok is False
+    assert (1, 3, 2) in report.blocked_pairs or (3, 1, 2) in report.blocked_pairs
