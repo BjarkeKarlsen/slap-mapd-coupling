@@ -1,4 +1,5 @@
-"""Unit tests for the progress numbers in slap_mapd_coupling.training.callbacks."""
+"""Unit tests for slap_mapd_coupling.training.callbacks, the progress numbers and the
+invariant checks on the training adapter."""
 
 import json
 
@@ -10,15 +11,23 @@ from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.environment.zones import zones_by_aisle
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    generate_instance,
+    generate_warehouse_graph,
+)
+from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.planners import PrioritisedAStarPlanner
 from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.training.callbacks import (
     StandingStillCounter,
+    TrainingProgressCallbacks,
     format_iteration,
     iteration_record,
     progress_metrics,
 )
+from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 
 def _env(horizon: int = 30) -> WarehouseMAPDEnv:
@@ -159,3 +168,116 @@ def test_iteration_record_keeps_numbers_and_turns_everything_else_into_none():
     }
     assert json.loads(json.dumps(record)) == record
     assert iteration_record(1, {})["tasks_completed"] is None
+
+
+# --- the callbacks on the training adapter ----------------------------------------------
+
+
+def _adapter(controller: str, horizon: int = 12) -> WarehouseMAPDMultiAgentEnv:
+    instance = generate_instance(
+        GeneratorParams(
+            max_num_aisles=6,
+            max_aisle_length=6,
+            max_num_cross_aisles=5,
+            one_way_fraction=0.0,
+            wait_cost=0.0,
+            num_storage_vertices=6,
+            num_delivery_vertices=2,
+            num_endpoints=4,
+            seed=0,
+        )
+    )
+    graph = instance.graph
+    storage = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
+    config = ExperimentConfig(
+        storage_mode="fixed",
+        controller=controller,
+        congestion_sensitive=False,
+        communication=False,
+        num_agents=3,
+        arrival_rate=2.0,
+        seed=7,
+        horizon=horizon,
+        wait_cost=0.0,
+        observation_depth=3,
+        discount=0.99,
+        deliver_reward=1.0,
+        override_penalty=0.5,
+        congestion_reward_weight=0.1,
+    )
+    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
+    counts = {"tea": {storage[0]: 5, storage[1]: 5}}
+    # 30 movable vertices, the largest window of every arm on this graph
+    return WarehouseMAPDMultiAgentEnv(
+        graph,
+        skus,
+        counts,
+        {v: 10.0 for v in storage},
+        config,
+        LocalSubgraphEncodingConfig(max_local_nodes=30, max_messages=1),
+        (1, 2),
+        credit_signal="per_agent",
+        pooling="none" if controller == "decentralised" else "mean",
+        zones=zones_by_aisle(graph, instance.aisle_index, 2) if controller == "section" else None,
+    )
+
+
+class _Vector:
+    """The vector of sub-environments an RLlib env runner holds."""
+
+    def __init__(self, env: WarehouseMAPDMultiAgentEnv) -> None:
+        self.envs = [env]
+
+
+class _Runner:
+    def __init__(self, env: _Vector) -> None:
+        self.env = env
+
+
+class _Logger:
+    def __init__(self) -> None:
+        self.values: dict[str, list[float]] = {}
+
+    def log_value(self, name: str, value: float, reduce: str) -> None:
+        self.values.setdefault(name, []).append(value)
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
+def test_the_callbacks_check_and_log_every_arm_through_the_core(controller):
+    env = _adapter(controller)
+    vector, logger = _Vector(env), _Logger()
+    callbacks = TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    truncated = {"__all__": False}
+    while not truncated["__all__"]:
+        actions = {
+            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
+        }
+        obs, _, _, truncated, _ = env.step(actions)
+        callbacks.on_episode_step(episode=None, env=vector, env_index=0)
+    callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
+    callbacks.on_episode_end(metrics_logger=logger, env=vector, env_index=0)
+
+    expected = progress_metrics(env.core)
+    assert expected["episode_step"] == 12.0
+    for name, value in expected.items():
+        assert logger.values[name] == [value]
+    (fraction,) = logger.values["standing_still_fraction"]
+    assert 0.0 <= fraction <= 1.0
+    assert logger.values["episode_tasks_completed"] == [expected["tasks_completed"]]
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
+def test_the_callbacks_raise_on_a_vertex_conflict_in_the_core(controller):
+    env = _adapter(controller)
+    vector = _Vector(env)
+    callbacks = TrainingProgressCallbacks()
+    env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    locations = env.core.fleet.locations()
+    shared = locations[1]
+    env.core.fleet = _fleet({aid: shared for aid in locations})  # every robot on one vertex
+    with pytest.raises(RuntimeError, match="vertex rule"):
+        callbacks.on_episode_step(episode=None, env=vector, env_index=0)

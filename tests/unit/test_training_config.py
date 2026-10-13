@@ -6,7 +6,12 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.spaces import max_out_degree
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
+from slap_mapd_coupling.environment.zones import zones_by_aisle
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    generate_instance,
+    generate_warehouse_graph,
+)
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
@@ -18,7 +23,7 @@ from slap_mapd_coupling.training.config import (
 )
 
 
-def _graph(**overrides):
+def _params(**overrides) -> GeneratorParams:
     defaults = dict(
         max_num_aisles=6,
         max_aisle_length=6,
@@ -31,7 +36,20 @@ def _graph(**overrides):
         seed=0,
     )
     defaults.update(overrides)
-    return generate_warehouse_graph(GeneratorParams(**defaults))
+    return GeneratorParams(**defaults)
+
+
+def _graph(**overrides):
+    return generate_warehouse_graph(_params(**overrides))
+
+
+def _zones():
+    instance = generate_instance(_params())
+    return zones_by_aisle(instance.graph, instance.aisle_index, 2)
+
+
+# _graph() has 30 movable vertices, the centralised window and the largest section window.
+_WIDE_MAX_LOCAL_NODES = 30
 
 
 def _instance(graph):
@@ -296,3 +314,67 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     assert ppo_config.clip_param == pytest.approx(0.2)
     assert ppo_config.rollout_fragment_length == 20
     assert ppo_config.seed == 42
+
+
+def _build_for_arm(controller: str, pooling: str, credit_signal: str = "per_agent", **kwargs):
+    """build_ppo_config for one arm, with zones for the section arm."""
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    max_local_nodes = kwargs.pop("max_local_nodes", _WIDE_MAX_LOCAL_NODES)
+    zones = kwargs.pop("zones", _zones() if controller == "section" else None)
+    return build_ppo_config(
+        graph,
+        skus,
+        counts,
+        capacities,
+        _config(controller=controller),
+        LocalSubgraphEncodingConfig(max_local_nodes=max_local_nodes, max_messages=2),
+        GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling=pooling),
+        PolicyValueHeadConfig(hidden_width=8),
+        _ppo_hp(credit_signal=credit_signal),
+        _seed_split(train_seed_count=2),
+        zones=zones,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section"])
+@pytest.mark.parametrize("credit_signal", ["per_agent", "team_mean"])
+def test_build_ppo_config_accepts_the_wider_arms_with_either_credit_signal(
+    controller, credit_signal
+):
+    ppo_config = _build_for_arm(controller, "mean", credit_signal)
+    assert ppo_config.gamma == pytest.approx(0.99)
+
+
+def test_build_ppo_config_rejects_pooling_with_the_decentralised_arm():
+    # The module would expect a pool_mask that the decentralised observations never carry.
+    with pytest.raises(ValueError, match="gnn_encoder_config.pooling='mean'"):
+        _build_for_arm("decentralised", "mean", max_local_nodes=20)
+
+
+def test_build_ppo_config_rejects_the_section_arm_without_zones():
+    with pytest.raises(ValueError, match="zones"):
+        _build_for_arm("section", "mean", zones=None)
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section"])
+def test_build_ppo_config_rejects_a_window_above_the_cap(controller):
+    with pytest.raises(ValueError, match="max_local_nodes"):
+        _build_for_arm(controller, "mean", max_local_nodes=20)
+
+
+@pytest.mark.parametrize(
+    "controller, pooling",
+    [("decentralised", "none"), ("centralised", "mean"), ("section", "mean")],
+)
+def test_one_ppo_iteration_runs_for_each_controller(controller, pooling):
+    # The largest field of view of _graph() at d_obs = 3 has 20 vertices.
+    cap = 20 if controller == "decentralised" else _WIDE_MAX_LOCAL_NODES
+    algo = _build_for_arm(controller, pooling, max_local_nodes=cap).build_algo()
+    try:
+        result = algo.train()
+    finally:
+        algo.stop()
+    assert result["num_env_steps_sampled_lifetime"] >= _ppo_hp().train_batch_size
+    assert "shared_policy" in result["learners"]

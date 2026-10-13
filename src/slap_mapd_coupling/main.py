@@ -1,18 +1,13 @@
 """Command-line interface for slap_mapd_coupling.
 
-Three verbs, matching the thesis's own experimental design (independent
-variables: storage mode, controller architecture, congestion sensitivity,
-communication, system load - sec:pd-aim-and-scope) rather than a generic
-train/evaluate/checkpoint workflow that only fits the decentralised
-controller:
+Three verbs, following the experimental design of sec:pd-aim-and-scope.
 
-  simulate  - run one (storage rule, controller or reference planner,
-              load) configuration.
-  train     - PPO training for the decentralised controller only; the
-              the section-based controller and the reference planner are
-              deterministic and have nothing to train.
-  sweep     - run the full experimental grid from a config file and write
-              one results table (this is what produces Section VII's data).
+  simulate  runs one configuration, a storage rule with a controller or the
+            reference planner, at one load.
+  train     trains a learned controller with PPO. The reference planner is
+            not learned.
+  sweep     runs the experimental grid from a config file and writes one
+            results table.
 """
 
 from typing import get_args
@@ -123,10 +118,7 @@ def simulate(
     "--output", type=click.Path(), default="./checkpoints", help="Checkpoint output directory."
 )
 def train(config, storage_rule, num_iterations, num_gpus, seed, output):
-    """Train the decentralised controller (PPO).
-
-    The other controllers and the reference planner need no training.
-    """
+    """Train a learned controller (PPO). The reference planner needs no training."""
     raise NotImplementedError("Training is not implemented yet.")
 
 
@@ -145,8 +137,8 @@ def train(config, storage_rule, num_iterations, num_gpus, seed, output):
     "--dry-run", is_flag=True, help="Print the resulting experiment grid without running it."
 )
 def sweep(config, output, dry_run):
-    """Run the full experimental grid, training decentralised runs as needed,
-    and write one results table."""
+    """Run the full experimental grid, training the learned controllers as
+    needed, and write one results table."""
     raise NotImplementedError("Sweep is not implemented yet.")
 
 

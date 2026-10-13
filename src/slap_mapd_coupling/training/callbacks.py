@@ -51,13 +51,10 @@ def _unwrap(env: gym.Env, env_index: int) -> WarehouseMAPDMultiAgentEnv:
 
 
 class CorrectnessInvariantCallbacks(DefaultCallbacks):
-    """Checks is_collision_free/is_feasible against the realised trace
-    every step of every training rollout -- see module docstring.
-    is_collision_free needs a (before, after) FleetState pair (eq:
-    vertexconflict/eq:swapconflict are both about a TRANSITION, not a
-    single snapshot), tracked per env_index across on_episode_start/
-    on_episode_step since RLlib's callback API hands us snapshots one
-    step at a time, not the pair directly.
+    """Checks is_collision_free and is_feasible on the realised trace at
+    every step of every training rollout. The vertex rule and the swap rule
+    are about a transition, so the fleet before the step is kept per
+    env_index, since RLlib hands over one snapshot at a time.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -80,7 +77,7 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
     ) -> None:
         if env is None:
             return
-        self._previous_fleet[env_index] = _unwrap(env, env_index)._env.fleet
+        self._previous_fleet[env_index] = _unwrap(env, env_index).core.fleet
 
     def on_episode_step(
         self,
@@ -100,25 +97,24 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
             return
         sub_env = _unwrap(env, env_index)
         before = self._previous_fleet.get(env_index)
-        after = sub_env._env.fleet
+        after = sub_env.core.fleet
         if before is not None and not is_collision_free(before, after):
             raise RuntimeError(
-                f"eq:vertexconflict/eq:swapconflict violated at t={sub_env._env.t}: "
-                f"{before.locations()} -> {after.locations()} -- conflict resolution "
-                "must make this structurally impossible (AGENTS.md); this is a "
-                "correctness bug, not a metric to tune around."
+                f"the vertex rule or the swap rule is broken at t={sub_env.core.t}, "
+                f"{before.locations()} to {after.locations()}. Conflict resolution must "
+                "make this impossible, so this is a correctness bug."
             )
-        if not is_feasible(sub_env._env.storage):
+        if not is_feasible(sub_env.core.storage):
             raise RuntimeError(
-                f"eq:feasiblestorage violated at t={sub_env._env.t} -- the storage rule "
-                "must keep every realised configuration feasible; this is a correctness "
-                "bug, not a metric to tune around."
+                f"the capacity constraint is broken at t={sub_env.core.t}. The storage rule "
+                "must keep every realised configuration feasible, so this is a correctness bug."
             )
         self._previous_fleet[env_index] = after
 
 
 def progress_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
-    """Where the episode in progress stands, for the training log.
+    """Where the episode in progress stands, for the training log. `env` is
+    the simulator core, the adapter's `core`.
 
     `steps_since_last_completion` is t minus the latest finish time, or t
     when no task has finished yet. A value that keeps growing is a stall.
@@ -173,13 +169,13 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         before = self._previous_fleet.get(env_index)
         super().on_episode_step(env=env, env_index=env_index, **kwargs)
         if env is not None and before is not None:
-            self._standing_still.update(before, _unwrap(env, env_index)._env.fleet)
+            self._standing_still.update(before, _unwrap(env, env_index).core.fleet)
 
     def on_sample_end(self, *, env_runner=None, metrics_logger=None, **kwargs: Any) -> None:
         if env_runner is None or metrics_logger is None or env_runner.env is None:
             return
         for env_index in range(len(env_runner.env.envs)):
-            values = progress_metrics(_unwrap(env_runner.env, env_index)._env)
+            values = progress_metrics(_unwrap(env_runner.env, env_index).core)
             for name, value in values.items():
                 metrics_logger.log_value(name, value, reduce="mean")
         fraction = self._standing_still.fraction()
@@ -192,7 +188,7 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     ) -> None:
         if env is None or metrics_logger is None:
             return
-        env_state = _unwrap(env, env_index)._env
+        env_state = _unwrap(env, env_index).core
         finish_times = [t.finish_time for t in env_state.tasks if t.finish_time is not None]
         metrics_logger.log_value("episode_tasks_completed", float(len(finish_times)), reduce="mean")
         metrics_logger.log_value(
