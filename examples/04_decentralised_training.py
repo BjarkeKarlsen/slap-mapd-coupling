@@ -68,7 +68,7 @@ from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
-from slap_mapd_coupling.training.callbacks import CorrectnessInvariantCallbacks
+from slap_mapd_coupling.training.callbacks import TrainingProgressCallbacks, format_iteration
 from slap_mapd_coupling.training.config import (
     PPOHyperparameters,
     SeedSplitConfig,
@@ -215,18 +215,13 @@ def train(
         build_seed_split(config.seed),
         num_env_runners=num_env_runners,
         use_gpu=use_gpu,
-    ).callbacks(CorrectnessInvariantCallbacks)
+    ).callbacks(TrainingProgressCallbacks)
 
     algo = ppo_config.build_algo()
     print(f"=== Training the decentralised GNN+PPO controller ({num_iterations} iterations) ===")
     for i in range(num_iterations):
         result = algo.train()
-        env_runner_results = result.get("env_runners", {})
-        print(
-            f"  iter {i + 1}/{num_iterations}: "
-            f"episode_return_mean={env_runner_results.get('episode_return_mean')} "
-            f"episode_len_mean={env_runner_results.get('episode_len_mean')}"
-        )
+        print(format_iteration(i + 1, num_iterations, result))
     return algo, enc_config
 
 

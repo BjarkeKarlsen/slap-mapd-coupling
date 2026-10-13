@@ -26,7 +26,8 @@ through it would only hide the bug, not route around it.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import math
+from typing import Any, Mapping, Optional
 
 import gymnasium as gym
 from ray.rllib.env.base_env import BaseEnv
@@ -34,6 +35,7 @@ from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 from slap_mapd_coupling.core.agents import FleetState, is_collision_free
 from slap_mapd_coupling.core.storage_state import is_feasible
+from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 
@@ -112,3 +114,124 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
                 "bug, not a metric to tune around."
             )
         self._previous_fleet[env_index] = after
+
+
+def progress_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
+    """Where the episode in progress stands, for the training log.
+
+    `steps_since_last_completion` is t minus the latest finish time, or t
+    when no task has finished yet. A value that keeps growing is a stall.
+    """
+    finish_times = [task.finish_time for task in env.tasks if task.finish_time is not None]
+    return {
+        "tasks_completed": float(len(finish_times)),
+        "tasks_released": float(len(env.tasks)),
+        "backlog": float(env.log.backlog_by_t[-1]),
+        "steps_since_last_completion": float(env.t - max(finish_times, default=0)),
+        "episode_step": float(env.t),
+    }
+
+
+class StandingStillCounter:
+    """Share of agent-steps in which an agent did not change vertex."""
+
+    def __init__(self) -> None:
+        self._still = 0
+        self._total = 0
+
+    def update(self, before: FleetState, after: FleetState) -> None:
+        after_at = after.locations()
+        for agent_id, at in before.locations().items():
+            self._total += 1
+            self._still += after_at[agent_id] == at
+
+    def fraction(self) -> Optional[float]:
+        return None if self._total == 0 else self._still / self._total
+
+    def reset(self) -> None:
+        self._still = 0
+        self._total = 0
+
+
+class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
+    """The invariant checks plus progress numbers in every iteration.
+
+    An iteration samples fewer steps than an episode lasts, so the episode
+    return is missing most iterations. These values are logged from the
+    environment's own state at the end of every fragment instead, under
+    `result["env_runners"]`.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._standing_still = StandingStillCounter()
+
+    def on_episode_step(
+        self, *, env: Optional[gym.Env] = None, env_index: int, **kwargs: Any
+    ) -> None:
+        before = self._previous_fleet.get(env_index)
+        super().on_episode_step(env=env, env_index=env_index, **kwargs)
+        if env is not None and before is not None:
+            self._standing_still.update(before, _unwrap(env, env_index)._env.fleet)
+
+    def on_sample_end(self, *, env_runner=None, metrics_logger=None, **kwargs: Any) -> None:
+        if env_runner is None or metrics_logger is None or env_runner.env is None:
+            return
+        for env_index in range(len(env_runner.env.envs)):
+            values = progress_metrics(_unwrap(env_runner.env, env_index)._env)
+            for name, value in values.items():
+                metrics_logger.log_value(name, value, reduce="mean")
+        fraction = self._standing_still.fraction()
+        if fraction is not None:
+            metrics_logger.log_value("standing_still_fraction", fraction, reduce="mean")
+        self._standing_still.reset()
+
+    def on_episode_end(
+        self, *, metrics_logger=None, env: Optional[gym.Env] = None, env_index: int, **kwargs: Any
+    ) -> None:
+        if env is None or metrics_logger is None:
+            return
+        env_state = _unwrap(env, env_index)._env
+        finish_times = [t.finish_time for t in env_state.tasks if t.finish_time is not None]
+        metrics_logger.log_value("episode_tasks_completed", float(len(finish_times)), reduce="mean")
+        metrics_logger.log_value(
+            "episode_last_completion_t", float(max(finish_times, default=0)), reduce="mean"
+        )
+
+
+_COUNT_KEYS = (
+    "tasks_completed",
+    "tasks_released",
+    "backlog",
+    "steps_since_last_completion",
+)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
+    """One line per training iteration, in plain numbers (no exponents).
+
+    The episode return mean comes first because it is the number PPO
+    reports. Most iterations have none, since an episode is longer than an
+    iteration, and then the line says so.
+    """
+    runners = result.get("env_runners", {})
+    episode_return = runners.get("episode_return_mean")
+    parts = [
+        f"episode_return_mean={episode_return:.1f}"
+        if _is_number(episode_return)
+        else "no episode ended"
+    ]
+    for key in _COUNT_KEYS:
+        value = runners.get(key)
+        parts.append(f"{key}={value:.0f}" if _is_number(value) else f"{key}=n/a")
+    fraction = runners.get("standing_still_fraction")
+    parts.append(
+        f"standing_still_fraction={fraction:.2f}"
+        if _is_number(fraction)
+        else "standing_still_fraction=n/a"
+    )
+    return f"  iter {i}/{n}: " + " ".join(parts)
