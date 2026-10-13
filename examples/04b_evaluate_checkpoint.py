@@ -98,7 +98,7 @@ def build_instance() -> WarehouseGraph:
 
 def build_instance_with_positions() -> GeneratedInstance:
     # generate_instance and generate_and_validate share the same private
-    # _build (see examples/01_baseline_fixed_centralised.py's own
+    # _build (see examples/01_baseline_fixed_prioritised_astar.py's own
     # build_instance_with_positions), so calling both on the same params
     # is safe -- this one is only needed when rendering, to place each
     # vertex on screen (viz.pygame_renderer.WarehouseRenderer).

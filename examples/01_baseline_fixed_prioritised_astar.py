@@ -1,4 +1,4 @@
-"""Run the reference planner with fixed storage (F_fix), no learning.
+"""Run the prioritised A* reference planner with fixed storage (F_fix), no learning.
 
 The M2 milestone's worked example. Demonstrates the milestone's own "done
 when" criteria directly -- one episode runs end-to-end through the real

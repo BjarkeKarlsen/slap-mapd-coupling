@@ -1,6 +1,6 @@
 """Show the ExperimentConfig, StorageState and RunMetrics contracts end to end.
 
-Numbered 01b (between 01_baseline_fixed_centralised.py and
+Numbered 01b (between 01_baseline_fixed_prioritised_astar.py and
 02_storage_ladder.py) rather than renumbering anything: this script's
 milestone -- "core config/storage types are real" -- sits strictly
 between those two build steps.
