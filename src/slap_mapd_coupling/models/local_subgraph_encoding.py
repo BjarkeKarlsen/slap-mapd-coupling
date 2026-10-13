@@ -110,6 +110,20 @@ def check_slot_targets(
                 )
 
 
+def check_move_slots(observation_space: gym.spaces.Dict, num_actions: int) -> None:
+    """The move score gives one logit per move slot, so the slot arrays of
+    `observation_space` must have length d_max = num_actions - 1, the size of
+    the action mask minus the wait slot."""
+    shape = observation_space["move_target_index"].shape
+    length = shape[0] if shape else 0
+    if length != num_actions - 1:
+        raise ValueError(
+            f"the observation's move slot arrays have length {length} but the action space has "
+            f"{num_actions} actions, so d_max={num_actions - 1}. They must be built from the "
+            "same graph (environment/spaces.py::max_out_degree)."
+        )
+
+
 @dataclass(frozen=True)
 class EncodedView:
     """One robot's padded field of view, without a batch dimension. It is

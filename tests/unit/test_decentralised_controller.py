@@ -83,7 +83,7 @@ def _build_module(
                 "hidden_width": 8,
                 "communication": communication,
             },
-            "policy_value_head_config": {"hidden_width": 8, "num_actions": d_max + 1},
+            "policy_value_head_config": {"hidden_width": 8},
         },
     )
     return spec.build()
@@ -366,6 +366,25 @@ def test_batched_logits_equal_the_per_agent_logits(communication):
                 alone[Columns.ACTION_DIST_INPUTS][0],
                 atol=1e-5,
             )
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_batch_stacks_every_observation_key_including_the_move_slot_arrays(communication):
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    config = _decentralised_config(num_agents=3, communication=communication)
+    d_max = max_out_degree(graph)
+    encoded = encode_all_observations(graph, _three_robots(), [], 0, config, enc_config, d_max)
+
+    batch = decentralised._batch(list(encoded.values()))
+
+    observations = batch[Columns.OBS]["observations"]
+    assert set(observations) == set(encoded[1].as_rllib_dict()["observations"])
+    assert observations["move_target_index"].shape == (3, d_max)
+    assert observations["move_target_index"].dtype == torch.int64
+    assert observations["move_target_mask"].shape == (3, d_max)
+    assert ("move_sender_index" in observations) == communication
+    assert ("move_sender_mask" in observations) == communication
 
 
 def test_constructing_a_controller_with_communication_and_no_room_for_a_sender_is_rejected():
