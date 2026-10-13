@@ -191,6 +191,7 @@ def test_gradients_flow_through_message_passing_rounds():
     config = _config(observation_depth=3)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
 
+    torch.manual_seed(0)  # one draw in about eighty leaves every ReLU dead, so fix the weights
     encoder = _encoder(2, False)
     z = encoder(graph, 2, observation)
     z.sum().backward()

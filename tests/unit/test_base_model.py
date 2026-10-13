@@ -147,6 +147,7 @@ def test_policy_value_head_output_shapes(communication):
 
 def test_policy_value_head_gradients_flow():
     head = PolicyValueHead(11, 5, True, PolicyValueHeadConfig(hidden_width=4))
+    _randomise(head)
     logits, value = head(**_random_head_inputs(True))
     (logits.sum() + value.sum()).backward()
     assert all(p.grad is not None and torch.any(p.grad != 0) for p in head.parameters())
