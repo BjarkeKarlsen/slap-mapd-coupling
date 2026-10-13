@@ -31,7 +31,9 @@ The instance, storage and ExperimentConfig built below must match
 build_config exactly: the checkpoint's RLModule was built against that
 graph's action/observation spaces (d_max, encoded tensor shapes), and
 loading it against a different instance would silently produce
-nonsense actions rather than a clean error.
+nonsense actions rather than a clean error. A checkpoint trained before
+the per-edge policy head (the move score) does not load either, because
+its weights have another shape. Retrain it with 04_decentralised_training.py.
 
 Pass --render for a live pygame preview of one episode (requires the
 [viz] extra and a real display) instead of the default headless

@@ -3,9 +3,12 @@ sec:method:training).
 
 DefaultPPORLModule needs `setup()` to build `self.encoder`, `self.pi` and
 `self.vf`, with `self.encoder(batch)` returning
-`{ENCODER_OUT: {ACTOR: t, CRITIC: t}}`. GNNEncoder.forward_padded gives one
-shared z_i for both roles (the readout), so ACTOR and CRITIC are the same
-tensor.
+`{ENCODER_OUT: {ACTOR: a, CRITIC: c}}`. The critic reads z_i (the readout),
+so CRITIC is that tensor. The move score also reads h^(L) at the vertex each
+move leads to and the message of the robot standing there, so ACTOR is a dict
+holding z_i and those tensors, which DefaultPPORLModule hands to `self.pi`
+unchanged. Everything the head needs arrives through the observation, so the
+module never looks at the graph.
 
 GNNActionMaskingRLModule composes this with ActionMaskingTorchRLModule by
 multiple inheritance. Python's method resolution order puts
@@ -27,14 +30,18 @@ from ray.rllib.utils.annotations import override
 from torch import nn
 
 from slap_mapd_coupling.environment.action_masking import ActionMaskingTorchRLModule
-from slap_mapd_coupling.models.base_model import PolicyValueHead, PolicyValueHeadConfig
+from slap_mapd_coupling.models.base_model import (
+    MOVE_SENDER_KEYS,
+    PolicyValueHead,
+    PolicyValueHeadConfig,
+)
 from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS, GNNEncoder, GNNEncoderConfig
 
 
 class _GNNSharedEncoder(nn.Module):
-    """Wraps GNNEncoder.forward_padded to satisfy DefaultPPORLModule's
-    `self.encoder(batch) -> {ENCODER_OUT: {ACTOR: z, CRITIC: z}}` contract
-    -- see module docstring for why ACTOR and CRITIC are the same z_i."""
+    """Wraps GNNEncoder.encode_padded to satisfy DefaultPPORLModule's
+    `self.encoder(batch) -> {ENCODER_OUT: {ACTOR: ..., CRITIC: ...}}`
+    contract, see the module docstring for what each role gets."""
 
     def __init__(self, encoder: GNNEncoder) -> None:
         super().__init__()
@@ -43,10 +50,9 @@ class _GNNSharedEncoder(nn.Module):
     def forward(self, batch: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         obs = batch[Columns.OBS]
         # the sender keys are in the observation exactly when communication is on
-        sender_blocks = (
-            {key: obs[key] for key in SENDER_KEYS} if self.gnn.config.communication else {}
-        )
-        z = self.gnn.forward_padded(
+        communication = self.gnn.config.communication
+        sender_blocks = {key: obs[key] for key in SENDER_KEYS} if communication else {}
+        out = self.gnn.encode_padded(
             obs["node_features"],
             obs["node_mask"],
             obs["edge_index"],
@@ -55,23 +61,28 @@ class _GNNSharedEncoder(nn.Module):
             obs["congestion"],
             **sender_blocks,
         )
-        return {ENCODER_OUT: {ACTOR: z, CRITIC: z}}
+        actor: Dict[str, Any] = {
+            "z": out.z,
+            "node_embeddings": out.node_embeddings,
+            "move_target_index": obs["move_target_index"],
+        }
+        if communication:
+            actor["messages"] = out.messages
+            actor.update({key: obs[key] for key in MOVE_SENDER_KEYS})
+        return {ENCODER_OUT: {ACTOR: actor, CRITIC: out.z}}
 
 
 class _PiHead(nn.Module):
-    """self.pi(actor_embedding) -> raw policy logits, delegating to
-    PolicyValueHead's shared trunk + policy output (masking is applied
-    afterwards by ActionMaskingTorchRLModule, not here -- see module
-    docstring)."""
+    """self.pi(actor_inputs) -> raw policy logits, the move score and the
+    wait score of PolicyValueHead (masking is applied afterwards by
+    ActionMaskingTorchRLModule, not here, see the module docstring)."""
 
     def __init__(self, head: PolicyValueHead) -> None:
         super().__init__()
         self.head = head
 
-    def forward(self, z: "torch.Tensor") -> "torch.Tensor":
-        logits: torch.Tensor
-        logits, _ = self.head(z)
-        return logits
+    def forward(self, actor: Dict[str, Any]) -> torch.Tensor:
+        return self.head.policy(**actor)
 
 
 class _VfHead(nn.Module):
@@ -83,15 +94,13 @@ class _VfHead(nn.Module):
         super().__init__()
         self.head = head
 
-    def forward(self, z: "torch.Tensor") -> "torch.Tensor":
-        value: torch.Tensor
-        _, value = self.head(z)
-        return value.unsqueeze(-1)
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.head.value(z).unsqueeze(-1)
 
 
 class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
     """DefaultPPOTorchRLModule with GNNEncoder + PolicyValueHead (#27/#28)
-    in place of RLlib's Catalog-built default network -- see module
+    in place of RLlib's Catalog-built default network, see the module
     docstring. `model_config` must carry "gnn_encoder_config" and
     "policy_value_head_config" (plain dicts, matching GNNEncoderConfig/
     PolicyValueHeadConfig's own fields) -- RLlib passes model_config
@@ -115,7 +124,12 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
 
         gnn_encoder = GNNEncoder(encoder_config)
         self.encoder = _GNNSharedEncoder(gnn_encoder)
-        head = PolicyValueHead(gnn_encoder.output_dim, head_config)
+        head = PolicyValueHead(
+            gnn_encoder.output_dim,
+            gnn_encoder.embedding_dim,
+            encoder_config.communication,
+            head_config,
+        )
         self.pi = _PiHead(head)
         self.vf = _VfHead(head)
 

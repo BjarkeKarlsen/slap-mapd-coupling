@@ -68,7 +68,6 @@ from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, is_feasible
-from slap_mapd_coupling.environment.spaces import max_out_degree
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
@@ -199,8 +198,7 @@ def train(
 ):
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=2, hidden_width=32, communication=config.communication)
-    d_max = max_out_degree(graph)
-    head_config = PolicyValueHeadConfig(hidden_width=32, num_actions=d_max + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=32)
 
     ppo_config = build_ppo_config(
         graph,

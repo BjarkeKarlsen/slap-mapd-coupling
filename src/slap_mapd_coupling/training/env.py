@@ -50,6 +50,7 @@ from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
+    check_slot_targets,
     encode_all_observations,
     encoded_observation_space,
 )
@@ -81,6 +82,8 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
                 "train_seeds must be non-empty: the disjoint training split "
                 "(training/config.py::split_seeds) requires at least one seed."
             )
+        # a rollout worker must never meet a move whose target is out of view
+        check_slot_targets(graph, config.observation_depth, encoding_config)
         super().__init__()
         self.graph = graph
         self._skus = skus

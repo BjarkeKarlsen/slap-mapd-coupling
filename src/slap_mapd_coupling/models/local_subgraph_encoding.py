@@ -5,21 +5,32 @@ padded to max_local_nodes.
 
 The thesis does not say what to do when the field of view exceeds the cap
 (issue #66), so the truncation is a flagged choice. Nodes keep the
-agent's own vertex first, then the rest by ascending eta_i(v,t). An edge
-to a dropped vertex is left out of the edge list. A receiver keeps its
-max_messages closest senders by d_G, ties by agent id.
+agent's own vertex first, then its outgoing neighbours in slot order, then
+the rest by ascending eta_i(v,t). An edge to a dropped vertex is left out
+of the edge list. A receiver keeps its max_messages closest senders by
+d_G, ties by agent id.
 
 The edge list has one row per undirected pair among the selected
 vertices, padded to E_max = max_local_nodes * d_max. That bound holds
 because every selected pair is a directed edge, and no selected vertex
 has more than d_max outgoing edges.
 
+The move score (sec:method:model) needs, for each move slot, the vertex it
+leads to and the robot standing there. Slot k is the k-th outgoing
+neighbour by vertex number, so every observation carries two arrays of
+length d_max: the local index of that vertex in the padded view, and a
+mask for the slots that exist. Every outgoing neighbour must be inside
+the field of view and inside the cap. `check_slot_targets` verifies this
+for a whole graph when the environment is built, and `encode_view` raises
+if a view breaks it.
+
 A message is the sender's own embedding (sec:method:model), so with
 communication on a receiver's sample carries the padded views of its
 senders, in the layout of its own view with an extra axis M. The network
-embeds them with the current weights. With communication off the sender
-keys are absent. `encode_all_observations` builds the sample of every robot
-for one timestep.
+embeds them with the current weights. For each move slot the sample also
+names the sender standing on that vertex, if the receiver hears it. With
+communication off the sender keys are absent. `encode_all_observations`
+builds the sample of every robot for one timestep.
 """
 
 from __future__ import annotations
@@ -42,7 +53,7 @@ from slap_mapd_coupling.environment.observation import (
     build_observation,
     communication_neighbours,
 )
-from slap_mapd_coupling.environment.spaces import Mask, legality_mask
+from slap_mapd_coupling.environment.spaces import Mask, legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM
 
 
@@ -66,6 +77,39 @@ def check_communication_caps(config: LocalSubgraphEncodingConfig, communication:
         )
 
 
+def _check_cap_fits(config: LocalSubgraphEncodingConfig, d_max: int) -> None:
+    """The view keeps the robot's vertex and all its outgoing neighbours, so
+    the cap must have room for d_max + 1 vertices."""
+    if config.max_local_nodes < d_max + 1:
+        raise ValueError(
+            f"max_local_nodes={config.max_local_nodes} < d_max+1={d_max + 1}, so a vertex with "
+            "d_max outgoing neighbours does not fit in its own view. Raise max_local_nodes."
+        )
+
+
+def check_slot_targets(
+    graph: WarehouseGraph, observation_depth: int, config: LocalSubgraphEncodingConfig
+) -> None:
+    """Raises ValueError unless every movable vertex has all its outgoing
+    neighbours in its field of view (cost distance at most d_obs, as in
+    environment/observation.py::local_subgraph) and the cap fits them. The
+    move score needs the embedding at the vertex each move leads to, so a
+    neighbour outside the view would leave a slot with no input. Run it
+    once when the environment is built, so a rollout never meets it."""
+    _check_cap_fits(config, max_out_degree(graph))
+    for v, vertex in graph.vertices.items():
+        if not vertex.role.movable:
+            continue
+        for w in graph.out_neighbours(v):
+            if graph.distance(v, w) > observation_depth:
+                raise ValueError(
+                    f"vertex {w} is an outgoing neighbour of {v} but d_G({v}, {w}) = "
+                    f"{graph.distance(v, w)} > observation_depth={observation_depth}, so "
+                    "the move to it has no embedding in the field of view. Raise "
+                    "observation_depth or shorten the edge."
+                )
+
+
 @dataclass(frozen=True)
 class EncodedView:
     """One robot's padded field of view, without a batch dimension. It is
@@ -76,6 +120,9 @@ class EncodedView:
     edge_index: np.ndarray  # [E_max, 2] int64, one row per undirected pair, pad rows are (0, 0)
     edge_mask: np.ndarray  # [E_max], 1.0 valid / 0.0 pad
     own_index: int
+    location: VertexId  # l_i(t)
+    move_targets: tuple[VertexId, ...]  # N+(l_i(t)) in slot order
+    move_target_index: np.ndarray  # [d_max] int64, local index of the vertex slot k leads to
 
 
 @dataclass(frozen=True)
@@ -90,12 +137,15 @@ class EncodedObservation:
     own_index: int
     congestion: float
     action_mask: np.ndarray  # [num_actions], {0.0, 1.0}, to_action_mask(mask)
+    move_target_index: np.ndarray  # [d_max] int64, local index of the vertex slot k leads to
     sender_node_features: Optional[np.ndarray] = None  # [max_messages, N, NODE_FEATURE_DIM]
     sender_node_mask: Optional[np.ndarray] = None  # [max_messages, N]
     sender_edge_index: Optional[np.ndarray] = None  # [max_messages, E_max, 2] int64
     sender_edge_mask: Optional[np.ndarray] = None  # [max_messages, E_max]
     sender_own_index: Optional[np.ndarray] = None  # [max_messages] int64
     sender_mask: Optional[np.ndarray] = None  # [max_messages], 1.0 real sender / 0.0 pad
+    move_sender_index: Optional[np.ndarray] = None  # [d_max] int64, sender standing on slot k
+    move_sender_mask: Optional[np.ndarray] = None  # [d_max], 1.0 if that sender is heard
 
     def as_rllib_dict(self) -> dict[str, Any]:
         """{"action_mask": ..., "observations": {...}}, the Dict shape that
@@ -107,6 +157,7 @@ class EncodedObservation:
             "edge_mask": self.edge_mask,
             "own_index": self.own_index,
             "congestion": np.float32(self.congestion),
+            "move_target_index": self.move_target_index,
         }
         if self.sender_mask is not None:
             observations.update(
@@ -116,6 +167,8 @@ class EncodedObservation:
                 sender_edge_mask=self.sender_edge_mask,
                 sender_own_index=self.sender_own_index,
                 sender_mask=self.sender_mask,
+                move_sender_index=self.move_sender_index,
+                move_sender_mask=self.move_sender_mask,
             )
         return {"action_mask": self.action_mask, "observations": observations}
 
@@ -129,9 +182,11 @@ def encoded_observation_space(
     config: LocalSubgraphEncodingConfig, d_max: int, communication: bool
 ) -> gym.spaces.Dict:
     """The "observations" half of masked_observation_space() for one agent.
-    `d_max` is max_out_degree(graph), which sets the edge list's size. The
-    sender keys are present only with `communication` on."""
+    `d_max` is max_out_degree(graph), which sets the edge list's size and
+    the length of the move slot arrays. The sender keys are present only
+    with `communication` on."""
     check_communication_caps(config, communication)
+    _check_cap_fits(config, d_max)
     num_nodes = config.max_local_nodes
     num_edges = max_edges(config, d_max)
     spaces: dict[str, gym.Space] = {
@@ -145,6 +200,9 @@ def encoded_observation_space(
         "edge_mask": gym.spaces.Box(low=0.0, high=1.0, shape=(num_edges,), dtype=np.float32),
         "own_index": gym.spaces.Discrete(num_nodes),
         "congestion": gym.spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
+        "move_target_index": gym.spaces.Box(
+            low=0, high=num_nodes - 1, shape=(d_max,), dtype=np.int64
+        ),
     }
     if communication:
         m = config.max_messages
@@ -163,22 +221,30 @@ def encoded_observation_space(
             ),
             sender_own_index=gym.spaces.Box(low=0, high=num_nodes - 1, shape=(m,), dtype=np.int64),
             sender_mask=gym.spaces.Box(low=0.0, high=1.0, shape=(m,), dtype=np.float32),
+            move_sender_index=gym.spaces.Box(low=0, high=m - 1, shape=(d_max,), dtype=np.int64),
+            move_sender_mask=gym.spaces.Box(low=0.0, high=1.0, shape=(d_max,), dtype=np.float32),
         )
     return gym.spaces.Dict(spaces)
 
 
 def _select_nodes(
-    observation: Observation, agent_location: VertexId, max_local_nodes: int
+    observation: Observation,
+    agent_location: VertexId,
+    move_targets: Sequence[VertexId],
+    max_local_nodes: int,
 ) -> list[VertexId]:
-    """l_i(t) first, then the remaining visible vertices by ascending eta."""
+    """l_i(t) and N+(l_i(t)) first, then the remaining visible vertices by
+    ascending eta."""
     visible = list(observation.visible_vertices)
     if len(visible) <= max_local_nodes:
         return visible
+    first = [agent_location, *move_targets]
+    kept = set(first)
     others = sorted(
-        (v for v in visible if v != agent_location),
+        (v for v in visible if v not in kept),
         key=lambda v: observation.features[v].eta,
     )
-    return [agent_location] + others[: max_local_nodes - 1]
+    return first + others[: max_local_nodes - len(first)]
 
 
 def encode_view(
@@ -189,8 +255,23 @@ def encode_view(
     config: LocalSubgraphEncodingConfig,
 ) -> EncodedView:
     """The field of view in `observation` as padded arrays. Used for the
-    robot itself and for each sender. `d_max` is max_out_degree(graph)."""
-    selected = _select_nodes(observation, location, config.max_local_nodes)
+    robot itself and for each sender. `d_max` is max_out_degree(graph).
+    Raises ValueError if an outgoing neighbour of `location` does not fit
+    in the view or lies outside it (see check_slot_targets)."""
+    move_targets = graph.out_neighbours(location)
+    if len(move_targets) + 1 > config.max_local_nodes:
+        raise ValueError(
+            f"vertex {location} and its {len(move_targets)} outgoing neighbours do not fit "
+            f"max_local_nodes={config.max_local_nodes}."
+        )
+    outside = [w for w in move_targets if w not in observation.features]
+    if outside:
+        raise ValueError(
+            f"the outgoing neighbours {outside} of vertex {location} are outside its field of "
+            "view, so their moves have no embedding. check_slot_targets finds this for a whole "
+            "graph before the first step."
+        )
+    selected = _select_nodes(observation, location, move_targets, config.max_local_nodes)
     index = {v: i for i, v in enumerate(selected)}
     n = len(selected)
 
@@ -221,12 +302,19 @@ def encode_view(
                 edge_mask[len(pairs)] = 1.0
                 pairs.add(pair)
 
+    move_target_index = np.zeros(d_max, dtype=np.int64)
+    for k, w in enumerate(move_targets):
+        move_target_index[k] = index[w]
+
     return EncodedView(
         node_features=node_features,
         node_mask=node_mask,
         edge_index=edge_index,
         edge_mask=edge_mask,
         own_index=index[location],
+        location=location,
+        move_targets=move_targets,
+        move_target_index=move_target_index,
     )
 
 
@@ -255,6 +343,22 @@ def _pad_senders(
     return arrays
 
 
+def _move_senders(view: EncodedView, sender_views: Sequence[EncodedView]) -> dict[str, np.ndarray]:
+    """For each move slot of `view`, the position among `sender_views` of the
+    robot standing on the vertex that slot leads to. One robot stands on a
+    vertex, so a vertex has at most one sender. The mask is 0 when nobody
+    stands there or when that robot is not among `sender_views`, and the index
+    is then 0."""
+    position = {sender.location: j for j, sender in enumerate(sender_views)}
+    index = np.zeros(len(view.move_target_index), dtype=np.int64)
+    mask = np.zeros(len(view.move_target_index), dtype=np.float32)
+    for k, w in enumerate(view.move_targets):
+        if w in position:
+            index[k] = position[w]
+            mask[k] = 1.0
+    return {"move_sender_index": index, "move_sender_mask": mask}
+
+
 def _assemble(
     view: EncodedView,
     observation: Observation,
@@ -262,9 +366,10 @@ def _assemble(
     sender_views: Optional[Sequence[EncodedView]],
     config: LocalSubgraphEncodingConfig,
 ) -> EncodedObservation:
-    senders = (
-        _pad_senders(sender_views, config.max_messages, view) if sender_views is not None else {}
-    )
+    senders: dict[str, np.ndarray] = {}
+    if sender_views is not None:
+        senders = _pad_senders(sender_views, config.max_messages, view)
+        senders.update(_move_senders(view, sender_views))
     return EncodedObservation(
         node_features=view.node_features,
         node_mask=view.node_mask,
@@ -273,6 +378,7 @@ def _assemble(
         own_index=view.own_index,
         congestion=observation.congestion,
         action_mask=to_action_mask(mask),
+        move_target_index=view.move_target_index,
         **senders,
     )
 
@@ -289,8 +395,9 @@ def encode_observation(
     """o_i(t) and its action mask -> the fixed-shape EncodedObservation.
     `mask` is the caller's own legality_mask result and `d_max` is
     max_out_degree(graph). `sender_views` holds the views of the senders
-    the agent hears, closest first, at most max_messages of them. None
-    means communication is off and leaves the sender arrays out."""
+    the agent hears, closest first, at most max_messages of them, and they
+    also fix which move slot each one stands on. None means communication
+    is off and leaves the sender arrays out."""
     view = encode_view(graph, agent_location, observation, d_max, config)
     return _assemble(view, observation, mask, sender_views, config)
 
@@ -310,9 +417,10 @@ def encode_all_observations(
     Each robot's view is encoded once and reused as a sender block by every
     robot that hears it. With experiment_config.communication on, a robot
     hears the max_messages closest agents of the communication graph (ties
-    by agent id), closest first. The controller, the training env and any
-    later env all build their observations here, so a message is the same
-    wherever it is read."""
+    by agent id), closest first. A move slot's sender is the heard robot
+    standing on the vertex the slot leads to, if any. The controller, the
+    training env and any later env all build their observations here, so a
+    message is the same wherever it is read."""
     communication = experiment_config.communication
     check_communication_caps(encoding_config, communication)
     if experiment_config.observation_depth is None:

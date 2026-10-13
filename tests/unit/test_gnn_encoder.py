@@ -62,8 +62,6 @@ def _config(**overrides) -> ExperimentConfig:
     return ExperimentConfig(**defaults)
 
 
-
-
 def _encoder(num_rounds: int, communication: bool, hidden_width: int = 8) -> GNNEncoder:
     config = GNNEncoderConfig(
         num_rounds=num_rounds, hidden_width=hidden_width, communication=communication
@@ -193,6 +191,7 @@ def test_gradients_flow_through_message_passing_rounds():
     config = _config(observation_depth=3)
     observation = build_observation(graph, fleet, [], agent_id=1, t=0, config=config)
 
+    torch.manual_seed(0)  # one draw in about eighty leaves every ReLU dead, so fix the weights
     encoder = _encoder(2, False)
     z = encoder(graph, 2, observation)
     z.sum().backward()
@@ -256,19 +255,28 @@ def _forward_padded(encoder: GNNEncoder, tensors: dict[str, torch.Tensor]) -> to
     )
 
 
-def _oracle(encoder: GNNEncoder, scenario, agent_id: int) -> torch.Tensor:
-    """The unbatched forward of one robot, with the observations of the
-    robots it hears built from scratch."""
+def _heard_senders(scenario, agent_id: int):
+    """The vertex and the own observation of each robot `agent_id` hears,
+    built from scratch."""
     graph, fleet, tasks, config, _ = scenario
     locations = fleet.locations()
-    observation = build_observation(graph, fleet, tasks, agent_id, 0, config)
     senders = []
     if config.communication:
         heard = communication_neighbours(graph, fleet, agent_id, config.observation_depth)
         for other in heard[:_MAX_MESSAGES]:
             view = build_observation(graph, fleet, tasks, other, 0, config)
             senders.append((locations[other], view))
-    return encoder(graph, locations[agent_id], observation, senders)
+    return senders
+
+
+def _oracle(encoder: GNNEncoder, scenario, agent_id: int) -> torch.Tensor:
+    """The unbatched forward of one robot, with the observations of the
+    robots it hears built from scratch."""
+    graph, fleet, tasks, config, _ = scenario
+    observation = build_observation(graph, fleet, tasks, agent_id, 0, config)
+    return encoder(
+        graph, fleet.locations()[agent_id], observation, _heard_senders(scenario, agent_id)
+    )
 
 
 @pytest.mark.parametrize("num_rounds", [0, 2])
@@ -711,3 +719,93 @@ def test_forward_padded_edge_listed_once_counts_for_both_endpoints():
             alone = encoder.forward_padded(*args, torch.zeros(2, 1), own_index, torch.zeros(2))
             assert not torch.allclose(linked[0], alone[0])  # the neighbour was heard
             assert torch.allclose(linked[0], linked[1], atol=1e-6)  # listing order is irrelevant
+
+
+def _encode_padded(encoder: GNNEncoder, tensors: dict[str, torch.Tensor]):
+    senders = {key: tensors[key] for key in SENDER_KEYS if key in tensors}
+    return encoder.encode_padded(
+        tensors["node_features"],
+        tensors["node_mask"],
+        tensors["edge_index"],
+        tensors["edge_mask"],
+        tensors["own_index"],
+        tensors["congestion"],
+        **senders,
+    )
+
+
+@pytest.mark.parametrize("communication", [False, True])
+def test_encode_padded_returns_what_forward_padded_returns_and_the_per_vertex_embeddings(
+    communication,
+):
+    generator = torch.Generator().manual_seed(3)
+    torch.manual_seed(0)
+    encoder = _encoder(2, communication)
+    encoder.eval()
+    batch = _random_batch(generator, 4, n=7, e_max=9, m=3, communication=communication)
+
+    with torch.no_grad():
+        out = encoder.encode_padded(**batch)
+        z = encoder.forward_padded(**batch)
+
+    assert torch.equal(out.z, z)
+    assert out.node_embeddings.shape == (4, 7, encoder.embedding_dim)
+    if communication:
+        assert out.messages is not None
+        assert out.messages.shape == (4, 3, encoder.embedding_dim)
+    else:
+        assert out.messages is None
+    # z holds the embedding at the robot's own vertex, so the two agree
+    own = out.node_embeddings[torch.arange(4), batch["own_index"]]
+    assert torch.equal(z[:, : encoder.embedding_dim], own)
+
+
+@pytest.mark.parametrize("num_rounds", [0, 2])
+@pytest.mark.parametrize("communication", [False, True])
+def test_encode_padded_move_inputs_match_the_unbatched_embed_moves(num_rounds, communication):
+    """h_w gathered at move_target_index, and the message gathered at
+    move_sender_index and masked, equal what the unbatched oracle computes
+    for each move slot from scratch."""
+    scenario = _scenario(communication)
+    graph, fleet, tasks, config, encoded = scenario
+    torch.manual_seed(4)
+    encoder = _encoder(num_rounds, communication)
+    encoder.eval()
+    with torch.no_grad():
+        tensors = _as_tensors(encoded.values())
+        out = _encode_padded(encoder, tensors)
+
+    found_a_sender = False
+    for row, agent_id in enumerate(encoded):
+        observation = build_observation(graph, fleet, tasks, agent_id, 0, config)
+        with torch.no_grad():
+            h_w, xibar_w = encoder.embed_moves(
+                graph,
+                fleet.locations()[agent_id],
+                observation,
+                _heard_senders(scenario, agent_id),
+            )
+        slots = len(graph.out_neighbours(fleet.locations()[agent_id]))
+        assert h_w.shape == (slots, encoder.embedding_dim)
+        gathered_h = out.node_embeddings[row, tensors["move_target_index"][row]][:slots]
+        assert torch.allclose(gathered_h, h_w, atol=1e-5)
+
+        if not communication:
+            assert xibar_w is None and out.messages is None
+            continue
+        mask = tensors["move_sender_mask"][row]
+        gathered = out.messages[row, tensors["move_sender_index"][row]] * mask.unsqueeze(-1)
+        assert torch.allclose(gathered[:slots], xibar_w, atol=1e-5)
+        assert not gathered[slots:].any()
+        found_a_sender = found_a_sender or bool(mask.any())
+    assert found_a_sender or not communication
+
+
+def test_embed_moves_rejects_senders_when_communication_is_off():
+    scenario = _scenario(communication=True)
+    graph, fleet, tasks, config, _ = scenario
+    observation = build_observation(graph, fleet, tasks, 1, 0, config)
+    encoder = _encoder(2, communication=False)
+
+    with pytest.raises(ValueError, match="communication off"):
+        encoder.embed_moves(graph, 0, observation, _heard_senders(scenario, 1))

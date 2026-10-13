@@ -39,12 +39,12 @@ from ray.tune.registry import register_env
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
-from slap_mapd_coupling.environment.spaces import max_out_degree
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
     check_communication_caps,
+    check_slot_targets,
 )
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
@@ -173,14 +173,7 @@ def build_ppo_config(
             "environment and the encoder must agree on whether messages are used."
         )
     check_communication_caps(encoding_config, experiment_config.communication)
-    d_max = max_out_degree(graph)
-    expected_num_actions = d_max + 1
-    if policy_value_head_config.num_actions != expected_num_actions:
-        raise ValueError(
-            f"policy_value_head_config.num_actions={policy_value_head_config.num_actions} "
-            f"!= max_out_degree(graph)+1={expected_num_actions} (the action mask); the policy "
-            "head's action count must match this instance's actual d_max, not an unrelated value."
-        )
+    check_slot_targets(graph, experiment_config.observation_depth, encoding_config)
 
     train_seeds, _ = split_seeds(seed_split)
 

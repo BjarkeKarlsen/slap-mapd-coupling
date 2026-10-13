@@ -12,8 +12,8 @@ from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncod
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 
-def _graph():
-    params = GeneratorParams(
+def _graph(**overrides):
+    defaults = dict(
         max_num_aisles=6,
         max_aisle_length=6,
         max_num_cross_aisles=5,
@@ -24,7 +24,8 @@ def _graph():
         num_endpoints=4,
         seed=0,
     )
-    return generate_warehouse_graph(params)
+    defaults.update(overrides)
+    return generate_warehouse_graph(GeneratorParams(**defaults))
 
 
 def _instance(graph):
@@ -102,6 +103,8 @@ def test_observations_carry_the_sender_keys_exactly_when_communication_is_on(com
         for aid in env.agents:
             keys = set(obs[aid]["observations"])
             assert (set(SENDER_KEYS) <= keys) == communication
+            assert "move_target_index" in keys
+            assert ({"move_sender_index", "move_sender_mask"} <= keys) == communication
             assert env.observation_spaces[aid].contains(obs[aid])
         obs, *_ = env.step({aid: 0 for aid in env.agents})
 
@@ -113,6 +116,24 @@ def test_communication_with_no_room_for_a_sender_is_rejected():
     with pytest.raises(ValueError, match="max_messages"):
         WarehouseMAPDMultiAgentEnv(
             graph, skus, counts, capacities, _config(communication=True), enc_config, (1,)
+        )
+
+
+def test_a_cap_too_small_for_a_vertex_and_its_neighbours_is_rejected():
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=2, max_messages=1)
+    with pytest.raises(ValueError, match="max_local_nodes"):
+        WarehouseMAPDMultiAgentEnv(graph, skus, counts, capacities, _config(), enc_config, (1,))
+
+
+def test_a_neighbour_outside_the_field_of_view_is_rejected_when_the_env_is_built():
+    graph = _graph(random_edge_costs=True, edge_cost_range=(1.5, 2.0))
+    skus, capacities, counts = _instance(graph)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=1)
+    with pytest.raises(ValueError, match="observation_depth"):
+        WarehouseMAPDMultiAgentEnv(
+            graph, skus, counts, capacities, _config(observation_depth=1), enc_config, (1,)
         )
 
 

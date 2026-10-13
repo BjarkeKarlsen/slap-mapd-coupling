@@ -18,8 +18,8 @@ from slap_mapd_coupling.training.config import (
 )
 
 
-def _graph():
-    params = GeneratorParams(
+def _graph(**overrides):
+    defaults = dict(
         max_num_aisles=6,
         max_aisle_length=6,
         max_num_cross_aisles=5,
@@ -30,7 +30,8 @@ def _graph():
         num_endpoints=4,
         seed=0,
     )
-    return generate_warehouse_graph(params)
+    defaults.update(overrides)
+    return generate_warehouse_graph(GeneratorParams(**defaults))
 
 
 def _instance(graph):
@@ -98,27 +99,53 @@ def test_ppo_hyperparameters_requires_every_field_no_defaults():
         PPOHyperparameters()  # type: ignore[call-arg]
 
 
-def test_build_ppo_config_rejects_mismatched_num_actions():
+def test_build_ppo_config_rejects_a_cap_too_small_for_a_vertex_and_its_neighbours():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
-    config = _config()
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    assert max_out_degree(graph) + 1 > 2
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=2, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
-    wrong_head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=999)
 
-    with pytest.raises(ValueError, match="num_actions"):
+    with pytest.raises(ValueError, match="max_local_nodes"):
         build_ppo_config(
             graph,
             skus,
             counts,
             capacities,
-            config,
+            _config(),
             enc_config,
             gnn_config,
-            wrong_head_config,
+            PolicyValueHeadConfig(hidden_width=8),
             _ppo_hp(),
             _seed_split(),
         )
+
+
+def test_build_ppo_config_rejects_a_neighbour_outside_the_field_of_view():
+    graph = _graph(random_edge_costs=True, edge_cost_range=(1.5, 2.0))
+    skus, capacities, counts = _instance(graph)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
+    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
+
+    with pytest.raises(ValueError, match="observation_depth"):
+        build_ppo_config(
+            graph,
+            skus,
+            counts,
+            capacities,
+            _config(observation_depth=1),
+            enc_config,
+            gnn_config,
+            PolicyValueHeadConfig(hidden_width=8),
+            _ppo_hp(),
+            _seed_split(),
+        )
+
+
+def test_the_head_config_has_no_action_count():
+    """The head's size follows the observation's slot arrays."""
+    with pytest.raises(ValueError):
+        PolicyValueHeadConfig(hidden_width=8, num_actions=5)  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize("experiment_communication", [False, True])
@@ -130,7 +157,7 @@ def test_build_ppo_config_rejects_a_communication_mismatch(experiment_communicat
     gnn_config = GNNEncoderConfig(
         num_rounds=1, hidden_width=8, communication=not experiment_communication
     )
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="communication"):
         build_ppo_config(
@@ -152,7 +179,7 @@ def test_build_ppo_config_accepts_communication_when_both_switches_agree():
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True)
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     ppo_config = build_ppo_config(
         graph,
@@ -174,7 +201,7 @@ def test_build_ppo_config_rejects_communication_with_no_room_for_a_sender():
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=0)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=True)
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="max_messages"):
         build_ppo_config(
@@ -201,7 +228,7 @@ def test_build_ppo_config_rejects_missing_discount():
     config = _config().model_construct(**{**_config().model_dump(), "discount": None})
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="discount"):
         build_ppo_config(
@@ -223,7 +250,7 @@ def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
     skus, capacities, counts = _instance(graph)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=max_out_degree(graph) + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     with pytest.raises(ValueError, match="credit_signal"):
         build_ppo_config(
@@ -246,8 +273,7 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     config = _config()
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
     gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False)
-    d_max = max_out_degree(graph)
-    head_config = PolicyValueHeadConfig(hidden_width=8, num_actions=d_max + 1)
+    head_config = PolicyValueHeadConfig(hidden_width=8)
 
     ppo_config = build_ppo_config(
         graph,
