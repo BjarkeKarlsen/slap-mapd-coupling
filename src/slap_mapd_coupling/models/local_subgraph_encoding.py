@@ -1,32 +1,31 @@
 """Pads and masks an Observation (environment/observation.py) into the
 fixed-shape arrays GNNEncoder.forward_padded and RLlib's batched pipeline
-need. The field of view has a variable vertex count, so everything is
-padded to max_local_nodes.
+need. An observation covers a window, the field of view by default, whose
+vertex count varies, so everything is padded to max_local_nodes.
 
-The thesis does not say what to do when the field of view exceeds the cap
-(issue #66), so the truncation is a flagged choice. Nodes keep the
-agent's own vertex first, then its outgoing neighbours in slot order, then
-the rest by ascending eta_i(v,t). An edge to a dropped vertex is left out
-of the edge list. A receiver keeps its max_messages closest senders by
-d_G, ties by agent id.
+The nodes keep the order of the window. A window larger than
+max_local_nodes raises ValueError for every router (issue #66), because
+dropping vertices would change the window. Raise the cap instead. A
+receiver keeps its max_messages closest senders by d_G, ties by agent id.
 
-The edge list has one row per undirected pair among the selected
+The edge list has one row per undirected pair among the window's
 vertices, padded to E_max = max_local_nodes * d_max. That bound holds
-because every selected pair is a directed edge, and no selected vertex
-has more than d_max outgoing edges.
+because every pair is a directed edge, and no vertex has more than d_max
+outgoing edges.
 
 The move score (sec:method:model) needs, for each move slot, the vertex it
 leads to and the robot standing there. Slot k is the k-th outgoing
 neighbour by vertex number, so every observation carries two arrays of
 length d_max: the local index of that vertex in the padded view, and a
-mask for the slots that exist. Every outgoing neighbour must be inside
-the field of view and inside the cap. `check_slot_targets` verifies this
-for a whole graph when the environment is built, and `encode_view` raises
-if a view breaks it.
+mask for the slots that exist. Every window must hold the robot's own
+vertex and all its outgoing neighbours, and fit the cap. `check_windows`
+verifies this for a whole graph when the environment is built
+(`check_slot_targets` for the field of view), and `encode_view` raises if
+a view breaks it.
 
 A message is the sender's own embedding (sec:method:model), so with
 communication on a receiver's sample carries the padded views of its
-senders, in the layout of its own view with an extra axis M. The network
+senders, each over the sender's own window, with an extra axis M. The network
 embeds them with the current weights. For each move slot the sample also
 names the sender standing on that vertex, if the receiver hears it. With
 communication off the sender keys are absent. `encode_all_observations`
@@ -36,7 +35,7 @@ builds the sample of every robot for one timestep.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -52,6 +51,7 @@ from slap_mapd_coupling.environment.observation import (
     Observation,
     build_observation,
     communication_neighbours,
+    local_subgraph,
 )
 from slap_mapd_coupling.environment.spaces import Mask, legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM
@@ -87,19 +87,50 @@ def _check_cap_fits(config: LocalSubgraphEncodingConfig, d_max: int) -> None:
         )
 
 
+def check_windows(
+    graph: WarehouseGraph,
+    windows: Mapping[VertexId, Sequence[VertexId]],
+    config: LocalSubgraphEncodingConfig,
+) -> None:
+    """`windows` maps each vertex a robot can stand on to the window its
+    observation covers there. Raises ValueError if a window lists a vertex
+    twice, leaves out its own vertex or one of that vertex's outgoing
+    neighbours, or holds more than max_local_nodes vertices. The move score
+    needs the embedding at the vertex each move leads to, so a missing
+    neighbour would leave a slot with no input. Run it once when the
+    environment is built, so a rollout never meets it."""
+    for v, window in windows.items():
+        members = set(window)
+        if len(members) != len(window):
+            raise ValueError(f"the window of vertex {v} lists a vertex more than once.")
+        if v not in members:
+            raise ValueError(
+                f"the window of vertex {v} leaves out {v} itself, so a robot standing there "
+                "has no embedding of its own."
+            )
+        missing = [w for w in graph.out_neighbours(v) if w not in members]
+        if missing:
+            raise ValueError(
+                f"the outgoing neighbours {missing} of vertex {v} are outside its window, so "
+                "the moves to them have no embedding."
+            )
+        if len(members) > config.max_local_nodes:
+            raise ValueError(
+                f"the window of vertex {v} has {len(members)} vertices, more than "
+                f"max_local_nodes={config.max_local_nodes}. A window is never truncated, so "
+                "raise max_local_nodes."
+            )
+
+
 def check_slot_targets(
     graph: WarehouseGraph, observation_depth: int, config: LocalSubgraphEncodingConfig
 ) -> None:
-    """Raises ValueError unless every movable vertex has all its outgoing
-    neighbours in its field of view (cost distance at most d_obs, as in
-    environment/observation.py::local_subgraph) and the cap fits them. The
-    move score needs the embedding at the vertex each move leads to, so a
-    neighbour outside the view would leave a slot with no input. Run it
-    once when the environment is built, so a rollout never meets it."""
+    """check_windows with the field of view as every movable vertex's
+    window. It first names an outgoing neighbour beyond d_obs, since that
+    is fixed by raising observation_depth rather than the cap."""
     _check_cap_fits(config, max_out_degree(graph))
-    for v, vertex in graph.vertices.items():
-        if not vertex.role.movable:
-            continue
+    movable = [v for v, vertex in graph.vertices.items() if vertex.role.movable]
+    for v in movable:
         for w in graph.out_neighbours(v):
             if graph.distance(v, w) > observation_depth:
                 raise ValueError(
@@ -108,12 +139,13 @@ def check_slot_targets(
                     "the move to it has no embedding in the field of view. Raise "
                     "observation_depth or shorten the edge."
                 )
+    check_windows(graph, {v: local_subgraph(graph, v, observation_depth) for v in movable}, config)
 
 
 @dataclass(frozen=True)
 class EncodedView:
-    """One robot's padded field of view, without a batch dimension. It is
-    the same layout for the robot itself and for each of its senders."""
+    """One robot's padded window, without a batch dimension. It is the
+    same layout for the robot itself and for each of its senders."""
 
     node_features: np.ndarray  # [max_local_nodes, NODE_FEATURE_DIM]
     node_mask: np.ndarray  # [max_local_nodes], 1.0 valid / 0.0 pad
@@ -227,26 +259,6 @@ def encoded_observation_space(
     return gym.spaces.Dict(spaces)
 
 
-def _select_nodes(
-    observation: Observation,
-    agent_location: VertexId,
-    move_targets: Sequence[VertexId],
-    max_local_nodes: int,
-) -> list[VertexId]:
-    """l_i(t) and N+(l_i(t)) first, then the remaining visible vertices by
-    ascending eta."""
-    visible = list(observation.visible_vertices)
-    if len(visible) <= max_local_nodes:
-        return visible
-    first = [agent_location, *move_targets]
-    kept = set(first)
-    others = sorted(
-        (v for v in visible if v not in kept),
-        key=lambda v: observation.features[v].eta,
-    )
-    return first + others[: max_local_nodes - len(first)]
-
-
 def encode_view(
     graph: WarehouseGraph,
     location: VertexId,
@@ -254,24 +266,33 @@ def encode_view(
     d_max: int,
     config: LocalSubgraphEncodingConfig,
 ) -> EncodedView:
-    """The field of view in `observation` as padded arrays. Used for the
-    robot itself and for each sender. `d_max` is max_out_degree(graph).
-    Raises ValueError if an outgoing neighbour of `location` does not fit
-    in the view or lies outside it (see check_slot_targets)."""
+    """The window in `observation` as padded arrays, in the window's order.
+    Used for the robot itself and for each sender. `d_max` is
+    max_out_degree(graph). Raises ValueError if the window leaves out
+    `location` or one of its outgoing neighbours, or does not fit the cap
+    (see check_windows)."""
     move_targets = graph.out_neighbours(location)
     if len(move_targets) + 1 > config.max_local_nodes:
         raise ValueError(
             f"vertex {location} and its {len(move_targets)} outgoing neighbours do not fit "
             f"max_local_nodes={config.max_local_nodes}."
         )
+    if location not in observation.features:
+        raise ValueError(f"vertex {location} is outside its own window.")
     outside = [w for w in move_targets if w not in observation.features]
     if outside:
         raise ValueError(
             f"the outgoing neighbours {outside} of vertex {location} are outside its field of "
-            "view, so their moves have no embedding. check_slot_targets finds this for a whole "
-            "graph before the first step."
+            "view or window, so their moves have no embedding. check_windows finds this for a "
+            "whole graph before the first step."
         )
-    selected = _select_nodes(observation, location, move_targets, config.max_local_nodes)
+    selected = list(observation.visible_vertices)
+    if len(selected) > config.max_local_nodes:
+        raise ValueError(
+            f"the window of vertex {location} has {len(selected)} vertices, more than "
+            f"max_local_nodes={config.max_local_nodes}. A window is never truncated, so raise "
+            "max_local_nodes. check_windows finds this for a whole graph before the first step."
+        )
     index = {v: i for i, v in enumerate(selected)}
     n = len(selected)
 
@@ -410,9 +431,12 @@ def encode_all_observations(
     experiment_config: ExperimentConfig,
     encoding_config: LocalSubgraphEncodingConfig,
     d_max: int,
+    windows: Optional[Mapping[AgentId, Sequence[VertexId]]] = None,
 ) -> dict[AgentId, EncodedObservation]:
     """The EncodedObservation of every robot at timestep t, keyed by agent
-    id in ascending order. `d_max` is max_out_degree(graph).
+    id in ascending order. `d_max` is max_out_degree(graph). `windows`
+    maps every robot to the window its observation covers. None means the
+    field of view for every robot.
 
     Each robot's view is encoded once and reused as a sender block by every
     robot that hears it. With experiment_config.communication on, a robot
@@ -428,8 +452,20 @@ def encode_all_observations(
 
     locations = fleet.locations()
     agent_ids = sorted(locations)
+    if windows is not None:
+        missing = [agent_id for agent_id in agent_ids if agent_id not in windows]
+        if missing:
+            raise ValueError(f"windows has no window for the robots {missing}.")
     observations = {
-        agent_id: build_observation(graph, fleet, tasks, agent_id, t, experiment_config)
+        agent_id: build_observation(
+            graph,
+            fleet,
+            tasks,
+            agent_id,
+            t,
+            experiment_config,
+            window=None if windows is None else windows[agent_id],
+        )
         for agent_id in agent_ids
     }
     views = {
