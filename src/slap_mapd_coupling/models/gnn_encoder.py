@@ -29,7 +29,7 @@ that both paths agree.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import torch
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
@@ -50,6 +50,10 @@ SENDER_KEYS = (
     "sender_own_index",
     "sender_mask",
 )
+
+# Whether the readout carries the pooled mean. The observation then holds
+# the key "pool_mask", which marks the vertices to pool over.
+Pooling = Literal["none", "mean"]
 
 
 class GNNEncoderConfig(BaseModel):

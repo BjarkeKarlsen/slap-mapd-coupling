@@ -30,12 +30,17 @@ embeds them with the current weights. For each move slot the sample also
 names the sender standing on that vertex, if the receiver hears it. With
 communication off the sender keys are absent. `encode_all_observations`
 builds the sample of every robot for one timestep.
+
+With pooling on, the sample also carries `pool_mask`, which marks the
+vertices of the robot's own view that the readout pools over. It is 0.0
+for the halo and for padding. Senders need none, since a message is the
+sender's own embedding. With pooling off the key is absent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Collection, Mapping, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -54,7 +59,7 @@ from slap_mapd_coupling.environment.observation import (
     local_subgraph,
 )
 from slap_mapd_coupling.environment.spaces import Mask, legality_mask, max_out_degree
-from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM
+from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, Pooling
 
 
 class LocalSubgraphEncodingConfig(BaseModel):
@@ -178,6 +183,7 @@ class EncodedObservation:
     sender_mask: Optional[np.ndarray] = None  # [max_messages], 1.0 real sender / 0.0 pad
     move_sender_index: Optional[np.ndarray] = None  # [d_max] int64, sender standing on slot k
     move_sender_mask: Optional[np.ndarray] = None  # [d_max], 1.0 if that sender is heard
+    pool_mask: Optional[np.ndarray] = None  # [max_local_nodes], 1.0 pool / 0.0 halo or pad
 
     def as_rllib_dict(self) -> dict[str, Any]:
         """{"action_mask": ..., "observations": {...}}, the Dict shape that
@@ -202,6 +208,8 @@ class EncodedObservation:
                 move_sender_index=self.move_sender_index,
                 move_sender_mask=self.move_sender_mask,
             )
+        if self.pool_mask is not None:
+            observations["pool_mask"] = self.pool_mask
         return {"action_mask": self.action_mask, "observations": observations}
 
 
@@ -211,12 +219,15 @@ def max_edges(config: LocalSubgraphEncodingConfig, d_max: int) -> int:
 
 
 def encoded_observation_space(
-    config: LocalSubgraphEncodingConfig, d_max: int, communication: bool
+    config: LocalSubgraphEncodingConfig,
+    d_max: int,
+    communication: bool,
+    pooling: Pooling = "none",
 ) -> gym.spaces.Dict:
     """The "observations" half of masked_observation_space() for one agent.
     `d_max` is max_out_degree(graph), which sets the edge list's size and
     the length of the move slot arrays. The sender keys are present only
-    with `communication` on."""
+    with `communication` on, and pool_mask only with `pooling` on."""
     check_communication_caps(config, communication)
     _check_cap_fits(config, d_max)
     num_nodes = config.max_local_nodes
@@ -255,6 +266,10 @@ def encoded_observation_space(
             sender_mask=gym.spaces.Box(low=0.0, high=1.0, shape=(m,), dtype=np.float32),
             move_sender_index=gym.spaces.Box(low=0, high=m - 1, shape=(d_max,), dtype=np.int64),
             move_sender_mask=gym.spaces.Box(low=0.0, high=1.0, shape=(d_max,), dtype=np.float32),
+        )
+    if pooling != "none":
+        spaces["pool_mask"] = gym.spaces.Box(
+            low=0.0, high=1.0, shape=(num_nodes,), dtype=np.float32
         )
     return gym.spaces.Dict(spaces)
 
@@ -380,12 +395,30 @@ def _move_senders(view: EncodedView, sender_views: Sequence[EncodedView]) -> dic
     return {"move_sender_index": index, "move_sender_mask": mask}
 
 
+def _pool_mask(
+    observation: Observation, pool: Collection[VertexId], max_local_nodes: int
+) -> np.ndarray:
+    """1.0 at the vertices of `pool`, in the order of the window, and 0.0
+    elsewhere. Raises ValueError if `pool` is empty or reaches outside the
+    window."""
+    index = {v: i for i, v in enumerate(observation.visible_vertices)}
+    if not pool:
+        raise ValueError("a robot pools over no vertex, so the pooled mean is undefined.")
+    outside = sorted(v for v in pool if v not in index)
+    if outside:
+        raise ValueError(f"a robot pools over the vertices {outside}, outside its window.")
+    mask = np.zeros(max_local_nodes, dtype=np.float32)
+    mask[[index[v] for v in pool]] = 1.0
+    return mask
+
+
 def _assemble(
     view: EncodedView,
     observation: Observation,
     mask: Mask,
     sender_views: Optional[Sequence[EncodedView]],
     config: LocalSubgraphEncodingConfig,
+    pool_mask: Optional[np.ndarray] = None,
 ) -> EncodedObservation:
     senders: dict[str, np.ndarray] = {}
     if sender_views is not None:
@@ -400,6 +433,7 @@ def _assemble(
         congestion=observation.congestion,
         action_mask=to_action_mask(mask),
         move_target_index=view.move_target_index,
+        pool_mask=pool_mask,
         **senders,
     )
 
@@ -432,11 +466,18 @@ def encode_all_observations(
     encoding_config: LocalSubgraphEncodingConfig,
     d_max: int,
     windows: Optional[Mapping[AgentId, Sequence[VertexId]]] = None,
+    pooling: Pooling = "none",
+    pool_vertices: Optional[Mapping[AgentId, Collection[VertexId]]] = None,
 ) -> dict[AgentId, EncodedObservation]:
     """The EncodedObservation of every robot at timestep t, keyed by agent
     id in ascending order. `d_max` is max_out_degree(graph). `windows`
     maps every robot to the window its observation covers. None means the
     field of view for every robot.
+
+    With `pooling` on, every sample carries pool_mask. `pool_vertices` maps
+    every robot to the vertices of its window it pools over, its zone for
+    the section-based router. None means the whole window. It must be None
+    with pooling off.
 
     Each robot's view is encoded once and reused as a sender block by every
     robot that hears it. With experiment_config.communication on, a robot
@@ -456,6 +497,12 @@ def encode_all_observations(
         missing = [agent_id for agent_id in agent_ids if agent_id not in windows]
         if missing:
             raise ValueError(f"windows has no window for the robots {missing}.")
+    if pool_vertices is not None:
+        if pooling == "none":
+            raise ValueError("pool_vertices were given but pooling is off.")
+        missing = [agent_id for agent_id in agent_ids if agent_id not in pool_vertices]
+        if missing:
+            raise ValueError(f"pool_vertices has no pool for the robots {missing}.")
     observations = {
         agent_id: build_observation(
             graph,
@@ -483,8 +530,20 @@ def encode_all_observations(
                 graph, fleet, agent_id, experiment_config.observation_depth
             )
             sender_views = [views[j] for j in heard[: encoding_config.max_messages]]
+        pool_mask: Optional[np.ndarray] = None
+        if pooling != "none":
+            observation = observations[agent_id]
+            pool = (
+                observation.visible_vertices if pool_vertices is None else pool_vertices[agent_id]
+            )
+            pool_mask = _pool_mask(observation, pool, encoding_config.max_local_nodes)
         mask = legality_mask(graph, locations[agent_id], d_max=d_max)
         encoded[agent_id] = _assemble(
-            views[agent_id], observations[agent_id], mask, sender_views, encoding_config
+            views[agent_id],
+            observations[agent_id],
+            mask,
+            sender_views,
+            encoding_config,
+            pool_mask,
         )
     return encoded

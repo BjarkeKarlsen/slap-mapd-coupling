@@ -213,12 +213,12 @@ def test_encode_observation_congestion_and_action_mask():
     assert encoded.action_mask[0] == 1.0  # wait is always legal
 
 
-def _encode_all(fleet, communication, max_messages=2, depth=3, num_vertices=10):
+def _encode_all(fleet, communication, max_messages=2, depth=3, num_vertices=10, pooling="none"):
     graph = _line_graph(num_vertices)
     encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=max_messages)
     config = _config(observation_depth=depth, communication=communication)
     encoded = encode_all_observations(
-        graph, fleet, [], 0, config, encoding_config, max_out_degree(graph)
+        graph, fleet, [], 0, config, encoding_config, max_out_degree(graph), pooling=pooling
     )
     return graph, encoding_config, encoded
 
@@ -228,11 +228,17 @@ def _encode_all(fleet, communication, max_messages=2, depth=3, num_vertices=10):
 _FLEET_LOCATIONS = {1: 4, 4: 7, 3: 2, 2: 6, 5: 5}
 
 
+@pytest.mark.parametrize("pooling", ["none", "mean"])
 @pytest.mark.parametrize("communication", [False, True])
-def test_encoded_observation_space_matches_the_encoded_arrays(communication):
-    graph, encoding_config, encoded = _encode_all(_fleet(_FLEET_LOCATIONS), communication)
-    space = encoded_observation_space(encoding_config, max_out_degree(graph), communication)
+def test_encoded_observation_space_matches_the_encoded_arrays(communication, pooling):
+    graph, encoding_config, encoded = _encode_all(
+        _fleet(_FLEET_LOCATIONS), communication, pooling=pooling
+    )
+    space = encoded_observation_space(
+        encoding_config, max_out_degree(graph), communication, pooling=pooling
+    )
 
+    assert ("pool_mask" in space.spaces) == (pooling == "mean")
     for item in encoded.values():
         assert space.contains(item.as_rllib_dict()["observations"])
     assert space["edge_index"].shape == (8 * 2, 2)
@@ -497,7 +503,7 @@ _WINDOWS = {
 }
 
 
-def _encode_windows(windows, observation_depth=1, max_local_nodes=8):
+def _encode_windows(windows, observation_depth=1, max_local_nodes=8, **pooling):
     graph = _line_graph(8)
     encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=max_local_nodes, max_messages=1)
     config = _config(observation_depth=observation_depth)
@@ -510,6 +516,7 @@ def _encode_windows(windows, observation_depth=1, max_local_nodes=8):
         encoding_config,
         max_out_degree(graph),
         windows=windows,
+        **pooling,
     )
 
 
@@ -656,3 +663,59 @@ def test_no_windows_equals_the_field_of_view_as_every_robots_window(communicatio
         assert actual["observations"].keys() == expected["observations"].keys()
         for key, value in expected["observations"].items():
             np.testing.assert_array_equal(actual["observations"][key], value)
+
+
+# The zones of _WINDOWS["zone plus halo"], one per robot.
+_ZONES = {1: (0, 1, 2, 3), 2: (4, 5, 6, 7)}
+
+
+def test_pooling_off_gives_no_pool_mask():
+    encoded = _encode_windows(_WINDOWS["zone plus halo"])
+    for item in encoded.values():
+        assert item.pool_mask is None
+        assert "pool_mask" not in item.as_rllib_dict()["observations"]
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1)
+    assert "pool_mask" not in encoded_observation_space(encoding_config, 2, False).spaces
+
+
+def test_the_pool_mask_marks_the_zone_and_leaves_out_the_halo_and_the_padding():
+    encoded = _encode_windows(_WINDOWS["zone plus halo"], pooling="mean", pool_vertices=_ZONES)
+    # each window lists its zone first and its one halo vertex fifth, then three padded slots
+    for item in encoded.values():
+        assert item.pool_mask.dtype == np.float32
+        assert item.pool_mask.tolist() == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        observations = item.as_rllib_dict()["observations"]
+        np.testing.assert_array_equal(observations["pool_mask"], item.pool_mask)
+
+
+@pytest.mark.parametrize("name", sorted(_WINDOWS))
+def test_without_pool_vertices_a_robot_pools_over_its_whole_window(name):
+    encoded = _encode_windows(_WINDOWS[name], pooling="mean")
+    for item in encoded.values():
+        np.testing.assert_array_equal(item.pool_mask, item.node_mask)
+
+
+def test_pooling_leaves_every_other_array_unchanged():
+    off = _encode_windows(_WINDOWS["zone plus halo"])
+    on = _encode_windows(_WINDOWS["zone plus halo"], pooling="mean", pool_vertices=_ZONES)
+    for agent_id in off:
+        expected = off[agent_id].as_rllib_dict()["observations"]
+        actual = dict(on[agent_id].as_rllib_dict()["observations"])
+        del actual["pool_mask"]
+        assert actual.keys() == expected.keys()
+        for key, value in expected.items():
+            np.testing.assert_array_equal(actual[key], value)
+
+
+@pytest.mark.parametrize(
+    "pooling, pool_vertices, match",
+    [
+        ("none", _ZONES, "pooling is off"),
+        ("mean", {1: _ZONES[1]}, "no pool"),
+        ("mean", {1: _ZONES[1], 2: (4, 5, 6, 7, 2)}, r"vertices \[2\], outside its window"),
+        ("mean", {1: _ZONES[1], 2: ()}, "no vertex"),
+    ],
+)
+def test_bad_pool_vertices_are_rejected(pooling, pool_vertices, match):
+    with pytest.raises(ValueError, match=match):
+        _encode_windows(_WINDOWS["zone plus halo"], pooling=pooling, pool_vertices=pool_vertices)

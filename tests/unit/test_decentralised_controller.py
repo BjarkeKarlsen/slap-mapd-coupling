@@ -391,6 +391,22 @@ def test_batch_stacks_every_observation_key_including_the_move_slot_arrays(commu
     assert ("move_sender_mask" in observations) == communication
 
 
+def test_batch_stacks_the_pool_mask_like_every_other_key():
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    config = _decentralised_config(num_agents=3)
+    d_max = max_out_degree(graph)
+    encoded = encode_all_observations(
+        graph, _three_robots(), [], 0, config, enc_config, d_max, pooling="mean"
+    )
+
+    observations = decentralised._batch(list(encoded.values()))[Columns.OBS]["observations"]
+
+    expected = np.stack([item.pool_mask for item in encoded.values()])
+    assert observations["pool_mask"].dtype == torch.float32
+    np.testing.assert_array_equal(observations["pool_mask"].numpy(), expected)
+
+
 def test_constructing_a_controller_with_communication_and_no_room_for_a_sender_is_rejected():
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=0)
     config = _decentralised_config(num_agents=2, communication=True)
