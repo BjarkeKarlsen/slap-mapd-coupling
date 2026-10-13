@@ -15,6 +15,12 @@ respective registries (docs/controller_integration.md,
 docs/storage_rule_integration.md), so this loop never changes when either
 is added to.
 
+Stages 1 and 2 run at the end of reset() (for t = 0) and at the end of
+every step() that does not end the episode (for the new t). A robot
+therefore sees the task it was assigned in the observation it acts on, and
+the next step starts at stage 3. The order draws and the backlog values
+are the same as when stages 1 and 2 opened the step.
+
 Not a subclass of ray.rllib.MultiAgentEnv or gymnasium.Env: the
 dict-keyed-by-agent-id obs/reward/terminated/truncated/info shape follows
 those conventions (sec:impl:simulator says so explicitly), but importing
@@ -145,9 +151,14 @@ class WarehouseMAPDEnv:
         self._skus = dict(skus)
         self._storage_capacities = dict(storage_capacities)
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
-        # Lazy: resolved on first actions=None step, not here -- see
-        # module docstring ("Controller resolution is therefore lazy").
+        # Lazy for a controller: resolved on the first actions=None step, not here (see
+        # the module docstring on router resolution). A planner is resolved now,
+        # because a planner that picks its own tasks is asked for the assignment inside
+        # reset(), after its own reset(seed). Temporary: replaced by an explicit
+        # assigner argument.
         self._controller: Controller | None = None
+        if config.planner is not None:
+            self._controller = get_router(config)
         self._storage_rule = get_storage_rule(config.storage_mode)
 
         self.fleet: FleetState
@@ -203,6 +214,7 @@ class WarehouseMAPDEnv:
 
         self.log = EpisodeLog()
         self.log.backlog_by_t.append(self._backlog(self._t))
+        self._release_and_assign()
 
         observations = dict(self.fleet.locations())
         infos: dict[AgentId, dict] = {aid: {} for aid in agent_ids}
@@ -230,7 +242,8 @@ class WarehouseMAPDEnv:
         dict[AgentId | str, bool],
         dict[AgentId | str, dict],
     ]:
-        """Advance one timestep through all six stages. Returns
+        """Advance one timestep: stages 3 to 6, then stages 1 and 2 for the new t
+        unless the episode ends. Returns
         (observations, rewards, terminated, truncated, infos), dict-keyed
         by agent id plus an "__all__" entry (RLlib/PettingZoo convention)
         signalling whether the whole episode is done.
@@ -244,39 +257,18 @@ class WarehouseMAPDEnv:
         before_fleet = self.fleet
         self._record_crowding(before_fleet)
 
-        # Stage 1: orders -> new tasks entering Q_t.
-        self.tasks.extend(self._generate_tasks())
-
-        # The registered router, resolved before stage 2 because a planner that picks its
-        # own tasks (Token Passing) takes over the assignment. Not needed when `actions`
-        # are given, since stage 3 then decodes them instead.
+        # Stages 1 and 2 already ran for this t, at the end of reset() or of the
+        # previous step. The registered router is not needed when `actions` are
+        # given, since stage 3 then decodes them instead.
         router: Controller | None = None
         if actions is None:
             if self._controller is None:
                 self._controller = get_router(self.config)
             router = self._controller
 
-        # Stage 2: shared greedy task assignment (pi_assign), unless the router
-        # picks its own tasks (SelfAssigningRouter).
-        assign_start = time.perf_counter()
-        if isinstance(router, SelfAssigningRouter):
-            assignments = router.assign(self.graph, self.fleet, self.tasks, self._t)
-        else:
-            assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
-        self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
-        if assignments:
-            self.tasks = [
-                (
-                    task.assign(assignments[task.task_id], self._t)
-                    if task.task_id in assignments
-                    else task
-                )
-                for task in self.tasks
-            ]
-
-        # eq:lifecycle: a task assigned at self._t is already active AT
-        # self._t, so this has to be taken after stage 2, not before --
-        # the freshly assigned agent's action this same tick still counts
+        # Under the task lifecycle a task assigned at self._t is already active at
+        # self._t. This includes the task assigned at the end of the previous step,
+        # so the freshly assigned agent's action this same tick still counts
         # towards omega_j(t) and this timestep's reward.
         active_by_agent = active_tasks_by_agent(self.tasks, self._t)
 
@@ -352,6 +344,8 @@ class WarehouseMAPDEnv:
 
         self._t = next_t
         episode_done = self._t >= self.config.horizon
+        if not episode_done:
+            self._release_and_assign()
         observations = dict(self.fleet.locations())
         terminated: dict[AgentId | str, bool] = {aid: False for aid in self.fleet.agents}
         terminated["__all__"] = False
@@ -362,6 +356,28 @@ class WarehouseMAPDEnv:
         }
         infos["__all__"] = {}
         return observations, rewards, terminated, truncated, infos
+
+    def _release_and_assign(self) -> None:
+        """Stage 1 (orders become tasks entering Q_t) and stage 2 (shared greedy
+        assignment, or the router's own for a planner that picks its tasks) for the
+        current t."""
+        self.tasks.extend(self._generate_tasks())
+
+        assign_start = time.perf_counter()
+        if isinstance(self._controller, SelfAssigningRouter):
+            assignments = self._controller.assign(self.graph, self.fleet, self.tasks, self._t)
+        else:
+            assignments = assign_tasks(self.graph, self.fleet, self.tasks, self._t, self._priority)
+        self.log.assignment_runtime_seconds.append(time.perf_counter() - assign_start)
+        if assignments:
+            self.tasks = [
+                (
+                    task.assign(assignments[task.task_id], self._t)
+                    if task.task_id in assignments
+                    else task
+                )
+                for task in self.tasks
+            ]
 
     def _generate_tasks(self) -> list[Task]:
         """Stage 1: P_ord -> new tasks (eq:task), entering Q_t.

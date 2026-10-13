@@ -17,13 +17,16 @@ class _TakesTheNewestTask:
 
     def __init__(self) -> None:
         self.resets: list[int] = []
+        self.calls: list[str] = []
 
     def reset(self, episode_seed: int) -> None:
         self.resets.append(episode_seed)
+        self.calls.append("reset")
 
     def assign(
         self, graph: WarehouseGraph, fleet: FleetState, tasks: list[Task], t: int
     ) -> dict[TaskId, AgentId]:
+        self.calls.append("assign")
         waiting = [task.task_id for task in tasks if task.status(t) == "waiting"]
         busy = any(task.status(t) == "active" and task.assigned_agent == 1 for task in tasks)
         return {} if busy or not waiting else {waiting[-1]: 1}
@@ -73,6 +76,7 @@ def test_a_router_that_picks_its_own_tasks_replaces_the_shared_assignment():
     router = router_for(planner)
     assert isinstance(router, SelfAssigningRouter)
     env._controller = router
+    env.reset()  # the first assignment happens in reset, so the router has to be in place first
     for _ in range(5):
         env.step()
     assigned = [task for task in env.tasks if task.assignment_time is not None]
@@ -98,3 +102,11 @@ def test_env_reset_resets_the_router_with_the_episode_seed():
     assert planner.resets == [11]
     env.reset()
     assert planner.resets == [11, env.config.seed]
+
+
+def test_the_planner_is_reset_before_it_assigns_at_t0():
+    env = _env()
+    planner = _TakesTheNewestTask()
+    env._controller = router_for(planner)
+    env.reset(seed=11)
+    assert planner.calls[:2] == ["reset", "assign"]

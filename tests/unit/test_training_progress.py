@@ -54,9 +54,10 @@ def _env(horizon: int = 30) -> WarehouseMAPDEnv:
 def test_progress_metrics_at_reset_has_nothing_completed():
     env = _env()
     env.reset()
+    # The orders of t = 0 are released in reset, but the backlog is logged before them.
     assert progress_metrics(env) == {
         "tasks_completed": 0.0,
-        "tasks_released": 0.0,
+        "tasks_released": float(len(env.tasks)),
         "backlog": 0.0,
         "steps_since_last_completion": 0.0,
         "episode_step": 0.0,

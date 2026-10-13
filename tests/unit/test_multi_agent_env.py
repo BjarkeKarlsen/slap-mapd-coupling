@@ -185,12 +185,58 @@ def test_backlog_logged_every_timestep_including_reset():
 
 
 def test_decision_runtimes_logged_once_per_step():
+    # reset supplies the assignment for t = 0 and the last step supplies none, so
+    # the assignment log holds one entry per timestep, the same as the routing log.
     env = _env(_graph(), _config(horizon=6))
     env.reset()
     for _ in range(6):
         env.step()
     assert len(env.log.assignment_runtime_seconds) == 6
     assert len(env.log.routing_runtime_seconds) == 6
+
+
+def test_reset_releases_and_assigns_the_orders_of_t0():
+    env = _env(_graph(), _config(arrival_rate=10.0))
+    env.reset()
+    assert env.tasks
+    assert all(task.release_time == 0 for task in env.tasks)
+    assigned = [task for task in env.tasks if task.assignment_time == 0]
+    assert {task.assigned_agent for task in assigned} == {1, 2, 3, 4}  # every free robot has one
+    assert len(env.log.assignment_runtime_seconds) == 1
+
+
+def test_reset_logs_the_backlog_before_the_orders_of_t0_are_released():
+    env = _env(_graph(), _config(arrival_rate=10.0))
+    env.reset()
+    assert env.tasks
+    assert env.log.backlog_by_t == [0]
+
+
+def test_a_step_releases_and_assigns_the_orders_of_the_new_t():
+    env = _env(_graph(), _config(arrival_rate=10.0, horizon=5))
+    env.reset()
+    for done in range(1, 5):
+        env.step()
+        assert any(task.release_time == env.t for task in env.tasks)
+        assert len(env.log.assignment_runtime_seconds) == done + 1
+        assert len(env.log.backlog_by_t) == done + 1
+
+
+def test_the_step_that_ends_the_episode_releases_and_assigns_nothing():
+    env = _env(_graph(), _config(arrival_rate=10.0, horizon=5))
+    env.reset()
+    for _ in range(5):
+        env.step()
+    assert env.t == 5
+    assert all(task.release_time < 5 for task in env.tasks)
+    assert len(env.log.assignment_runtime_seconds) == 5
+    assert len(env.log.backlog_by_t) == 6
+
+
+def test_a_planner_is_resolved_when_the_environment_is_built():
+    # The first assignment happens in reset, so a planner that picks its own tasks
+    # has to exist by then. A controller stays lazy (see the tests with actions below).
+    assert _env(_graph(), _config())._controller is not None
 
 
 def _decentralised_config(**overrides) -> ExperimentConfig:
