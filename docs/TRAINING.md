@@ -29,7 +29,9 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 
 The examples run the config with Ray Tune, which stops at the first iteration whose
 sampled environment steps reach the budget, so a run overshoots by up to one
-iteration's samples.
+iteration's samples. `build_ppo_config` sets the rollout length and the train batch from the
+horizon, so an iteration samples one episode per runner, `num_env_runners * horizon` steps
+(`horizon` steps with no env runner).
 
 ```python
 from ray import tune
