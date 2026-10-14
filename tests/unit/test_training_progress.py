@@ -23,6 +23,7 @@ from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.training.callbacks import (
     StandingStillCounter,
     TrainingProgressCallbacks,
+    episode_metrics,
     format_iteration,
     iteration_record,
     progress_metrics,
@@ -165,9 +166,48 @@ def test_iteration_record_keeps_numbers_and_turns_everything_else_into_none():
         "backlog": None,
         "steps_since_last_completion": None,
         "standing_still_fraction": 0.25,
+        **_NO_EPISODE_KEYS,
     }
     assert json.loads(json.dumps(record)) == record
     assert iteration_record(1, {})["tasks_completed"] is None
+
+
+_EPISODE_KEY_NAMES = (
+    "return_shaping",
+    "return_deliver",
+    "return_override",
+    "return_congestion",
+    "override_rate",
+    "episode_tasks_completed",
+    "episode_tasks_released",
+    "episode_max_agent_override_share",
+)
+_NO_EPISODE_KEYS = {key: None for key in _EPISODE_KEY_NAMES}
+
+
+def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_ended():
+    ended = {
+        "return_shaping": 12.5,
+        "return_deliver": np.float32(4.0),
+        "return_override": -30.0,
+        "return_congestion": 0.0,
+        "override_rate": 0.125,
+        "episode_tasks_completed": 9.0,
+        "episode_tasks_released": 40.0,
+        "episode_max_agent_override_share": 0.5,
+    }
+    record = iteration_record(2, {"env_runners": {"episode_return_mean": -13.5, **ended}})
+    for key, value in ended.items():
+        assert record[key] == float(value)
+    assert record["episode_return_mean"] == -13.5
+    assert json.loads(json.dumps(record)) == record
+    # an iteration in which no episode ended has none of them, which is null, not 0
+    quiet = iteration_record(3, {"env_runners": {"tasks_completed": 2.0}})
+    for key in _EPISODE_KEY_NAMES:
+        assert key in quiet and quiet[key] is None
+    assert quiet["tasks_completed"] == 2.0
+    nan = iteration_record(4, {"env_runners": {"override_rate": float("nan")}})
+    assert nan["override_rate"] is None
 
 
 # --- the callbacks on the training adapter ----------------------------------------------
@@ -281,3 +321,70 @@ def test_the_callbacks_raise_on_a_vertex_conflict_in_the_core(controller):
     env.core.fleet = _fleet({aid: shared for aid in locations})  # every robot on one vertex
     with pytest.raises(RuntimeError, match="vertex rule"):
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
+def test_on_episode_end_logs_the_terms_that_add_up_to_the_episode_return(controller):
+    env = _adapter(controller)
+    vector, logger = _Vector(env), _Logger()
+    callbacks = TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    truncated = {"__all__": False}
+    episode_return = 0.0
+    while not truncated["__all__"]:
+        actions = {
+            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
+        }
+        obs, rewards, _, truncated, _ = env.step(actions)
+        episode_return += sum(rewards.values())
+        callbacks.on_episode_step(episode=None, env=vector, env_index=0)
+    callbacks.on_episode_end(metrics_logger=logger, env=vector, env_index=0)
+
+    (shaping,) = logger.values["return_shaping"]
+    (deliver,) = logger.values["return_deliver"]
+    (override,) = logger.values["return_override"]
+    (congestion,) = logger.values["return_congestion"]
+    assert shaping + deliver + override + congestion == pytest.approx(episode_return, abs=1e-9)
+    assert deliver >= 0.0 and override <= 0.0 and congestion <= 0.0
+
+    log = env.core.log
+    overrides = sum(log.overrides_by_agent.values())
+    agent_steps = 3 * 12
+    assert logger.values["override_rate"] == [pytest.approx(overrides / agent_steps)]
+    assert logger.values["episode_tasks_released"] == [float(len(env.core.tasks))]
+    assert logger.values["episode_tasks_completed"] == [
+        float(sum(task.finish_time is not None for task in env.core.tasks))
+    ]
+    (share,) = logger.values["episode_max_agent_override_share"]
+    assert share == (max(log.overrides_by_agent.values()) / overrides if overrides else 0.0)
+
+
+def test_episode_metrics_max_override_share_is_the_largest_agents_part_of_all_overrides():
+    env = _env()
+    env.reset()
+    log = env.log
+    assert episode_metrics(env)["episode_max_agent_override_share"] == 0.0
+    assert episode_metrics(env)["override_rate"] == 0.0
+    log.overrides_by_agent.update({1: 3, 2: 1, 3: 0})
+    env._t = 10  # four agents, ten steps
+    metrics = episode_metrics(env)
+    assert metrics["episode_max_agent_override_share"] == pytest.approx(3 / 4)
+    assert metrics["override_rate"] == pytest.approx(4 / 40)
+
+
+def test_a_planner_run_leaves_the_reward_term_log_at_zero():
+    env = _env()  # a planner config, which has no reward weights
+    env.reset()
+    planner = PrioritisedAStarPlanner()
+    for _ in range(8):
+        step_with_planner(env, planner)
+    log = env.log
+    assert not (log.return_shaping_by_agent or log.return_delivery_by_agent)
+    assert not (log.return_override_by_agent or log.return_congestion_by_agent)
+    assert not log.overrides_by_agent
+    metrics = episode_metrics(env)
+    for key in ("return_shaping", "return_deliver", "return_override", "return_congestion"):
+        assert metrics[key] == 0.0
+    assert metrics["override_rate"] == 0.0

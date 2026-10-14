@@ -417,6 +417,43 @@ def _random_rollout(env: WarehouseMAPDMultiAgentEnv, steps: int, seed: int):
     return record
 
 
+@pytest.mark.parametrize("credit_signal", ["per_agent", "team_mean"])
+def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_signal):
+    controller = "decentralised" if credit_signal == "per_agent" else "centralised"
+    env = _arm_env(
+        controller, credit_signal=credit_signal, arrival_rate=3.0, horizon=60, num_agents=4
+    )
+    rollout = _random_rollout(env, 60, seed=3)
+    log = env.core.log
+    returned = {aid: sum(rewards[aid] for *_, rewards in rollout) for aid in env.agents}
+    if credit_signal == "per_agent":
+        for aid in env.agents:
+            terms = (
+                log.return_shaping_by_agent[int(aid)]
+                + log.return_delivery_by_agent[int(aid)]
+                + log.return_override_by_agent[int(aid)]
+                + log.return_congestion_by_agent[int(aid)]
+            )
+            assert terms == pytest.approx(returned[aid], abs=1e-9)
+    summed_terms = sum(
+        sum(sums.values())
+        for sums in (
+            log.return_shaping_by_agent,
+            log.return_delivery_by_agent,
+            log.return_override_by_agent,
+            log.return_congestion_by_agent,
+        )
+    )
+    assert summed_terms == pytest.approx(sum(returned.values()), abs=1e-9)
+    # the run is not vacuous, every term but the congestion one has something in it
+    overrides = sum(log.overrides_by_agent.values())
+    assert overrides > 0
+    assert sum(log.return_override_by_agent.values()) == pytest.approx(-0.5 * overrides)
+    assert sum(log.return_delivery_by_agent.values()) > 0
+    assert sum(log.return_shaping_by_agent.values()) != 0.0
+    assert sum(log.return_congestion_by_agent.values()) < 0.0
+
+
 def test_team_mean_gives_every_robot_the_fleet_mean_under_the_centralised_arm():
     own = _random_rollout(_arm_env("centralised", arrival_rate=3.0), 15, seed=1)
     team = _random_rollout(

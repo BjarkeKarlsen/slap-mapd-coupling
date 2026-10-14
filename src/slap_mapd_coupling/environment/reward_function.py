@@ -22,6 +22,8 @@ see issue #102.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
 
@@ -36,6 +38,51 @@ def potential(graph: WarehouseGraph, location: VertexId, task: Task | None) -> f
     """Phi_i(t) = -eta_i(l_i(t),t) = -d_G(l_i(t), q_i(t)), from the distance
     label."""
     return -graph.distance(location, current_target(location, task))
+
+
+@dataclass(frozen=True)
+class RewardTerms:
+    """The four terms of the reward R_i(t), each already signed, so that
+    their sum is the reward. Kept apart so a training log can say what an
+    episode return is made of."""
+
+    shaping: float  # gamma*Phi_i(t+1) - Phi_i(t)
+    delivery: float  # + n_deliver * 1[a_i completes a task at t], never negative
+    override: float  # - n_blocked * 1[a_i is overridden at t], never positive
+    congestion: float  # - n_cng * delta_i(t)
+
+    @property
+    def total(self) -> float:
+        """R_i(t). Added left to right in the order of the reward, so the value
+        is the same, to the last bit, as summing the four terms inline."""
+        return self.shaping + self.delivery + self.override + self.congestion
+
+
+def reward_terms(
+    graph: WarehouseGraph,
+    *,
+    location_now: VertexId,
+    task_now: Task | None,
+    location_next: VertexId,
+    task_next: Task | None,
+    completed_task: bool,
+    overridden: bool,
+    congestion: float,
+    discount: float,
+    deliver_reward: float,
+    override_penalty: float,
+    congestion_reward_weight: float,
+) -> RewardTerms:
+    """The four terms of R_i(t), the reward, separately. See `reward` for the
+    arguments."""
+    phi_now = potential(graph, location_now, task_now)
+    phi_next = potential(graph, location_next, task_next)
+    return RewardTerms(
+        shaping=discount * phi_next - phi_now,
+        delivery=deliver_reward * completed_task,
+        override=-override_penalty * overridden,
+        congestion=-congestion_reward_weight * congestion,
+    )
 
 
 def reward(
@@ -53,19 +100,24 @@ def reward(
     override_penalty: float,
     congestion_reward_weight: float,
 ) -> float:
-    """R_i(t), the reward.
+    """R_i(t), the reward: the sum of the terms of `reward_terms`.
 
     `task_now`/`task_next` are whichever task the agent is serving just
     before / just after this timestep's transition -- None for a free
     agent. `congestion` is delta_i(t), the congestion feature, computed
     upstream and only weighted here.
     """
-    phi_now = potential(graph, location_now, task_now)
-    phi_next = potential(graph, location_next, task_next)
-    shaping = discount * phi_next - phi_now
-    return (
-        shaping
-        + deliver_reward * completed_task
-        - override_penalty * overridden
-        - congestion_reward_weight * congestion
-    )
+    return reward_terms(
+        graph,
+        location_now=location_now,
+        task_now=task_now,
+        location_next=location_next,
+        task_next=task_next,
+        completed_task=completed_task,
+        overridden=overridden,
+        congestion=congestion,
+        discount=discount,
+        deliver_reward=deliver_reward,
+        override_penalty=override_penalty,
+        congestion_reward_weight=congestion_reward_weight,
+    ).total

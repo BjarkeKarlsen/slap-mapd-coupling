@@ -73,7 +73,7 @@ from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType, StorageState
 from slap_mapd_coupling.core.tasks import Task, TaskId, active_tasks_by_agent
 from slap_mapd_coupling.environment.observation import local_subgraph, occupancy_fraction
-from slap_mapd_coupling.environment.reward_function import reward as compute_agent_reward
+from slap_mapd_coupling.environment.reward_function import RewardTerms, reward_terms
 from slap_mapd_coupling.environment.spaces import action_for_slot
 from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
@@ -114,6 +114,29 @@ class EpisodeLog:
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (eq:relocation).
     relocated_units_by_update: list[int] = field(default_factory=list)
+    # What each agent's episode return is made of, one running sum per term of the
+    # reward (environment/reward_function.py::RewardTerms, each already signed, so the
+    # four sums of an agent add up to its summed reward). overrides_by_agent counts the
+    # steps in which the agent was overridden. All stay empty for a planner run, which
+    # has no reward weights, and an agent missing from a dict has a sum of zero.
+    return_shaping_by_agent: dict[AgentId, float] = field(default_factory=dict)
+    return_delivery_by_agent: dict[AgentId, float] = field(default_factory=dict)
+    return_override_by_agent: dict[AgentId, float] = field(default_factory=dict)
+    return_congestion_by_agent: dict[AgentId, float] = field(default_factory=dict)
+    overrides_by_agent: dict[AgentId, int] = field(default_factory=dict)
+
+    def record_reward_terms(self, agent_id: AgentId, terms: RewardTerms, overridden: bool) -> None:
+        """Adds one step's reward terms of one agent to its running sums."""
+        for sums, term in (
+            (self.return_shaping_by_agent, terms.shaping),
+            (self.return_delivery_by_agent, terms.delivery),
+            (self.return_override_by_agent, terms.override),
+            (self.return_congestion_by_agent, terms.congestion),
+        ):
+            sums[agent_id] = sums.get(agent_id, 0.0) + term
+        self.overrides_by_agent[agent_id] = self.overrides_by_agent.get(agent_id, 0) + int(
+            overridden
+        )
 
     def record_edge(self, edge: EdgeKey) -> None:
         self.edge_traversals[edge] = self.edge_traversals.get(edge, 0) + 1
@@ -446,7 +469,8 @@ class WarehouseMAPDEnv:
         congestion: Mapping[AgentId, float],
     ) -> dict[AgentId, float]:
         """R_i(t), the reward, for every robot. `congestion` holds delta_i(t) at the
-        step the action was chosen in. A planner run has no reward weights and gets zero."""
+        step the action was chosen in. A planner run has no reward weights and gets zero. Every
+        other run also adds each robot's terms to the episode log."""
         if self.config.controller is None:
             return {aid: 0.0 for aid in self.fleet.agents}
 
@@ -468,20 +492,23 @@ class WarehouseMAPDEnv:
                     t.task_id == task_now.task_id and t.finish_time == next_t for t in self.tasks
                 )
             )
-            rewards[agent_id] = compute_agent_reward(
+            was_overridden = agent_id in overridden
+            terms = reward_terms(
                 self.graph,
                 location_now=before_locations[agent_id],
                 task_now=task_now,
                 location_next=after_locations[agent_id],
                 task_next=task_next,
                 completed_task=completed,
-                overridden=agent_id in overridden,
+                overridden=was_overridden,
                 congestion=congestion[agent_id],
                 discount=self.config.discount,
                 deliver_reward=self.config.deliver_reward,
                 override_penalty=self.config.override_penalty,
                 congestion_reward_weight=self.config.congestion_reward_weight,
             )
+            self.log.record_reward_terms(agent_id, terms, was_overridden)
+            rewards[agent_id] = terms.total
         return rewards
 
 
