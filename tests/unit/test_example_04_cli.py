@@ -52,7 +52,13 @@ def test_budget_is_read_and_must_be_positive(example_04):
 
 
 def test_hyperparameters_carry_the_budget_given(example_04):
-    assert example_04.build_hyperparameters(0, 900).training_budget_env_steps == 900
+    assert example_04.build_hyperparameters(900).training_budget_env_steps == 900
+
+
+def test_hyperparameters_have_no_batch_size_and_keep_the_rollout_length(example_04):
+    hyperparameters = example_04.build_hyperparameters(900)
+    assert "train_batch_size" not in hyperparameters.model_dump()
+    assert hyperparameters.rollout_fragment_length == 30
 
 
 def test_matched_regime_trains_under_the_evaluation_storage_rule(example_04, monkeypatch):

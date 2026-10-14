@@ -29,7 +29,7 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 
 The examples run the config with Ray Tune, which stops at the first iteration whose
 sampled environment steps reach the budget, so a run overshoots by up to one
-`train_batch_size`.
+iteration's samples.
 
 ```python
 from ray import tune

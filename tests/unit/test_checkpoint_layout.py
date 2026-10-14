@@ -84,7 +84,6 @@ def _tiny_algo():
         rollout_fragment_length=20,
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
-        train_batch_size=60,
         training_budget_env_steps=60,
         credit_signal="per_agent",
     )

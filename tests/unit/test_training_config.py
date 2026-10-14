@@ -1,6 +1,7 @@
 """Unit tests for slap_mapd_coupling.training.config."""
 
 import pytest
+from ray.rllib.algorithms.ppo import PPOConfig
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -91,7 +92,6 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
         rollout_fragment_length=20,
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
-        train_batch_size=60,
         training_budget_env_steps=120,
         credit_signal="per_agent",
     )
@@ -327,6 +327,30 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     assert ppo_config.seed == 42
 
 
+def test_build_ppo_config_leaves_the_train_batch_at_rllibs_default():
+    # PPOHyperparameters has no batch size, and extra="forbid" rejects one passed by an old caller.
+    assert "train_batch_size" not in PPOHyperparameters.model_fields
+    with pytest.raises(ValueError, match="train_batch_size"):
+        _ppo_hp(train_batch_size=60)
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    ppo_config = build_ppo_config(
+        graph,
+        skus,
+        counts,
+        capacities,
+        _config(),
+        LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2),
+        GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none"),
+        PolicyValueHeadConfig(hidden_width=8),
+        _ppo_hp(),
+        _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
+        num_env_runners=2,
+    )
+    assert ppo_config.train_batch_size == PPOConfig().train_batch_size
+    assert ppo_config.rollout_fragment_length == 20
+
+
 def _build_for_arm(controller: str, pooling: str, credit_signal: str = "per_agent", **kwargs):
     """build_ppo_config for one arm, with zones for the section arm."""
     graph = _graph()
@@ -383,12 +407,17 @@ def test_build_ppo_config_rejects_a_window_above_the_cap(controller):
 def test_one_ppo_iteration_runs_for_each_controller(controller, pooling):
     # The largest field of view of _graph() at d_obs = 3 has 20 vertices.
     cap = 20 if controller == "decentralised" else _WIDE_MAX_LOCAL_NODES
-    algo = _build_for_arm(controller, pooling, max_local_nodes=cap).build_algo()
+    # PPOHyperparameters leaves the batch at RLlib's default of 4000 steps. A test shrinks
+    # it on the config so the iteration stays quick.
+    ppo_config = _build_for_arm(controller, pooling, max_local_nodes=cap).training(
+        train_batch_size=60
+    )
+    algo = ppo_config.build_algo()
     try:
         result = algo.train()
     finally:
         algo.stop()
-    assert result["num_env_steps_sampled_lifetime"] >= _ppo_hp().train_batch_size
+    assert result["num_env_steps_sampled_lifetime"] >= 60
     assert "shared_policy" in result["learners"]
 
 

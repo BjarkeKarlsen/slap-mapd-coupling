@@ -38,11 +38,13 @@ That ratio is meaningful only at a rate below capacity.
 
 Episode length. --horizon sets the number of steps of an episode, the horizon T, for training
 and for evaluation alike, so both use one value. The thesis leaves the evaluation horizon T
-open, so the default of 2000 is illustrative. With several env runners one PPO iteration
-advances each runner by only part of an episode (about 90 steps with 7 runners), so an episode
-ends only every few dozen iterations. The episode-end keys of the progress file are then null
-on most rows, and the window_* keys are the ones to read between episode ends. A checkpoint
-can be evaluated at another length by passing --horizon to 04b_evaluate_checkpoint.py.
+open, so the default of 2000 is illustrative. An episode ends in every iteration only if the
+horizon is at most the steps each runner samples per iteration. That number is RLlib's default
+train batch of 4000 steps divided over the env runners and rounded up to whole fragments of 30
+steps, which is 4020 with no env runner (the local one) and about 600 with 7. With a longer
+horizon the episode-end keys of the progress file are null on the iterations that end no
+episode, and the window_* keys are the ones to read then. A checkpoint can be evaluated at
+another length by passing --horizon to 04b_evaluate_checkpoint.py.
 
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
@@ -108,7 +110,10 @@ WAIT_COST = 2.0
 # reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
 DEFAULT_ARRIVAL_RATE = 1.0
 # Illustrative. The thesis leaves the evaluation horizon T open, so the episode length in steps
-# is a study parameter. One value, used by training and by evaluation.
+# is a study parameter. One value, used by training and by evaluation. An episode ends in
+# every training iteration only if it is at most the steps each runner samples per iteration,
+# which is RLlib's default batch of 4000 divided over the runners (4020 with none, about 600
+# with 7).
 DEFAULT_HORIZON = 2000
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
@@ -214,14 +219,9 @@ def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfi
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
-def build_hyperparameters(num_env_runners: int, budget_env_steps: int) -> PPOHyperparameters:
+def build_hyperparameters(budget_env_steps: int) -> PPOHyperparameters:
     # Illustrative values, sized so a longer run learns some navigation on this instance.
     rollout_fragment_length = 30
-    # RLlib needs train_batch_size to be about a multiple of num_env_runners *
-    # rollout_fragment_length when num_env_runners > 0. This picks the multiple closest
-    # to 600 samples, which is also fine for num_env_runners = 0.
-    per_iteration_samples = max(num_env_runners, 1) * rollout_fragment_length
-    multiple = max(1, round(600 / per_iteration_samples))
     return PPOHyperparameters(
         lr=3e-4,
         clip_param=0.2,
@@ -231,7 +231,6 @@ def build_hyperparameters(num_env_runners: int, budget_env_steps: int) -> PPOHyp
         rollout_fragment_length=rollout_fragment_length,
         entropy_coeff=0.02,
         vf_loss_coeff=1.0,
-        train_batch_size=multiple * per_iteration_samples,
         training_budget_env_steps=budget_env_steps,
         credit_signal=CREDIT_SIGNAL,
     )
@@ -343,7 +342,9 @@ def train(
         use_gpu=use_gpu,
     ).callbacks(TrainingProgressCallbacks)
     budget = hyperparameters.training_budget_env_steps
-    expected_iterations = math.ceil(budget / hyperparameters.train_batch_size)
+    # At most this many iterations, because RLlib rounds an iteration's samples up to whole
+    # fragments, so the batch it really samples can be a little larger.
+    expected_iterations = math.ceil(budget / ppo_config.total_train_batch_size)
     print(
         f"=== Training the {arm.controller} GNN+PPO controller "
         f"(budget {budget} environment steps) ==="
@@ -465,8 +466,10 @@ def parse_args(
         "--horizon",
         type=int,
         default=DEFAULT_HORIZON,
-        help="episode length in steps, used for training and for evaluation; with 7 runners "
-        "an iteration advances each runner about 90 steps (default 2000, illustrative)",
+        help="episode length in steps, used for training and for evaluation; an episode ends "
+        "in every iteration only if this is at most the steps each runner samples per "
+        "iteration, RLlib's default batch of 4000 divided over the runners (4020 with none, "
+        "about 600 with 7) (default 2000, illustrative)",
     )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
@@ -512,7 +515,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         counts,
         config,
         arm,
-        build_hyperparameters(args.env_runners, args.budget_env_steps),
+        build_hyperparameters(args.budget_env_steps),
         seed_split,
         run_name=f"{controller}_{regime}",
         num_env_runners=args.env_runners,

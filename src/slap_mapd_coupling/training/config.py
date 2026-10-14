@@ -45,13 +45,10 @@ _ENV_NAME = "warehouse_mapd_multi_agent_env"
 
 class PPOHyperparameters(BaseModel):
     """PPO core hyperparameters (tab:trainparams). All TBD-by-sweep --
-    required, no defaults, see module docstring. `train_batch_size` isn't
-    itself one of tab:trainparams's named rows, but RLlib's own API
-    requires it to actually build an Algorithm; distinguished from
-    rollout_fragment_length (per-env-runner fragment size) rather than
-    silently derived from it, since the relationship between the two
-    depends on num_env_runners (an execution detail, not a study
-    parameter) -- flagged as an RLlib API requirement, not a thesis one.
+    required, no defaults, see module docstring. The size of the train batch
+    is not one of them. It is left at RLlib's default, so one iteration
+    samples that many environment steps divided over the runners and rounded up
+    to whole fragments of rollout_fragment_length.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -64,11 +61,10 @@ class PPOHyperparameters(BaseModel):
     rollout_fragment_length: PositiveInt
     entropy_coeff: NonNegativeFloat
     vf_loss_coeff: PositiveFloat
-    train_batch_size: PositiveInt  # RLlib API requirement, see docstring
     # The training budget of tab:trainparams, equal across the learned arms and counted
     # in environment steps. build_ppo_config does not read it. A run stops on it with
     # Tune's stop={"num_env_steps_sampled_lifetime": budget}, at the first iteration at
-    # or above it, so it overshoots by up to one train_batch_size.
+    # or above it, so it overshoots by up to one iteration's samples.
     training_budget_env_steps: PositiveInt
     # No default, because the thesis leaves it open for the centralised and
     # section-based arms (#83). The decentralised arm takes "per_agent" only.
@@ -262,7 +258,6 @@ def build_ppo_config(
             num_epochs=ppo_hyperparameters.num_epochs,
             entropy_coeff=ppo_hyperparameters.entropy_coeff,
             vf_loss_coeff=ppo_hyperparameters.vf_loss_coeff,
-            train_batch_size=ppo_hyperparameters.train_batch_size,
         )
     )
     return config

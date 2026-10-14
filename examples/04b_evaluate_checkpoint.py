@@ -122,13 +122,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=example_04.DEFAULT_ARRIVAL_RATE,
         help="task arrival rate in tasks per step, the rate the checkpoint was trained at",
     )
-    # Illustrative. The thesis leaves the evaluation horizon T open.
+    # Illustrative. The thesis leaves the evaluation horizon T open. Training ends an episode
+    # in every iteration only if the horizon is at most the steps each runner samples per
+    # iteration, RLlib's default batch of 4000 divided over the runners (4020 with none,
+    # about 600 with 7).
     parser.add_argument(
         "--horizon",
         type=int,
         default=example_04.DEFAULT_HORIZON,
-        help="episode length in steps, used for evaluation; with 7 runners an iteration "
-        "advances each runner about 90 steps (default 2000, as in 04)",
+        help="episode length in steps, used for evaluation (default 2000, as in 04). In "
+        "training an episode ends in every iteration only if this is at most the steps each "
+        "runner samples per iteration, RLlib's default batch of 4000 divided over the "
+        "runners (4020 with none, about 600 with 7)",
     )
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args(argv)
