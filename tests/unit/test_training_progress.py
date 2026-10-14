@@ -177,6 +177,7 @@ _EPISODE_KEY_NAMES = (
     "return_shaping",
     "return_deliver",
     "return_override",
+    "return_wait",
     "return_congestion",
     "override_rate",
     "episode_tasks_completed",
@@ -191,6 +192,7 @@ def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_
         "return_shaping": 12.5,
         "return_deliver": np.float32(4.0),
         "return_override": -30.0,
+        "return_wait": -1.5,
         "return_congestion": 0.0,
         "override_rate": 0.125,
         "episode_tasks_completed": 9.0,
@@ -391,9 +393,16 @@ def test_a_planner_run_leaves_the_reward_term_log_at_zero():
     log = env.log
     assert not (log.return_shaping_by_agent or log.return_delivery_by_agent)
     assert not (log.return_override_by_agent or log.return_congestion_by_agent)
+    assert not log.return_wait_by_agent
     assert not log.overrides_by_agent
     metrics = episode_metrics(env)
-    for key in ("return_shaping", "return_deliver", "return_override", "return_congestion"):
+    for key in (
+        "return_shaping",
+        "return_deliver",
+        "return_override",
+        "return_wait",
+        "return_congestion",
+    ):
         assert metrics[key] == 0.0
     assert metrics["override_rate"] == 0.0
 

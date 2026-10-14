@@ -82,6 +82,7 @@ TERM_COLOURS = {
     "shaping": "#e87ba4",
     "deliver": "#008300",
     "override": "#e34948",
+    "wait": "#d9902b",
     "congestion": "#6250d6",
 }
 # What the raster of a trace shows, and the cell colour of each.
@@ -341,7 +342,7 @@ def plot_training_progress(logs: dict[str, Progress], out: Path) -> Path | None:
     """Training progress of one or several arms, written to `out`. None when nothing can be drawn.
 
     One panel per measure with a line for every arm, and one panel per arm with the episode
-    return and its four terms. Lines of different measures in one panel differ in style.
+    return and its five terms. Lines of different measures in one panel differ in style.
     """
     looks = _arm_looks(logs)
     measures = [  # title, [(key, line style, label)]
