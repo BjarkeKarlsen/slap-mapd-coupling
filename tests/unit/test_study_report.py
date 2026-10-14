@@ -51,6 +51,7 @@ def _sweep_rows() -> list[dict]:
                         "backlog": 10,
                         "released": done + 10,
                         "mean_service_time": 20.0 + seed,
+                        "keeps_up": rate < 0.2 or done == 90,
                     }
                 )
     return rows
@@ -122,6 +123,14 @@ def test_sweep_stats_gives_the_mean_and_the_range_over_seeds(tmp_path: Path):
     assert entry["share_min"] == pytest.approx(80 / 90)
     assert entry["share_max"] == pytest.approx(90 / 100)
     assert entry["service"] == pytest.approx(25.5)
+    assert (entry["keeps_up"], entry["keep_up_known"]) == (1, 2)
+    assert (
+        stats["centralised"][0.15]["keeps_up"],
+        stats["centralised"][0.15]["keep_up_known"],
+    ) == (
+        2,
+        2,
+    )
 
 
 def test_assign_looks_is_distinct_per_label_and_keeps_the_arm_looks():
@@ -144,6 +153,7 @@ def test_summary_states_the_sample_sizes(tmp_path: Path):
     assert "| centralised | 30 |" in text
     assert "| 1 | 2 / 5 | 0.40 |" in text  # one episode, 2 of 5 released completed
     assert "## Load sweep" in text and "token_passing" in text
+    assert "| 2 / 2 |" in text and "| 1 / 2 |" in text
 
 
 def test_main_writes_the_overview_the_sweep_figure_and_the_summary(tmp_path: Path, capsys):

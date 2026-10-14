@@ -64,7 +64,7 @@ _PLANNER_LOOKS = {
     "token_passing": ("#5c5c5c", "-", "x"),
     "prioritised_astar": ("#8b5a2b", "--", "+"),
 }
-_TERMS = ("shaping", "deliver", "override", "congestion")
+_TERMS = tuple(tr.TERM_COLOURS)  # the reward terms the training figures know, in their order
 _STYLE = tr._STYLE  # the look of the other training figures
 
 
@@ -223,6 +223,9 @@ def sweep_stats(rows: Sequence[dict[str, Any]]) -> dict[str, dict[float, dict[st
                 "backlog": _mean(r["backlog"] for r in group),
                 "backlog_min": min((r["backlog"] for r in group), default=math.nan),
                 "backlog_max": max((r["backlog"] for r in group), default=math.nan),
+                # keep-up check of eq:throughput, None for a row without a threshold
+                "keeps_up": sum(1 for r in group if r.get("keeps_up")),
+                "keep_up_known": sum(1 for r in group if r.get("keeps_up") is not None),
             }
         out[condition] = by_rate
     return out
@@ -568,6 +571,11 @@ def summary_text(
                 f"{_f(s['share'], 2)} ({_f(s['share_min'], 2)} to {_f(s['share_max'], 2)})",
                 f"{_f(s['service'], 1)} ({_f(s['service_min'], 1)} to {_f(s['service_max'], 1)})",
                 _f(s["backlog"], 1),
+                (
+                    f"{s['keeps_up']} / {s['keep_up_known']}"
+                    if s["keep_up_known"]
+                    else "no threshold"
+                ),
             ]
             for label, by_rate in sweep.items()
             for rate, s in by_rate.items()
@@ -585,6 +593,7 @@ def summary_text(
                     "share (min to max over seeds)",
                     "mean service time (min to max)",
                     "mean backlog",
+                    "seeds that keep up",
                 ],
                 rows,
             ),

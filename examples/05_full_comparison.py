@@ -53,6 +53,7 @@ _METRIC_FIELDS = (
     "backlog",
     "throughput",
     "keep_up_ratio",
+    "keeps_up",
     "mean_service_time",
     "mean_wait_for_agent",
     "mean_travel_time",
