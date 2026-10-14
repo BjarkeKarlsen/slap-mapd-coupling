@@ -88,10 +88,8 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
         gae_lambda=0.95,
         minibatch_size=32,
         num_epochs=2,
-        rollout_fragment_length=20,
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
-        train_batch_size=60,
         training_budget_env_steps=120,
         credit_signal="per_agent",
     )
@@ -323,8 +321,41 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     assert ppo_config.gamma == pytest.approx(0.99)
     assert ppo_config.lr == pytest.approx(3e-4)
     assert ppo_config.clip_param == pytest.approx(0.2)
-    assert ppo_config.rollout_fragment_length == 20
+    assert ppo_config.rollout_fragment_length == _config().horizon
     assert ppo_config.seed == 42
+
+
+def test_ppo_hyperparameters_have_no_rollout_length_and_no_batch_size():
+    # Both follow from the horizon, and extra="forbid" rejects one passed by an old caller.
+    for name in ("rollout_fragment_length", "train_batch_size"):
+        assert name not in PPOHyperparameters.model_fields
+        with pytest.raises(ValueError, match=name):
+            _ppo_hp(**{name: 20})
+
+
+@pytest.mark.parametrize("num_env_runners", [0, 2, 7])
+def test_build_ppo_config_samples_one_episode_per_runner_per_iteration(num_env_runners):
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    config = _config()
+    ppo_config = build_ppo_config(
+        graph,
+        skus,
+        counts,
+        capacities,
+        config,
+        LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2),
+        GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none"),
+        PolicyValueHeadConfig(hidden_width=8),
+        _ppo_hp(),
+        _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
+        num_env_runners=num_env_runners,
+    )
+    assert ppo_config.rollout_fragment_length == config.horizon
+    assert ppo_config.total_train_batch_size == max(num_env_runners, 1) * config.horizon
+    # RLlib's own check of the batch against the fragment length, which rejects most
+    # other pairings.
+    ppo_config.validate_train_batch_size_vs_rollout_fragment_length()
 
 
 def _build_for_arm(controller: str, pooling: str, credit_signal: str = "per_agent", **kwargs):
@@ -383,12 +414,16 @@ def test_build_ppo_config_rejects_a_window_above_the_cap(controller):
 def test_one_ppo_iteration_runs_for_each_controller(controller, pooling):
     # The largest field of view of _graph() at d_obs = 3 has 20 vertices.
     cap = 20 if controller == "decentralised" else _WIDE_MAX_LOCAL_NODES
-    algo = _build_for_arm(controller, pooling, max_local_nodes=cap).build_algo()
+    # The batch is one episode per runner, here 20 steps. A test makes it three episodes.
+    ppo_config = _build_for_arm(controller, pooling, max_local_nodes=cap).training(
+        train_batch_size=60
+    )
+    algo = ppo_config.build_algo()
     try:
         result = algo.train()
     finally:
         algo.stop()
-    assert result["num_env_steps_sampled_lifetime"] >= _ppo_hp().train_batch_size
+    assert result["num_env_steps_sampled_lifetime"] >= 60
     assert "shared_policy" in result["learners"]
 
 

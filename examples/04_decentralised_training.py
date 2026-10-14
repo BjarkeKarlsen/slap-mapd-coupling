@@ -36,6 +36,23 @@ step is far above what the arms complete, so the backlog grows without bound and
 the evaluator's keep-up ratio (throughput over arrival rate) cannot reach 1.
 That ratio is meaningful only at a rate below capacity.
 
+Episode length. --horizon sets the number of steps of an episode, the horizon T, for training
+and for evaluation alike, so both use one value. The thesis leaves the evaluation horizon T
+open, so the default of 2000 is illustrative. The horizon is also the rollout length of PPO
+and the train batch is one episode per runner, so one sampling call of a runner is exactly one
+episode and every iteration ends one episode per runner, whatever the number of runners. An
+iteration samples num_env_runners * horizon steps (horizon steps with no env runner), so with 7
+runners the default of 2000 samples 14000 steps per iteration and a smaller value such as 630
+is the practical choice for a long run. A checkpoint can be evaluated at another length by
+passing --horizon to 04b_evaluate_checkpoint.py.
+
+Communication. --communication switches on the thesis' local communication (an agent hears every
+agent inside its own field of view, and a message is the sender's own learned embedding). It is the
+thesis' conditional ablation (RQ5), decentralised arm only, so it is rejected for 02 and 03. Run it as
+a separate condition next to the run without it, never in place of it, and pass the same flag to
+04b_evaluate_checkpoint.py, because a checkpoint trained with messages cannot be evaluated without them.
+Messages are learned, so they need training to carry information.
+
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results, with the checkpoint, under ~/ray_results.
@@ -99,6 +116,11 @@ WAIT_COST = 2.0
 # Illustrative. The default arrival rate, in tasks per step, kept so earlier runs
 # reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
 DEFAULT_ARRIVAL_RATE = 1.0
+# Illustrative. The thesis leaves the evaluation horizon T open, so the episode length in steps
+# is a study parameter. One value, used by training and by evaluation, and also the rollout
+# length of PPO, so an iteration samples one whole episode per runner (horizon steps with no
+# env runner), see PPOHyperparameters.
+DEFAULT_HORIZON = 2000
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
@@ -107,6 +129,10 @@ CREDIT_SIGNAL: CreditSignal = "per_agent"
 NUM_ZONES = 3
 # The storage rule a policy is evaluated under. "matched" training uses it too.
 EVALUATION_STORAGE_MODE = "fixed"
+# Illustrative. The cap on the messages an agent hears. With FLEET_SIZE agents an agent hears at most the
+# FLEET_SIZE - 1 others, so this cap is exactly enough, and it follows the fleet size so a larger fleet
+# does not silently drop senders. It only matters with --communication, and it was 2 before.
+MAX_MESSAGES = FLEET_SIZE - 1
 POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
 OUTPUT_DIR = Path(__file__).parent / "output"
 
@@ -160,21 +186,24 @@ def build_config(
     seed: int,
     controller: ControllerArchitecture = "decentralised",
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> ExperimentConfig:
     """The configuration a run trains under. "fixed_only" trains under F_fix and
     "matched" under the storage rule used at evaluation (sec:method:training).
     The two differ only once EVALUATION_STORAGE_MODE is not "fixed", which needs the
-    online storage estimates of the demand and congestion rules."""
+    online storage estimates of the demand and congestion rules. `communication` is the
+    thesis' conditional ablation (RQ5), decentralised arm only, off unless asked for."""
     storage_mode = "fixed" if regime == "fixed_only" else EVALUATION_STORAGE_MODE
     return ExperimentConfig(
         storage_mode=storage_mode,
         controller=controller,
         congestion_sensitive=False,
-        communication=False,
+        communication=communication,
         num_agents=FLEET_SIZE,
         arrival_rate=arrival_rate,
         seed=seed,
-        horizon=2000,
+        horizon=horizon,
         wait_cost=WAIT_COST,
         observation_depth=5,
         discount=0.99,
@@ -191,9 +220,12 @@ def evaluation_config(
     seed: int,
     controller: ControllerArchitecture,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> ExperimentConfig:
-    """The configuration an episode is evaluated under, the "matched" one."""
-    return build_config("matched", seed, controller, arrival_rate)
+    """The configuration an episode is evaluated under, the "matched" one. It must carry
+    the `communication` the checkpoint was trained with."""
+    return build_config("matched", seed, controller, arrival_rate, horizon, communication)
 
 
 def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
@@ -201,24 +233,16 @@ def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfi
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
-def build_hyperparameters(num_env_runners: int, budget_env_steps: int) -> PPOHyperparameters:
+def build_hyperparameters(budget_env_steps: int) -> PPOHyperparameters:
     # Illustrative values, sized so a longer run learns some navigation on this instance.
-    rollout_fragment_length = 30
-    # RLlib needs train_batch_size to be about a multiple of num_env_runners *
-    # rollout_fragment_length when num_env_runners > 0. This picks the multiple closest
-    # to 600 samples, which is also fine for num_env_runners = 0.
-    per_iteration_samples = max(num_env_runners, 1) * rollout_fragment_length
-    multiple = max(1, round(600 / per_iteration_samples))
     return PPOHyperparameters(
         lr=3e-4,
         clip_param=0.2,
         gae_lambda=0.95,
         minibatch_size=128,
         num_epochs=5,
-        rollout_fragment_length=rollout_fragment_length,
         entropy_coeff=0.02,
         vf_loss_coeff=1.0,
-        train_batch_size=multiple * per_iteration_samples,
         training_budget_env_steps=budget_env_steps,
         credit_signal=CREDIT_SIGNAL,
     )
@@ -262,7 +286,7 @@ def build_arm(
         controller=controller,
         pooling=POOLING[controller],
         zones=zones,
-        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=2),
+        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=MAX_MESSAGES),
     )
 
 
@@ -330,7 +354,8 @@ def train(
         use_gpu=use_gpu,
     ).callbacks(TrainingProgressCallbacks)
     budget = hyperparameters.training_budget_env_steps
-    expected_iterations = math.ceil(budget / hyperparameters.train_batch_size)
+    # An iteration samples one episode per runner, so this is the number of iterations.
+    expected_iterations = math.ceil(budget / ppo_config.total_train_batch_size)
     print(
         f"=== Training the {arm.controller} GNN+PPO controller "
         f"(budget {budget} environment steps) ==="
@@ -391,6 +416,8 @@ def evaluate(
     eval_seeds: tuple[int, ...],
     trace_dir: Path,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> None:
     """Runs `module` for one episode per evaluation seed through the evaluator, so
     the observations are the ones it saw in training. The seeds are the evaluation half
@@ -400,7 +427,7 @@ def evaluate(
     policy = ModulePolicy(module)
     summaries = []
     for episode_idx, eval_seed in enumerate(eval_seeds):
-        config = evaluation_config(eval_seed, arm.controller, arrival_rate)
+        config = evaluation_config(eval_seed, arm.controller, arrival_rate, horizon, communication)
         trace_path = trace_dir / f"{arm.controller}_episode_{episode_idx + 1}.jsonl"
         metrics = run_episode(
             instance.graph,
@@ -447,16 +474,39 @@ def parse_args(
         help="task arrival rate in tasks per step, for training and evaluation "
         "(default 1.0, above the capacity of the arms)",
     )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=DEFAULT_HORIZON,
+        help="episode length in steps, used for training and for evaluation, and the rollout "
+        "length of PPO, so every iteration ends one episode per runner. An iteration samples "
+        "env-runners * horizon steps (horizon with none), so with 7 runners the default of "
+        "2000 gives 14000 steps per iteration and a value such as 630 is the practical "
+        "choice for a long run (default 2000, illustrative)",
+    )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
     parser.add_argument("--gpu", action="store_true")
+    # Illustrative. The thesis' conditional ablation (RQ5), implemented but unevaluated. Run it as a
+    # separate condition next to the run without it, and pass it identically to 04b.
+    parser.add_argument(
+        "--communication",
+        action="store_true",
+        help="local communication, the thesis' conditional ablation (RQ5), decentralised arm "
+        "only. Run it as a separate condition, and pass the same flag to "
+        "04b_evaluate_checkpoint.py",
+    )
     args = parser.parse_args(argv)
+    if args.communication and controller != "decentralised":
+        parser.error("--communication only applies to the decentralised controller")
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
     if args.budget_env_steps < 1:
         parser.error("--budget-env-steps must be at least 1")
     if args.arrival_rate <= 0:
         parser.error("--arrival-rate must be positive")
+    if args.horizon <= 0:
+        parser.error("--horizon must be positive")
     return args
 
 
@@ -466,12 +516,20 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
 
     instance = build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(regime, seed=0, controller=controller, arrival_rate=args.arrival_rate)
+    config = build_config(
+        regime,
+        seed=0,
+        controller=controller,
+        arrival_rate=args.arrival_rate,
+        horizon=args.horizon,
+        communication=args.communication,
+    )
     arm = build_arm(instance, controller, config.observation_depth)
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
-        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}"
+        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}, "
+        f"horizon={config.horizon}, communication={config.communication}"
     )
 
     seed_split = build_seed_split(config.seed, args.eval_seeds)
@@ -482,7 +540,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         counts,
         config,
         arm,
-        build_hyperparameters(args.env_runners, args.budget_env_steps),
+        build_hyperparameters(args.budget_env_steps),
         seed_split,
         run_name=f"{controller}_{regime}",
         num_env_runners=args.env_runners,
@@ -508,6 +566,8 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         eval_seeds,
         OUTPUT_DIR / "traces",
         args.arrival_rate,
+        args.horizon,
+        args.communication,
     )
 
 

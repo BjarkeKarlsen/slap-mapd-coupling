@@ -166,7 +166,7 @@ def test_iteration_record_keeps_numbers_and_turns_everything_else_into_none():
         "backlog": None,
         "steps_since_last_completion": None,
         "standing_still_fraction": 0.25,
-        **_NO_RUNNING_KEYS,
+        "episode_step": None,
         **_NO_EPISODE_KEYS,
     }
     assert json.loads(json.dumps(record)) == record
@@ -184,16 +184,6 @@ _EPISODE_KEY_NAMES = (
     "episode_max_agent_override_share",
 )
 _NO_EPISODE_KEYS = {key: None for key in _EPISODE_KEY_NAMES}
-_RUNNING_KEY_NAMES = (
-    "episode_step",
-    "running_shaping_per_step",
-    "running_deliver_per_step",
-    "running_override_per_step",
-    "running_congestion_per_step",
-    "running_override_rate",
-    "running_max_agent_override_share",
-)
-_NO_RUNNING_KEYS = {key: None for key in _RUNNING_KEY_NAMES}
 
 
 def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_ended():
@@ -221,30 +211,11 @@ def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_
     assert nan["override_rate"] is None
 
 
-def test_iteration_record_carries_the_running_keys_and_null_when_absent():
-    running = {
-        "episode_step": 630.0,
-        "running_shaping_per_step": np.float32(0.5),
-        "running_deliver_per_step": 0.25,
-        "running_override_per_step": -0.125,
-        "running_congestion_per_step": -0.0625,
-        "running_override_rate": 0.25,
-        "running_max_agent_override_share": 0.5,
-    }
-    record = iteration_record(2, {"env_runners": {"tasks_completed": 2.0, **running}})
-    for key, value in running.items():
-        assert record[key] == float(value)
-    # they come from the episode in progress, so an iteration with no finished episode has them
-    for key in _EPISODE_KEY_NAMES:
-        assert record[key] is None
-    assert json.loads(json.dumps(record)) == record
-    # an environment that has not stepped yet logs no ratios, which is null, not 0
-    quiet = iteration_record(3, {"env_runners": {"episode_step": 0.0}})
-    assert quiet["episode_step"] == 0.0
-    for key in _RUNNING_KEY_NAMES[1:]:
-        assert key in quiet and quiet[key] is None
-    nan = iteration_record(4, {"env_runners": {"running_override_rate": float("nan")}})
-    assert nan["running_override_rate"] is None
+def test_iteration_record_carries_the_episode_step_and_has_no_window_keys():
+    record = iteration_record(2, {"env_runners": {"episode_step": 630.0}})
+    assert record["episode_step"] == 630.0
+    assert not any(key.startswith(("window_", "running_")) for key in record)
+    assert iteration_record(3, {"env_runners": {}})["episode_step"] is None
 
 
 # --- the callbacks on the training adapter ----------------------------------------------
@@ -427,109 +398,22 @@ def test_a_planner_run_leaves_the_reward_term_log_at_zero():
     assert metrics["override_rate"] == 0.0
 
 
-# --- the running reward terms ----------------------------------------------------------
+# --- what a sample logs ----------------------------------------------------------------
 
 
-_RUNNING_TERMS = (
-    "running_shaping_per_step",
-    "running_deliver_per_step",
-    "running_override_per_step",
-    "running_congestion_per_step",
-)
-
-
-def _random_step(env: WarehouseMAPDMultiAgentEnv, obs, rng):
-    actions = {aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents}
-    return env.step(actions)
-
-
-def test_the_running_terms_times_the_steps_equal_the_rewards_returned_so_far():
-    env = _adapter("decentralised", horizon=60)
+def test_a_sample_logs_the_snapshot_keys_and_no_rates_over_the_fragment():
+    env = _adapter("decentralised", horizon=30)
     obs, _ = env.reset()
-    rng = np.random.default_rng(0)
-    returned = 0.0
-    overrides_of: dict[str, int] = {}
-    for step in range(1, 41):
-        obs, rewards, _, _, infos = _random_step(env, obs, rng)
-        returned += sum(rewards.values())
-        for aid in env.agents:
-            overrides_of[aid] = overrides_of.get(aid, 0) + int(infos[aid]["overridden"])
-        values = progress_metrics(env.core)
-        assert values["episode_step"] == float(step)
-        # the four terms add up to the running return per step
-        assert sum(values[key] for key in _RUNNING_TERMS) * step == pytest.approx(
-            returned, abs=1e-9
-        )
-        # the overrides, counted from the step results and not from the log
-        total = sum(overrides_of.values())
-        assert values["running_override_rate"] == pytest.approx(total / (step * 3), abs=1e-12)
-        share = max(overrides_of.values()) / total if total else 0.0
-        assert values["running_max_agent_override_share"] == pytest.approx(share, abs=1e-12)
-    # the run is not vacuous
-    assert total > 0 and returned != 0.0
-    assert values["running_deliver_per_step"] > 0.0
-    assert values["running_override_per_step"] == pytest.approx(-0.5 * total / 40, abs=1e-12)
-    assert 0.0 < values["running_max_agent_override_share"] <= 1.0
-
-
-def test_the_running_ratios_are_not_logged_before_the_first_step():
-    fresh, stepped = _adapter("decentralised", horizon=30), _adapter("decentralised", horizon=30)
-    fresh.reset()
-    obs, _ = stepped.reset()
-    _random_step(stepped, obs, np.random.default_rng(0))
-    assert not any(key.startswith("running_") for key in progress_metrics(fresh.core))
-    assert progress_metrics(fresh.core)["episode_step"] == 0.0
-    assert all(key in progress_metrics(stepped.core) for key in _RUNNING_KEY_NAMES)
-
-    vector, logger = _Vector(fresh), _Logger()
-    vector.envs.append(stepped)  # one environment just reset, the other has taken a step
-    TrainingProgressCallbacks().on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
-    assert logger.values["episode_step"] == [0.0, 1.0]
-    for key in _RUNNING_KEY_NAMES[1:]:
-        assert len(logger.values[key]) == 1  # the stepped environment only
-
-
-def test_the_running_terms_are_zero_for_a_planner_run():
-    env = _env()
-    env.reset()
-    planner = PrioritisedAStarPlanner()
-    for _ in range(8):
-        step_with_planner(env, planner)
-    values = progress_metrics(env)
-    for key in _RUNNING_KEY_NAMES[1:]:
-        assert values[key] == 0.0
-
-
-@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
-def test_at_the_end_of_an_episode_the_running_terms_match_the_logged_returns(controller):
-    env = _adapter(controller, horizon=12)
     vector, logger = _Vector(env), _Logger()
     callbacks = TrainingProgressCallbacks()
-    obs, _ = env.reset()
-    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
-    rng = np.random.default_rng(1)
-    truncated = {"__all__": False}
-    while not truncated["__all__"]:
-        obs, _, _, truncated, _ = _random_step(env, obs, rng)
+    rng = np.random.default_rng(0)
+    for _ in range(5):
+        actions = {
+            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
+        }
+        obs, *_ = env.step(actions)
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
     callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
-    callbacks.on_episode_end(metrics_logger=logger, env=vector, env_index=0)
-
-    (steps,) = logger.values["episode_step"]
-    assert steps == 12.0
-    for running, total in (
-        ("running_shaping_per_step", "return_shaping"),
-        ("running_deliver_per_step", "return_deliver"),
-        ("running_override_per_step", "return_override"),
-        ("running_congestion_per_step", "return_congestion"),
-    ):
-        (per_step,) = logger.values[running]
-        (value,) = logger.values[total]
-        assert per_step * steps == pytest.approx(value, abs=1e-9)
-    assert logger.values["running_override_rate"] == [
-        pytest.approx(logger.values["override_rate"][0])
-    ]
-    assert (
-        logger.values["running_max_agent_override_share"]
-        == logger.values["episode_max_agent_override_share"]
-    )
+    assert set(logger.values) == set(progress_metrics(env.core)) | {"standing_still_fraction"}
+    assert logger.values["episode_step"] == [5.0]
+    assert not any(key.startswith("window_") for key in logger.values)

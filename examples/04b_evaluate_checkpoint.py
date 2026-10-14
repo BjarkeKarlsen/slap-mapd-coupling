@@ -3,10 +3,19 @@
 Pass the checkpoint folder Ray wrote at the end of the run, for example
     python examples/04b_evaluate_checkpoint.py --checkpoint=<path> --eval-seeds=3
 Pass the same --arrival-rate the checkpoint was trained at (default 1.0, as in 04).
+--horizon sets the episode length in steps (default 2000, as in 04), so a checkpoint can be
+evaluated at another length than it was trained at. The thesis leaves the evaluation horizon T
+open, so the value is illustrative.
 The module is loaded from the checkpoint's own folder, with no Ray cluster and no
 registered environment, and evaluated through the evaluator as in 04. Use --arm
 for a checkpoint of 02_centralised_fixed.py (centralised) or 03_section_based.py
 (section). The default is the decentralised arm of 04.
+
+Pass --communication for a checkpoint trained with it (04 --communication), exactly as it was
+passed to 04. It is the thesis' conditional ablation (RQ5), decentralised arm only, run as a
+separate condition. The module is checked against the flag before the episodes run, because a
+checkpoint trained with messages cannot run without them, and one trained without them would
+ignore them silently.
 
 The instance, storage, configuration, caps and pooling are 04's, imported from it,
 because the module was built against that graph's action and observation spaces.
@@ -44,9 +53,26 @@ def build_config(
     seed: int,
     controller: str = "decentralised",
     arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
+    horizon: int = example_04.DEFAULT_HORIZON,
+    communication: bool = False,
 ):
     """The configuration of an evaluation episode, 04's."""
-    return example_04.evaluation_config(seed, controller, arrival_rate)
+    return example_04.evaluation_config(seed, controller, arrival_rate, horizon, communication)
+
+
+def check_communication(module, communication: bool) -> None:
+    """Raises if `communication` is not what the module was trained with. The flag decides
+    whether the observations carry the messages. Without it a module trained with messages
+    fails on a missing key deep in the encoder, and a module trained without them runs and
+    ignores the messages, so the result would be the run without communication under another
+    label. The module's own model config says which one it is."""
+    trained_with = bool(module.model_config["gnn_encoder_config"]["communication"])
+    if trained_with != communication:
+        raise RuntimeError(
+            f"The checkpoint was trained with communication={trained_with} but this run has "
+            f"communication={communication}. Pass --communication exactly as it was passed to "
+            "04_decentralised_training.py."
+        )
 
 
 def render_episode(
@@ -58,6 +84,8 @@ def render_episode(
     arm,
     arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
     delay: float = 0.15,
+    horizon: int = example_04.DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> None:
     """Live pygame preview of one episode driven by the module's sampled slots. Close the
     window (or Ctrl+C) to stop early."""
@@ -65,7 +93,13 @@ def render_episode(
     from slap_mapd_coupling.training.policy import ModulePolicy
     from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
-    config = build_config(seed=0, controller=arm.controller, arrival_rate=arrival_rate)
+    config = build_config(
+        seed=0,
+        controller=arm.controller,
+        arrival_rate=arrival_rate,
+        horizon=horizon,
+        communication=communication,
+    )
     adapter = WarehouseMAPDMultiAgentEnv(
         instance.graph,
         skus,
@@ -115,12 +149,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=example_04.DEFAULT_ARRIVAL_RATE,
         help="task arrival rate in tasks per step, the rate the checkpoint was trained at",
     )
+    # Illustrative. The thesis leaves the evaluation horizon T open. In training it is also the
+    # rollout length of PPO, so an iteration samples one episode per runner.
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=example_04.DEFAULT_HORIZON,
+        help="episode length in steps, used for evaluation (default 2000, as in 04). In "
+        "training it is also the rollout length of PPO, so an iteration samples one episode "
+        "per runner",
+    )
+    # Illustrative. The thesis' conditional ablation (RQ5), decentralised arm only. Pass it
+    # exactly as it was passed to 04 when the checkpoint was trained.
+    parser.add_argument(
+        "--communication",
+        action="store_true",
+        help="local communication, the thesis' conditional ablation (RQ5), decentralised arm "
+        "only. Pass it exactly as it was passed to 04_decentralised_training.py",
+    )
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args(argv)
+    if args.communication and args.arm != "decentralised":
+        parser.error("--communication only applies to the decentralised controller")
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
     if args.arrival_rate <= 0:
         parser.error("--arrival-rate must be positive")
+    if args.horizon <= 0:
+        parser.error("--horizon must be positive")
     return args
 
 
@@ -134,14 +190,31 @@ def main() -> None:
 
     instance = example_04.build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(seed=0, controller=args.arm, arrival_rate=args.arrival_rate)
+    config = build_config(
+        seed=0,
+        controller=args.arm,
+        arrival_rate=args.arrival_rate,
+        horizon=args.horizon,
+        communication=args.communication,
+    )
     arm = example_04.build_arm(instance, args.arm, config.observation_depth)
 
     print(f"Loading checkpoint from {args.checkpoint}")
     module = load_module(args.checkpoint)
+    check_communication(module, args.communication)
 
     if args.render:
-        render_episode(module, instance, skus, capacities, counts, arm, args.arrival_rate)
+        render_episode(
+            module,
+            instance,
+            skus,
+            capacities,
+            counts,
+            arm,
+            args.arrival_rate,
+            horizon=args.horizon,
+            communication=args.communication,
+        )
     else:
         seed_split = example_04.build_seed_split(config.seed, args.eval_seeds)
         _, eval_seeds = example_04.split_seeds(seed_split)
@@ -155,6 +228,8 @@ def main() -> None:
             eval_seeds,
             example_04.OUTPUT_DIR / "traces",
             args.arrival_rate,
+            args.horizon,
+            args.communication,
         )
 
 

@@ -118,17 +118,11 @@ def progress_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
 
     `tasks_completed`, `tasks_released`, `backlog` and `steps_since_last_completion` are
     snapshots of the episode in progress, taken at the end of a sampled fragment and averaged
-    over the environments. They are not per-episode totals, since a fragment ends wherever the
-    sampling stops, usually part way through an episode. The per-episode totals are the
-    `episode_*` keys logged at the end of every episode (`episode_metrics`).
+    over the environments. The per-episode totals are the `episode_*` keys logged at the end of
+    every episode (`episode_metrics`).
 
     `steps_since_last_completion` is t minus the latest finish time, or t
     when no task has finished yet. A value that keeps growing is a stall.
-
-    The `running_*` values are snapshots of the same kind, built from the reward terms the
-    episode has collected so far (`running_metrics`). They are per step or ratios, so
-    iterations that end at different points of an episode stay comparable. They are left out
-    for an environment that has not taken a step yet.
     """
     finish_times = [task.finish_time for task in env.tasks if task.finish_time is not None]
     return {
@@ -137,43 +131,6 @@ def progress_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
         "backlog": float(env.log.backlog_by_t[-1]),
         "steps_since_last_completion": float(env.t - max(finish_times, default=0)),
         "episode_step": float(env.t),
-        **running_metrics(env),
-    }
-
-
-def running_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
-    """The reward terms and overrides of the episode in progress, per step, so an iteration
-    that ends part way through an episode still says how the return is building up.
-
-    Each `running_*_per_step` value is one term of the reward (environment/reward_function.py::
-    RewardTerms, each signed) summed over the robots and the steps taken so far, divided by the
-    number of steps. The four add up to the running return per step, so an episode of
-    `horizon` steps that keeps this pace ends with a return of about `horizon` times their
-    sum. `running_override_rate` is the share of robot-steps so far in which a robot was
-    overridden by conflict resolution. `running_max_agent_override_share` is the share of all
-    the overrides so far that fell on the single most overridden robot, and is 0 when there
-    were none.
-
-    These are end-of-fragment snapshots of the episode in progress, not episode totals. The
-    exact totals are the `return_*` and `episode_*` keys that `episode_metrics` logs when an
-    episode ends. Nothing is returned before the first step, since a per-step value over zero
-    steps is undefined. A planner run has no reward, so its values are 0.
-    """
-    steps = env.t
-    if steps <= 0:
-        return {}
-    log = env.log
-    overrides = sum(log.overrides_by_agent.values())
-    agent_steps = steps * env.config.num_agents
-    return {
-        "running_shaping_per_step": sum(log.return_shaping_by_agent.values()) / steps,
-        "running_deliver_per_step": sum(log.return_delivery_by_agent.values()) / steps,
-        "running_override_per_step": sum(log.return_override_by_agent.values()) / steps,
-        "running_congestion_per_step": sum(log.return_congestion_by_agent.values()) / steps,
-        "running_override_rate": overrides / agent_steps,
-        "running_max_agent_override_share": (
-            max(log.overrides_by_agent.values()) / overrides if overrides else 0.0
-        ),
     }
 
 
@@ -232,22 +189,16 @@ class StandingStillCounter:
 class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     """The invariant checks plus progress numbers in every iteration.
 
-    An iteration samples fewer steps than an episode lasts, so the episode
-    return is missing most iterations. These values are logged from the
-    environment's own state at the end of every fragment instead, under
-    `result["env_runners"]`.
+    Every iteration ends at least one episode per runner when the rollout length equals the
+    horizon (training/config.py::build_ppo_config), so the episode keys exist in every
+    iteration. The values logged from the environment's own state at the end of every sampled
+    fragment, under `result["env_runners"]`, are the snapshots `tasks_completed`,
+    `tasks_released`, `backlog`, `steps_since_last_completion` and `episode_step`, averaged
+    over the environments (see `progress_metrics`).
 
-    `tasks_completed`, `tasks_released`, `backlog`, `steps_since_last_completion`,
-    `episode_step` and the `running_*` values (`running_shaping_per_step`,
-    `running_deliver_per_step`, `running_override_per_step`, `running_congestion_per_step`,
-    `running_override_rate`, `running_max_agent_override_share`) are end-of-fragment
-    snapshots of the episode in progress, averaged over the environments. They are not
-    per-episode totals. The `running_*` values are per step or ratios, so iterations that end
-    at different points of an episode are comparable (see `running_metrics`). The exact
-    per-episode totals are the `episode_*` keys, together with `return_shaping`,
-    `return_deliver`, `return_override`, `return_congestion` and `override_rate`, which are
-    logged when an episode ends and so are missing from an iteration in which none ended (see
-    `episode_metrics`).
+    The exact per-episode totals are the `episode_*` keys, together with `return_shaping`,
+    `return_deliver`, `return_override`, `return_congestion` and `override_rate`, logged when
+    an episode ends (see `episode_metrics`).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -266,8 +217,8 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         if env_runner is None or metrics_logger is None or env_runner.env is None:
             return
         for env_index in range(len(env_runner.env.envs)):
-            values = progress_metrics(_unwrap(env_runner.env, env_index).core)
-            for name, value in values.items():
+            core = _unwrap(env_runner.env, env_index).core
+            for name, value in progress_metrics(core).items():
                 metrics_logger.log_value(name, value, reduce="mean")
         fraction = self._standing_still.fraction()
         if fraction is not None:
@@ -291,20 +242,7 @@ _COUNT_KEYS = (
 )
 
 
-# Snapshots of the episode in progress, logged every iteration (see `running_metrics`). Kept
-# apart from _COUNT_KEYS, which `format_iteration` prints.
-_RUNNING_KEYS = (
-    "episode_step",
-    "running_shaping_per_step",
-    "running_deliver_per_step",
-    "running_override_per_step",
-    "running_congestion_per_step",
-    "running_override_rate",
-    "running_max_agent_override_share",
-)
-
-
-# Logged once per finished episode, so None in an iteration where no episode ended.
+# Logged once per finished episode.
 _EPISODE_KEYS = (
     "return_shaping",
     "return_deliver",
@@ -325,20 +263,17 @@ def _is_number(value: Any) -> bool:
 def iteration_record(i: int, result: Mapping[str, Any]) -> dict[str, Any]:
     """One iteration's progress numbers as a JSON-ready dict, for a file kept beside a run.
 
-    The keys are the ones `format_iteration` prints, then the end-of-fragment snapshots of
-    `_RUNNING_KEYS` (`episode_step` and the per-step `running_*` values), then the per-episode
-    keys of `_EPISODE_KEYS`. The count keys and the running keys are snapshots of the episode
-    in progress, averaged over the environments, not per-episode totals (see
-    `progress_metrics`). The exact totals are the `_EPISODE_KEYS`, present only in an
-    iteration in which an episode ended. A value that is missing or not a finite number is
-    None, so an iteration with no finished episode stays readable.
+    The keys are the ones `format_iteration` prints, then `episode_step`, then the per-episode
+    keys of `_EPISODE_KEYS`. The count keys and `episode_step` are snapshots of the episode in
+    progress, averaged over the environments (see `progress_metrics`). The exact totals are the
+    `_EPISODE_KEYS`. A value that is missing or not a finite number is None.
     """
     runners = result.get("env_runners", {})
     keys = (
         "episode_return_mean",
         *_COUNT_KEYS,
         "standing_still_fraction",
-        *_RUNNING_KEYS,
+        "episode_step",
         *_EPISODE_KEYS,
     )
     record: dict[str, Any] = {"iteration": i}
@@ -352,9 +287,8 @@ def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
     """One line per training iteration, in plain numbers (no exponents).
 
     The episode return mean comes first because it is the number PPO
-    reports. Most iterations have none, since an episode is longer than an
-    iteration, and then the line shows 0. A real return of 0 prints as 0.0,
-    so the two can still be told apart.
+    reports. An iteration in which no episode ended has none, and then the line
+    shows 0. A real return of 0 prints as 0.0, so the two can still be told apart.
     """
     runners = result.get("env_runners", {})
     episode_return = runners.get("episode_return_mean")
