@@ -74,7 +74,7 @@ and prints a few numbers for every trace.
 python -m slap_mapd_coupling.viz.training_run --run-dir examples/output --out figures
 ```
 
-It writes `training_progress.png` (return and its four terms, override rate with standing still,
+It writes `training_progress.png` (return and its five terms, override rate with standing still,
 tasks completed against released), one `trace_<arm>_episode_<n>.png` per trace (tasks over time
 and what each agent did at every step) and, from two traces on, `trace_comparison.png`. The
 printed numbers are the tasks completed, the longest stretch without a completion, each agent's

@@ -138,7 +138,7 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
     """What one finished episode came to, for the training log. `env` is the simulator
     core, the adapter's `core`, read when the episode ends.
 
-    The four `return_*` values are the terms of the reward summed over the robots and the
+    The five `return_*` values are the terms of the reward summed over the robots and the
     steps of the episode (environment/reward_function.py::RewardTerms, each signed). They add
     up to the episode return RLlib reports, also under a team-mean credit signal, which
     only moves reward between robots. `override_rate` is the share of robot-steps in which a
@@ -154,6 +154,7 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
         "return_shaping": sum(log.return_shaping_by_agent.values()),
         "return_deliver": sum(log.return_delivery_by_agent.values()),
         "return_override": sum(log.return_override_by_agent.values()),
+        "return_wait": sum(log.return_wait_by_agent.values()),
         "return_congestion": sum(log.return_congestion_by_agent.values()),
         "override_rate": overrides / agent_steps if agent_steps else 0.0,
         "episode_tasks_completed": float(len(finish_times)),
@@ -197,8 +198,8 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     over the environments (see `progress_metrics`).
 
     The exact per-episode totals are the `episode_*` keys, together with `return_shaping`,
-    `return_deliver`, `return_override`, `return_congestion` and `override_rate`, logged when
-    an episode ends (see `episode_metrics`).
+    `return_deliver`, `return_override`, `return_wait`, `return_congestion` and `override_rate`,
+    logged when an episode ends (see `episode_metrics`).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -247,6 +248,7 @@ _EPISODE_KEYS = (
     "return_shaping",
     "return_deliver",
     "return_override",
+    "return_wait",
     "return_congestion",
     "override_rate",
     "episode_tasks_completed",

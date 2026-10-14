@@ -116,12 +116,13 @@ class EpisodeLog:
     relocated_units_by_update: list[int] = field(default_factory=list)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
-    # four sums of an agent add up to its summed reward). overrides_by_agent counts the
+    # five sums of an agent add up to its summed reward). overrides_by_agent counts the
     # steps in which the agent was overridden. All stay empty for a planner run, which
     # has no reward weights, and an agent missing from a dict has a sum of zero.
     return_shaping_by_agent: dict[AgentId, float] = field(default_factory=dict)
     return_delivery_by_agent: dict[AgentId, float] = field(default_factory=dict)
     return_override_by_agent: dict[AgentId, float] = field(default_factory=dict)
+    return_wait_by_agent: dict[AgentId, float] = field(default_factory=dict)
     return_congestion_by_agent: dict[AgentId, float] = field(default_factory=dict)
     overrides_by_agent: dict[AgentId, int] = field(default_factory=dict)
 
@@ -131,6 +132,7 @@ class EpisodeLog:
             (self.return_shaping_by_agent, terms.shaping),
             (self.return_delivery_by_agent, terms.delivery),
             (self.return_override_by_agent, terms.override),
+            (self.return_wait_by_agent, terms.wait),
             (self.return_congestion_by_agent, terms.congestion),
         ):
             sums[agent_id] = sums.get(agent_id, 0.0) + term
@@ -493,6 +495,10 @@ class WarehouseMAPDEnv:
                 )
             )
             was_overridden = agent_id in overridden
+            # omega_i(t): serving a task and standing still, chosen or overridden.
+            stood_still = (
+                task_now is not None and before_locations[agent_id] == after_locations[agent_id]
+            )
             terms = reward_terms(
                 self.graph,
                 location_now=before_locations[agent_id],
@@ -501,10 +507,12 @@ class WarehouseMAPDEnv:
                 task_next=task_next,
                 completed_task=completed,
                 overridden=was_overridden,
+                stood_still=stood_still,
                 congestion=congestion[agent_id],
                 discount=self.config.discount,
                 deliver_reward=self.config.deliver_reward,
                 override_penalty=self.config.override_penalty,
+                wait_cost=self.config.wait_cost,
                 congestion_reward_weight=self.config.congestion_reward_weight,
             )
             self.log.record_reward_terms(agent_id, terms, was_overridden)

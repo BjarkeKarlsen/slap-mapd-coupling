@@ -110,9 +110,10 @@ from slap_mapd_coupling.training.env import CreditSignal, Zones
 from slap_mapd_coupling.training.policy import ModulePolicy
 
 FLEET_SIZE = 3
-# Illustrative. The thesis leaves the wait cost c_wait open. One value, used by the
+# The wait cost c_wait, 0.1 in tab:rlparams, below the cheapest edge (0.5). It is a weight of the
+# reward, paid for every step an agent serving a task stands still. One value, used by the
 # generated graph and by the experiment config, because it is one study parameter.
-WAIT_COST = 2.0
+WAIT_COST = 0.1
 # Illustrative. The default arrival rate, in tasks per step, kept so earlier runs
 # reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
 DEFAULT_ARRIVAL_RATE = 1.0

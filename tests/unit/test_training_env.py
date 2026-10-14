@@ -447,7 +447,12 @@ def _random_rollout(env: WarehouseMAPDMultiAgentEnv, steps: int, seed: int):
 def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_signal):
     controller = "decentralised" if credit_signal == "per_agent" else "centralised"
     env = _arm_env(
-        controller, credit_signal=credit_signal, arrival_rate=3.0, horizon=60, num_agents=4
+        controller,
+        credit_signal=credit_signal,
+        arrival_rate=3.0,
+        horizon=60,
+        num_agents=4,
+        wait_cost=0.2,
     )
     rollout = _random_rollout(env, 60, seed=3)
     log = env.core.log
@@ -458,6 +463,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_s
                 log.return_shaping_by_agent[int(aid)]
                 + log.return_delivery_by_agent[int(aid)]
                 + log.return_override_by_agent[int(aid)]
+                + log.return_wait_by_agent[int(aid)]
                 + log.return_congestion_by_agent[int(aid)]
             )
             assert terms == pytest.approx(returned[aid], abs=1e-9)
@@ -467,6 +473,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_s
             log.return_shaping_by_agent,
             log.return_delivery_by_agent,
             log.return_override_by_agent,
+            log.return_wait_by_agent,
             log.return_congestion_by_agent,
         )
     )
@@ -478,6 +485,10 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_s
     assert sum(log.return_delivery_by_agent.values()) > 0
     assert sum(log.return_shaping_by_agent.values()) != 0.0
     assert sum(log.return_congestion_by_agent.values()) < 0.0
+    # a wait costs c_wait for an agent that serves a task, so the sum is a whole multiple of it
+    wait = sum(log.return_wait_by_agent.values())
+    assert wait < 0.0
+    assert wait / -0.2 == pytest.approx(round(wait / -0.2), abs=1e-9)
 
 
 def test_team_mean_gives_every_robot_the_fleet_mean_under_the_centralised_arm():
@@ -517,8 +528,7 @@ def test_team_mean_under_the_section_arm_averages_over_the_zone_at_the_start_of_
         for aid, v in locations.items():
             groups.setdefault(owner[v], []).append(own[str(aid)])
         return {
-            str(aid): sum(groups[owner[v]]) / len(groups[owner[v]])
-            for aid, v in locations.items()
+            str(aid): sum(groups[owner[v]]) / len(groups[owner[v]]) for aid, v in locations.items()
         }
 
     expected = zone_means(start)
