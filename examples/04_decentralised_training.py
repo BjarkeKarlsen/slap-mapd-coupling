@@ -31,26 +31,29 @@ slot instead is still open.
 
 Arrival rate. --arrival-rate sets the task arrival rate lambda_task of training
 and of evaluation, so a checkpoint is evaluated at the rate it was trained at by
-passing the same value to 04b_evaluate_checkpoint.py. The default of 1.0 tasks per
-step is far above what the arms complete, so the backlog grows without bound and
-the evaluator's keep-up ratio (throughput over arrival rate) cannot reach 1.
-That ratio is meaningful only at a rate below capacity.
+passing the same value to 04b_evaluate_checkpoint.py. The default of 0.25 tasks per
+step is about 80% of what Token Passing completes on this instance (about 0.3 tasks per
+step, measured with 3 agents, horizon 630), so the arms are loaded but can keep up. At 0.15
+every arm and Token Passing complete 92 to 97% of the released tasks, which is too light to tell
+the arms apart. At a rate above capacity the backlog grows without bound and the evaluator's
+keep-up ratio (throughput over arrival rate) cannot reach 1, so that ratio is meaningful only at
+a rate below capacity. The value is illustrative, since the thesis leaves the load levels TBD.
 
 Episode length. --horizon sets the number of steps of an episode, the horizon T, for training
 and for evaluation alike, so both use one value. The thesis leaves the evaluation horizon T
-open, so the default of 2000 is illustrative. The horizon is also the rollout length of PPO
+open, so the default of 630 is illustrative. The horizon is also the rollout length of PPO
 and the train batch is one episode per runner, so one sampling call of a runner is exactly one
 episode and every iteration ends one episode per runner, whatever the number of runners. An
 iteration samples num_env_runners * horizon steps (horizon steps with no env runner), so with 7
-runners the default of 2000 samples 14000 steps per iteration and a smaller value such as 630
-is the practical choice for a long run. A checkpoint can be evaluated at another length by
-passing --horizon to 04b_evaluate_checkpoint.py.
+runners the default of 630 samples 4410 steps per iteration. A checkpoint can be evaluated at
+another length by passing --horizon to 04b_evaluate_checkpoint.py.
 
 Communication. --communication switches on the thesis' local communication (an agent hears every
 agent inside its own field of view, and a message is the sender's own learned embedding). It is the
-thesis' conditional ablation (RQ5), decentralised arm only, so it is rejected for 02 and 03. Run it as
-a separate condition next to the run without it, never in place of it, and pass the same flag to
-04b_evaluate_checkpoint.py, because a checkpoint trained with messages cannot be evaluated without them.
+thesis' conditional ablation (RQ5), decentralised arm only, so it is rejected for 02 and 03. Run it
+as a separate condition next to the run without it, never in place of it, and pass the same flag to
+04b_evaluate_checkpoint.py, because a checkpoint trained with messages cannot be evaluated without
+them.
 Messages are learned, so they need training to carry information.
 
 Run it with the smallest settings, for example
@@ -118,14 +121,15 @@ KEEP_UP_THRESHOLD = 0.8
 # Illustrative. The thesis leaves the wait cost c_wait open. One value, used by the
 # generated graph and by the experiment config, because it is one study parameter.
 WAIT_COST = 2.0
-# Illustrative. The default arrival rate, in tasks per step, kept so earlier runs
-# reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
-DEFAULT_ARRIVAL_RATE = 1.0
+# Illustrative. The default arrival rate, in tasks per step. About 80% of the capacity Token
+# Passing reaches on this instance (about 0.3), so the arms are loaded but can keep up. Earlier
+# runs used 1.0 (far above capacity) and 0.15 (too light to tell the arms apart).
+DEFAULT_ARRIVAL_RATE = 0.25
 # Illustrative. The thesis leaves the evaluation horizon T open, so the episode length in steps
 # is a study parameter. One value, used by training and by evaluation, and also the rollout
 # length of PPO, so an iteration samples one whole episode per runner (horizon steps with no
 # env runner), see PPOHyperparameters.
-DEFAULT_HORIZON = 2000
+DEFAULT_HORIZON = 630
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
@@ -134,9 +138,10 @@ CREDIT_SIGNAL: CreditSignal = "per_agent"
 NUM_ZONES = 3
 # The storage rule a policy is evaluated under. "matched" training uses it too.
 EVALUATION_STORAGE_MODE = "fixed"
-# Illustrative. The cap on the messages an agent hears. With FLEET_SIZE agents an agent hears at most the
-# FLEET_SIZE - 1 others, so this cap is exactly enough, and it follows the fleet size so a larger fleet
-# does not silently drop senders. It only matters with --communication, and it was 2 before.
+# Illustrative. The cap on the messages an agent hears. With FLEET_SIZE agents an agent hears at
+# most the FLEET_SIZE - 1 others, so this cap is exactly enough, and it follows the fleet size so a
+# larger fleet does not silently drop senders. It only matters with --communication, and it was 2
+# before.
 MAX_MESSAGES = FLEET_SIZE - 1
 POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
 OUTPUT_DIR = Path(__file__).parent / "output"
@@ -478,7 +483,7 @@ def parse_args(
         type=float,
         default=DEFAULT_ARRIVAL_RATE,
         help="task arrival rate in tasks per step, for training and evaluation "
-        "(default 1.0, above the capacity of the arms)",
+        "(default 0.25, about 80% of the capacity of Token Passing, illustrative)",
     )
     parser.add_argument(
         "--horizon",
@@ -487,8 +492,7 @@ def parse_args(
         help="episode length in steps, used for training and for evaluation, and the rollout "
         "length of PPO, so every iteration ends one episode per runner. An iteration samples "
         "env-runners * horizon steps (horizon with none), so with 7 runners the default of "
-        "2000 gives 14000 steps per iteration and a value such as 630 is the practical "
-        "choice for a long run (default 2000, illustrative)",
+        "630 gives 4410 steps per iteration (default 630, illustrative)",
     )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")

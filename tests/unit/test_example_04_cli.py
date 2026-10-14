@@ -77,8 +77,8 @@ def test_evaluation_config_uses_the_evaluation_storage_rule_and_seed(example_04)
     assert config.storage_mode == example_04.EVALUATION_STORAGE_MODE
 
 
-def test_arrival_rate_defaults_to_one_and_must_be_positive(example_04):
-    assert example_04.parse_args([]).arrival_rate == 1.0
+def test_arrival_rate_defaults_to_a_quarter_and_must_be_positive(example_04):
+    assert example_04.parse_args([]).arrival_rate == 0.25
     assert example_04.parse_args(["--arrival-rate=0.15"]).arrival_rate == 0.15
     assert example_04.parse_args(["--arrival-rate", "0.15"]).arrival_rate == 0.15
     with pytest.raises(SystemExit):
@@ -86,9 +86,9 @@ def test_arrival_rate_defaults_to_one_and_must_be_positive(example_04):
 
 
 def test_training_and_evaluation_configs_carry_the_arrival_rate(example_04):
-    assert example_04.build_config("fixed_only", seed=0).arrival_rate == 1.0
+    assert example_04.build_config("fixed_only", seed=0).arrival_rate == 0.25
     assert example_04.build_config("matched", seed=0, arrival_rate=0.15).arrival_rate == 0.15
-    assert example_04.evaluation_config(3, "section").arrival_rate == 1.0
+    assert example_04.evaluation_config(3, "section").arrival_rate == 0.25
     assert example_04.evaluation_config(3, "section", 0.15).arrival_rate == 0.15
 
 
@@ -99,25 +99,25 @@ def test_the_wait_cost_is_one_value_for_the_graph_and_the_config(example_04):
     assert instance.graph.wait_cost == example_04.WAIT_COST
 
 
-def test_horizon_defaults_to_2000_and_must_be_positive(example_04):
-    assert example_04.DEFAULT_HORIZON == 2000
-    assert example_04.parse_args([]).horizon == 2000
-    assert example_04.parse_args(["--horizon=630"]).horizon == 630
-    assert example_04.parse_args(["--horizon", "630"]).horizon == 630
+def test_horizon_defaults_to_630_and_must_be_positive(example_04):
+    assert example_04.DEFAULT_HORIZON == 630
+    assert example_04.parse_args([]).horizon == 630
+    assert example_04.parse_args(["--horizon=2000"]).horizon == 2000
+    assert example_04.parse_args(["--horizon", "2000"]).horizon == 2000
     for bad in ("0", "-5"):
         with pytest.raises(SystemExit):
             example_04.parse_args([f"--horizon={bad}"])
 
 
 def test_training_and_evaluation_configs_share_the_horizon(example_04):
-    assert example_04.build_config("fixed_only", seed=0).horizon == 2000
-    assert example_04.build_config("matched", seed=0, horizon=630).horizon == 630
-    assert example_04.evaluation_config(3, "section").horizon == 2000
-    assert example_04.evaluation_config(3, "section", horizon=630).horizon == 630
+    assert example_04.build_config("fixed_only", seed=0).horizon == 630
+    assert example_04.build_config("matched", seed=0, horizon=2000).horizon == 2000
+    assert example_04.evaluation_config(3, "section").horizon == 630
+    assert example_04.evaluation_config(3, "section", horizon=2000).horizon == 2000
     # one episode length for both, so the same seed gives the same config
-    assert example_04.evaluation_config(0, "decentralised", horizon=630) == example_04.build_config(
-        "matched", seed=0, horizon=630
-    )
+    assert example_04.evaluation_config(
+        0, "decentralised", horizon=2000
+    ) == example_04.build_config("matched", seed=0, horizon=2000)
 
 
 def test_communication_is_off_by_default_and_read_as_a_flag(example_04):
