@@ -27,6 +27,7 @@ from slap_mapd_coupling.training.callbacks import (
     format_iteration,
     iteration_record,
     progress_metrics,
+    window_metrics,
 )
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
@@ -166,7 +167,7 @@ def test_iteration_record_keeps_numbers_and_turns_everything_else_into_none():
         "backlog": None,
         "steps_since_last_completion": None,
         "standing_still_fraction": 0.25,
-        **_NO_RUNNING_KEYS,
+        **_NO_WINDOW_KEYS,
         **_NO_EPISODE_KEYS,
     }
     assert json.loads(json.dumps(record)) == record
@@ -184,16 +185,17 @@ _EPISODE_KEY_NAMES = (
     "episode_max_agent_override_share",
 )
 _NO_EPISODE_KEYS = {key: None for key in _EPISODE_KEY_NAMES}
-_RUNNING_KEY_NAMES = (
+_WINDOW_KEY_NAMES = (
     "episode_step",
-    "running_shaping_per_step",
-    "running_deliver_per_step",
-    "running_override_per_step",
-    "running_congestion_per_step",
-    "running_override_rate",
-    "running_max_agent_override_share",
+    "window_shaping_per_step",
+    "window_deliver_per_step",
+    "window_override_per_step",
+    "window_congestion_per_step",
+    "window_override_rate",
+    "window_max_agent_override_share",
+    "window_tasks_completed_per_step",
 )
-_NO_RUNNING_KEYS = {key: None for key in _RUNNING_KEY_NAMES}
+_NO_WINDOW_KEYS = {key: None for key in _WINDOW_KEY_NAMES}
 
 
 def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_ended():
@@ -221,30 +223,33 @@ def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_
     assert nan["override_rate"] is None
 
 
-def test_iteration_record_carries_the_running_keys_and_null_when_absent():
-    running = {
+def test_iteration_record_carries_the_window_keys_and_null_when_absent():
+    window = {
         "episode_step": 630.0,
-        "running_shaping_per_step": np.float32(0.5),
-        "running_deliver_per_step": 0.25,
-        "running_override_per_step": -0.125,
-        "running_congestion_per_step": -0.0625,
-        "running_override_rate": 0.25,
-        "running_max_agent_override_share": 0.5,
+        "window_shaping_per_step": np.float32(0.5),
+        "window_deliver_per_step": 0.25,
+        "window_override_per_step": -0.125,
+        "window_congestion_per_step": -0.0625,
+        "window_override_rate": 0.25,
+        "window_max_agent_override_share": 0.5,
+        "window_tasks_completed_per_step": 0.03125,
     }
-    record = iteration_record(2, {"env_runners": {"tasks_completed": 2.0, **running}})
-    for key, value in running.items():
+    record = iteration_record(2, {"env_runners": {"tasks_completed": 2.0, **window}})
+    for key, value in window.items():
         assert record[key] == float(value)
-    # they come from the episode in progress, so an iteration with no finished episode has them
+    # they come from the last fragment, so an iteration with no finished episode has them
     for key in _EPISODE_KEY_NAMES:
         assert record[key] is None
     assert json.loads(json.dumps(record)) == record
-    # an environment that has not stepped yet logs no ratios, which is null, not 0
+    # an environment that has not stepped yet logs no rates, which is null, not 0
     quiet = iteration_record(3, {"env_runners": {"episode_step": 0.0}})
     assert quiet["episode_step"] == 0.0
-    for key in _RUNNING_KEY_NAMES[1:]:
+    for key in _WINDOW_KEY_NAMES[1:]:
         assert key in quiet and quiet[key] is None
-    nan = iteration_record(4, {"env_runners": {"running_override_rate": float("nan")}})
-    assert nan["running_override_rate"] is None
+    nan = iteration_record(4, {"env_runners": {"window_override_rate": float("nan")}})
+    assert nan["window_override_rate"] is None
+    # the cumulative names of the earlier logging are gone
+    assert not any(key.startswith("running_") for key in record)
 
 
 # --- the callbacks on the training adapter ----------------------------------------------
@@ -427,14 +432,14 @@ def test_a_planner_run_leaves_the_reward_term_log_at_zero():
     assert metrics["override_rate"] == 0.0
 
 
-# --- the running reward terms ----------------------------------------------------------
+# --- the windowed reward terms ---------------------------------------------------------
 
 
-_RUNNING_TERMS = (
-    "running_shaping_per_step",
-    "running_deliver_per_step",
-    "running_override_per_step",
-    "running_congestion_per_step",
+_WINDOW_TERMS = (
+    "window_shaping_per_step",
+    "window_deliver_per_step",
+    "window_override_per_step",
+    "window_congestion_per_step",
 )
 
 
@@ -443,65 +448,150 @@ def _random_step(env: WarehouseMAPDMultiAgentEnv, obs, rng):
     return env.step(actions)
 
 
-def test_the_running_terms_times_the_steps_equal_the_rewards_returned_so_far():
-    env = _adapter("decentralised", horizon=60)
-    obs, _ = env.reset()
-    rng = np.random.default_rng(0)
-    returned = 0.0
-    overrides_of: dict[str, int] = {}
-    for step in range(1, 41):
-        obs, rewards, _, _, infos = _random_step(env, obs, rng)
-        returned += sum(rewards.values())
+class _Window:
+    """What the step results say about the steps since the last sample, counted independently
+    of the episode log."""
+
+    def __init__(self) -> None:
+        self.returned = 0.0
+        self.steps = 0
+        self.overrides: dict[str, int] = {}
+
+    def add(self, env, rewards, infos) -> None:
+        self.returned += sum(rewards.values())
+        self.steps += 1
         for aid in env.agents:
-            overrides_of[aid] = overrides_of.get(aid, 0) + int(infos[aid]["overridden"])
-        values = progress_metrics(env.core)
-        assert values["episode_step"] == float(step)
-        # the four terms add up to the running return per step
-        assert sum(values[key] for key in _RUNNING_TERMS) * step == pytest.approx(
-            returned, abs=1e-9
+            self.overrides[aid] = self.overrides.get(aid, 0) + int(infos[aid]["overridden"])
+
+
+def _run_window(env, obs, rng, callbacks, vector, steps: int):
+    """Steps `steps` times, then samples once. Returns the logged values and the step results."""
+    window, logger = _Window(), _Logger()
+    for _ in range(steps):
+        obs, rewards, _, _, infos = _random_step(env, obs, rng)
+        window.add(env, rewards, infos)
+        callbacks.on_episode_step(episode=None, env=vector, env_index=0)
+    callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
+    return obs, logger, window
+
+
+def test_the_window_terms_times_the_window_steps_equal_the_rewards_returned_in_it():
+    env = _adapter("decentralised", horizon=100)
+    vector, callbacks = _Vector(env), TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    for steps in (15, 25):  # two consecutive windows, of different lengths
+        obs, logger, window = _run_window(env, obs, rng, callbacks, vector, steps)
+        assert window.steps == steps
+        total = sum(logger.values[key][0] for key in _WINDOW_TERMS)
+        assert total * steps == pytest.approx(window.returned, abs=1e-9)
+        assert window.returned != 0.0
+    # the second window is not the cumulative value of the episode so far
+    cumulative = (
+        sum(env.core.log.return_shaping_by_agent.values())
+        + sum(env.core.log.return_delivery_by_agent.values())
+        + sum(env.core.log.return_override_by_agent.values())
+        + sum(env.core.log.return_congestion_by_agent.values())
+    )
+    assert cumulative != pytest.approx(window.returned, abs=1e-6)
+    assert logger.values["episode_step"] == [40.0]
+
+
+def test_the_window_override_rate_and_max_share_match_a_count_from_the_step_results():
+    env = _adapter("decentralised", horizon=100)
+    vector, callbacks = _Vector(env), TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    seen_overrides = 0
+    for steps in (20, 20, 20):
+        obs, logger, window = _run_window(env, obs, rng, callbacks, vector, steps)
+        total = sum(window.overrides.values())
+        seen_overrides += total
+        (rate,) = logger.values["window_override_rate"]
+        (share,) = logger.values["window_max_agent_override_share"]
+        assert rate == pytest.approx(total / (steps * 3), abs=1e-12)
+        assert share == pytest.approx(
+            max(window.overrides.values()) / total if total else 0.0, abs=1e-12
         )
-        # the overrides, counted from the step results and not from the log
-        total = sum(overrides_of.values())
-        assert values["running_override_rate"] == pytest.approx(total / (step * 3), abs=1e-12)
-        share = max(overrides_of.values()) / total if total else 0.0
-        assert values["running_max_agent_override_share"] == pytest.approx(share, abs=1e-12)
+        (override_term,) = logger.values["window_override_per_step"]
+        assert override_term == pytest.approx(-0.5 * total / steps, abs=1e-12)
+        assert 0.0 <= share <= 1.0
     # the run is not vacuous
-    assert total > 0 and returned != 0.0
-    assert values["running_deliver_per_step"] > 0.0
-    assert values["running_override_per_step"] == pytest.approx(-0.5 * total / 40, abs=1e-12)
-    assert 0.0 < values["running_max_agent_override_share"] <= 1.0
+    assert seen_overrides > 0
 
 
-def test_the_running_ratios_are_not_logged_before_the_first_step():
+def test_the_window_tasks_completed_per_step_counts_the_tasks_finished_in_the_window():
+    env = _adapter("decentralised", horizon=100)
+    vector, callbacks = _Vector(env), TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    done_before = 0
+    for steps in (30, 30):
+        obs, logger, _ = _run_window(env, obs, rng, callbacks, vector, steps)
+        done = sum(task.finish_time is not None for task in env.core.tasks)
+        assert logger.values["window_tasks_completed_per_step"] == [
+            pytest.approx((done - done_before) / steps)
+        ]
+        done_before = done
+
+
+def test_after_an_episode_reset_the_window_uses_the_new_episodes_steps_only():
+    env = _adapter("decentralised", horizon=100)
+    vector, callbacks = _Vector(env), TrainingProgressCallbacks()
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    rng = np.random.default_rng(0)
+    obs, _, _ = _run_window(env, obs, rng, callbacks, vector, 30)
+    # a new episode that is shorter than the one before it
+    obs, _ = env.reset()
+    callbacks.on_episode_start(episode=None, env=vector, env_index=0)
+    obs, logger, window = _run_window(env, obs, rng, callbacks, vector, 10)
+    assert logger.values["episode_step"] == [10.0]
+    total = sum(logger.values[key][0] for key in _WINDOW_TERMS)
+    assert total * 10 == pytest.approx(window.returned, abs=1e-9)
+    assert logger.values["window_override_rate"] == [
+        pytest.approx(sum(window.overrides.values()) / (10 * 3), abs=1e-12)
+    ]
+    # the next window starts from the end of the new episode's first one
+    obs, logger, window = _run_window(env, obs, rng, callbacks, vector, 5)
+    total = sum(logger.values[key][0] for key in _WINDOW_TERMS)
+    assert total * 5 == pytest.approx(window.returned, abs=1e-9)
+
+
+def test_nothing_is_logged_at_t_zero_and_the_next_window_starts_from_zero():
     fresh, stepped = _adapter("decentralised", horizon=30), _adapter("decentralised", horizon=30)
     fresh.reset()
     obs, _ = stepped.reset()
-    _random_step(stepped, obs, np.random.default_rng(0))
-    assert not any(key.startswith("running_") for key in progress_metrics(fresh.core))
-    assert progress_metrics(fresh.core)["episode_step"] == 0.0
-    assert all(key in progress_metrics(stepped.core) for key in _RUNNING_KEY_NAMES)
+    assert window_metrics(fresh.core, None) == {}
+    assert not any(key.startswith("window_") for key in progress_metrics(fresh.core))
 
     vector, logger = _Vector(fresh), _Logger()
+    callbacks = TrainingProgressCallbacks()
     vector.envs.append(stepped)  # one environment just reset, the other has taken a step
-    TrainingProgressCallbacks().on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
+    _random_step(stepped, obs, np.random.default_rng(0))
+    callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
     assert logger.values["episode_step"] == [0.0, 1.0]
-    for key in _RUNNING_KEY_NAMES[1:]:
+    for key in _WINDOW_KEY_NAMES[1:]:
         assert len(logger.values[key]) == 1  # the stepped environment only
 
 
-def test_the_running_terms_are_zero_for_a_planner_run():
+def test_the_window_values_are_zero_for_a_planner_run():
     env = _env()
     env.reset()
     planner = PrioritisedAStarPlanner()
     for _ in range(8):
         step_with_planner(env, planner)
-    values = progress_metrics(env)
-    for key in _RUNNING_KEY_NAMES[1:]:
+    values = window_metrics(env, None)
+    assert set(values) == set(_WINDOW_KEY_NAMES[1:])
+    for key in _WINDOW_KEY_NAMES[1:5] + ("window_override_rate", "window_max_agent_override_share"):
         assert values[key] == 0.0
 
 
 @pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
-def test_at_the_end_of_an_episode_the_running_terms_match_the_logged_returns(controller):
+def test_a_window_over_the_whole_episode_matches_the_logged_episode_totals(controller):
     env = _adapter(controller, horizon=12)
     vector, logger = _Vector(env), _Logger()
     callbacks = TrainingProgressCallbacks()
@@ -517,19 +607,19 @@ def test_at_the_end_of_an_episode_the_running_terms_match_the_logged_returns(con
 
     (steps,) = logger.values["episode_step"]
     assert steps == 12.0
-    for running, total in (
-        ("running_shaping_per_step", "return_shaping"),
-        ("running_deliver_per_step", "return_deliver"),
-        ("running_override_per_step", "return_override"),
-        ("running_congestion_per_step", "return_congestion"),
+    for window, total in (
+        ("window_shaping_per_step", "return_shaping"),
+        ("window_deliver_per_step", "return_deliver"),
+        ("window_override_per_step", "return_override"),
+        ("window_congestion_per_step", "return_congestion"),
     ):
-        (per_step,) = logger.values[running]
+        (per_step,) = logger.values[window]
         (value,) = logger.values[total]
         assert per_step * steps == pytest.approx(value, abs=1e-9)
-    assert logger.values["running_override_rate"] == [
+    assert logger.values["window_override_rate"] == [
         pytest.approx(logger.values["override_rate"][0])
     ]
     assert (
-        logger.values["running_max_agent_override_share"]
+        logger.values["window_max_agent_override_share"]
         == logger.values["episode_max_agent_override_share"]
     )
