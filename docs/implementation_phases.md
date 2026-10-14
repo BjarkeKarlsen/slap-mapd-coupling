@@ -98,7 +98,9 @@ disjointness, and bit-for-bit deterministic replay.
 
 ### M6: Full comparison
 - [ ] `examples/05_full_comparison.py` — the sweep across storage rule x
-      controller x congestion x communication x load x seed
+      controller x congestion x communication x load x seed. A first version
+      sweeps controllers (checkpoints and reference planners), communication
+      and load under fixed storage. `viz/study_report.py` draws it.
 - [ ] `main.py`'s `sweep` command actually implemented (currently
       `NotImplementedError`)
 
