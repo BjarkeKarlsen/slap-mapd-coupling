@@ -50,6 +50,9 @@ from slap_mapd_coupling.environment.spaces import Mask
 
 torch, nn = try_import_torch()
 
+# Rows per encoder pass of compute_values. It only bounds GPU memory, so it does not change a result.
+VALUE_CHUNK_ROWS = 512
+
 
 def to_action_mask(mask: Mask) -> np.ndarray:
     """Converts environment/spaces.py's M(v,.) (0.0 legal / -inf illegal,
@@ -168,7 +171,29 @@ class ActionMaskingTorchRLModule(ActionMaskingRLModule, DefaultPPOTorchRLModule)
         if isinstance(batch[Columns.OBS], dict) and "action_mask" in batch[Columns.OBS]:
             action_mask, batch = self._preprocess_batch(batch)
             batch["action_mask"] = action_mask
-        return super().compute_values(batch, embeddings)
+        obs = batch[Columns.OBS]
+        if embeddings is not None or not isinstance(obs, dict):
+            return super().compute_values(batch, embeddings)
+        # RLlib's GAE connector calls this once on the whole train batch,
+        # before any minibatching, so the encoder's per-edge tensors are
+        # built for every step at once and overflow the GPU with
+        # communication on. The value of a row depends on that row only,
+        # so computing it in chunks gives the same result. That call runs
+        # with autograd on, so each chunk would keep its graph and chunking
+        # alone would not save memory. The chunked path therefore runs
+        # without gradients, which is right for the GAE call because it
+        # turns the values into numpy. The loss calls this on a minibatch
+        # or with embeddings, which stay below the chunk size and take
+        # the differentiable path above.
+        rows = len(next(iter(obs.values())))
+        if rows <= VALUE_CHUNK_ROWS:
+            return super().compute_values(batch, embeddings)
+        chunks = []
+        with torch.no_grad():
+            for start in range(0, rows, VALUE_CHUNK_ROWS):
+                part = {key: value[start : start + VALUE_CHUNK_ROWS] for key, value in obs.items()}
+                chunks.append(super().compute_values({**batch, Columns.OBS: part}))
+        return torch.cat(chunks)
 
     def _preprocess_batch(
         self, batch: Dict[str, TensorType], **kwargs
