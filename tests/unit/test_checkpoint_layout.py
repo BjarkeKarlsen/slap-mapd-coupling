@@ -79,12 +79,10 @@ def _tiny_algo():
         lr=3e-4,
         clip_param=0.2,
         gae_lambda=0.95,
-        minibatch_size=32,
+        minibatch_size=16,  # at most the batch, one episode of 20 steps
         num_epochs=2,
-        rollout_fragment_length=20,
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
-        train_batch_size=60,
         training_budget_env_steps=60,
         credit_signal="per_agent",
     )

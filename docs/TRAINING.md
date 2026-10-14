@@ -29,7 +29,9 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 
 The examples run the config with Ray Tune, which stops at the first iteration whose
 sampled environment steps reach the budget, so a run overshoots by up to one
-`train_batch_size`.
+iteration's samples. `build_ppo_config` sets the rollout length and the train batch from the
+horizon, so an iteration samples one episode per runner, `num_env_runners * horizon` steps
+(`horizon` steps with no env runner).
 
 ```python
 from ray import tune
@@ -61,6 +63,24 @@ tensorboard --logdir ~/ray_results
 
 The scalars are tagged `ray/tune/...`. The Ray dashboard on port 8265 shows actors,
 tasks and logs, and no training curves.
+
+## Plotting a run
+
+The examples write one `<arm>_training_progress.jsonl` per arm and, when they trace episodes,
+one `<arm>_episode_<n>.jsonl` per trace. `viz/training_run.py` turns a run folder into figures
+and prints a few numbers for every trace.
+
+```bash
+python -m slap_mapd_coupling.viz.training_run --run-dir examples/output --out figures
+```
+
+It writes `training_progress.png` (return and its four terms, override rate with standing still,
+tasks completed against released), one `trace_<arm>_episode_<n>.png` per trace (tasks over time
+and what each agent did at every step) and, from two traces on, `trace_comparison.png`. The
+printed numbers are the tasks completed, the longest stretch without a completion, each agent's
+share of steps moved, chose to wait or overridden, the most overridden moves after the last
+completion, and the steps where two agents tried to swap vertices. A log from an older run
+misses some keys, and its panels are left out.
 
 ## Evaluating a checkpoint
 
