@@ -110,6 +110,11 @@ from slap_mapd_coupling.training.env import CreditSignal, Zones
 from slap_mapd_coupling.training.policy import ModulePolicy
 
 FLEET_SIZE = 3
+# The keep-up threshold f_up of eq:throughput, 0.8 in tab:evalparams. A run keeps up if its
+# throughput reaches this share of the nominal arrival rate. Arrivals are random, so a healthy run
+# can finish a little under the nominal count, and a threshold of 0.9 failed healthy Token Passing
+# runs (2 of 6 seeds at 0.15 and 3 of 6 at 0.25) where 0.8 passed them all.
+KEEP_UP_THRESHOLD = 0.8
 # Illustrative. The thesis leaves the wait cost c_wait open. One value, used by the
 # generated graph and by the experiment config, because it is one study parameter.
 WAIT_COST = 2.0
@@ -202,6 +207,7 @@ def build_config(
         communication=communication,
         num_agents=FLEET_SIZE,
         arrival_rate=arrival_rate,
+        keep_up_threshold=KEEP_UP_THRESHOLD,
         seed=seed,
         horizon=horizon,
         wait_cost=WAIT_COST,
