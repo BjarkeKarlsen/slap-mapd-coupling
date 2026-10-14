@@ -25,19 +25,25 @@ What it does, in order:
    `viz/study_report.py`, and `OUT/CAMPAIGN.md` with what ran, how long it took and what failed.
 
 Started again with the same `--out`, a run that has a `DONE.json` is skipped, so a power cut
-or a crash costs only the run that was in flight. Nothing here is imported from Ray, so the
-script itself needs only the standard library. `--dry-run` prints the plan and runs nothing.
+or a crash costs only the run that was in flight. Only one campaign can run per checkout,
+since every run writes to `examples/output`. A second start refuses and names the first one's
+process, so starting the command twice by mistake cannot corrupt the first run. Nothing here
+is imported from Ray, so the script itself needs only the standard library. `--dry-run` prints
+the plan and runs nothing.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -111,6 +117,7 @@ class Campaign:
         self.log_dir = self.out / "logs"
         self.python = args.python
         self.results: list[dict[str, Any]] = []
+        self._lock_handle: Any = None
 
     # -- helpers ------------------------------------------------------------------------------
 
@@ -139,6 +146,28 @@ class Campaign:
             )
 
     # -- checks -------------------------------------------------------------------------------
+
+    def lock(self) -> None:
+        """Takes the lock of this checkout, or exits naming the campaign that holds it. The lock
+        is released by the operating system when the process ends, however it ends."""
+        key = hashlib.sha1(str(REPO).encode()).hexdigest()[:12]
+        path = Path(tempfile.gettempdir()) / f"slap_mapd_campaign_{key}.lock"
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.seek(0)
+            holder = handle.read().strip() or "unknown"
+            raise SystemExit(
+                f"Another campaign is already running on this checkout (process {holder}). "
+                "They share examples/output, so a second one would corrupt both. Stop the first "
+                f"one, or look at its folder, before starting again. Lock: {path}"
+            )
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()} started {stamp()} out={self.out}\n")
+        handle.flush()
+        self._lock_handle = handle  # kept open for the life of the process
 
     def preflight(self) -> None:
         problems = []
@@ -348,11 +377,13 @@ class Campaign:
     def run(self) -> None:
         started = time.time()
         runs = plan(self.args.arms, self.args.rates, self.args.comm_rates)
-        self.say(f"{len(runs)} runs planned: " + ", ".join(r.name for r in runs))
         if self.args.dry_run:
+            self.say(f"{len(runs)} runs planned: " + ", ".join(r.name for r in runs))
             for run in runs:
                 self.say("would run: " + " ".join(self.train_command(run)))
             return
+        self.lock()  # before anything is written, so a refused second start leaves no trace
+        self.say(f"{len(runs)} runs planned: " + ", ".join(r.name for r in runs))
         self.preflight()
         records: list[dict[str, Any]] = []
         for run in runs:

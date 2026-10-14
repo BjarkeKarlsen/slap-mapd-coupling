@@ -113,3 +113,26 @@ def test_the_preflight_refuses_a_checkout_without_the_model_of_the_thesis(
         run.preflight()
     run.args.skip_preflight = True
     run.preflight()  # allowed when asked for
+
+
+def test_a_second_campaign_on_the_same_checkout_refuses_and_leaves_the_first_alone(
+    campaign, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(campaign.tempfile, "tempdir", str(tmp_path))
+    first = campaign.Campaign(campaign.parse_args(["--out", str(tmp_path / "one")]))
+    second = campaign.Campaign(campaign.parse_args(["--out", str(tmp_path / "two")]))
+
+    first.lock()
+    with pytest.raises(SystemExit, match="Another campaign is already running"):
+        second.lock()
+    assert not (tmp_path / "two").exists()  # the refused start wrote nothing
+    assert "one" in next(tmp_path.glob("slap_mapd_campaign_*.lock")).read_text(encoding="utf-8")
+
+
+def test_the_lock_is_free_again_once_the_first_campaign_is_gone(campaign, tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign.tempfile, "tempdir", str(tmp_path))
+    first = campaign.Campaign(campaign.parse_args(["--out", str(tmp_path / "one")]))
+    first.lock()
+    first._lock_handle.close()  # what the operating system does when the process ends
+
+    campaign.Campaign(campaign.parse_args(["--out", str(tmp_path / "two")])).lock()
