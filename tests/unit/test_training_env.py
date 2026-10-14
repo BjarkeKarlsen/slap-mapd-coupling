@@ -87,6 +87,7 @@ def _env(
     pooling="none",
     zones=None,
     max_local_nodes=_MAX_LOCAL_NODES,
+    first_seed_index=0,
     **config_overrides,
 ) -> WarehouseMAPDMultiAgentEnv:
     graph = _graph()
@@ -103,6 +104,7 @@ def _env(
         credit_signal=credit_signal,
         pooling=pooling,
         zones=zones,
+        first_seed_index=first_seed_index,
     )
 
 
@@ -251,6 +253,30 @@ def test_explicit_seed_overrides_the_training_cycle():
     assert env.last_seed == 999
     env.reset()  # back to the cycle, starting at index 0
     assert env.last_seed == 30
+
+
+def test_the_cycle_starts_at_the_given_index_and_keeps_its_order():
+    env = _env(train_seeds=(10, 11, 12), first_seed_index=2)
+    seen = [_reset_and_get_seed(env) for _ in range(5)]
+    assert seen == [12, 10, 11, 12, 10]
+
+
+def test_a_start_index_beyond_the_seed_count_wraps_around():
+    env = _env(train_seeds=(10, 11, 12), first_seed_index=7)  # 7 % 3 == 1
+    assert [_reset_and_get_seed(env) for _ in range(3)] == [11, 12, 10]
+
+
+def test_the_default_start_is_the_first_seed():
+    env = _env(train_seeds=(10, 11, 12))
+    assert _reset_and_get_seed(env) == 10
+
+
+def test_explicit_seed_is_honoured_whatever_the_start_index():
+    env = _env(train_seeds=(30, 31, 32), first_seed_index=2)
+    env.reset(seed=999)
+    assert env.last_seed == 999
+    env.reset()  # the explicit seed did not advance the cycle
+    assert env.last_seed == 32
 
 
 def test_step_respects_action_mask_and_truncates_at_horizon():

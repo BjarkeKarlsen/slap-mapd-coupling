@@ -100,6 +100,27 @@ def split_seeds(config: SeedSplitConfig) -> tuple[tuple[int, ...], tuple[int, ..
     return train_seeds, eval_seeds
 
 
+def first_seed_index(worker_index: int, vector_index: int = 0, envs_per_runner: int = 1) -> int:
+    """Where in the training cycle the env of one runner starts.
+
+    The thesis fixes the training and evaluation seeds as a disjoint split,
+    not how training draws from the training seeds. Training cycles through
+    them in order (training/env.py). Every runner builds its own env, so if
+    every cycle started at the first seed the runners would draw the same
+    scenario at the same time. This rule starts them apart:
+    worker_index * envs_per_runner + vector_index, which numbers the envs of
+    all runners consecutively. The adapter takes it modulo the number of
+    seeds, so more envs than seeds wrap around. Worker 0 with vector index 0,
+    the single-process case, starts at 0 and draws the same sequence as
+    without an offset. This is an implementation choice, not a thesis value.
+
+    RLlib's multi-agent runner passes one EnvContext to all the envs of a
+    runner, so vector_index is 0 there and the envs of one runner (RLlib's
+    default is one) share a start.
+    """
+    return worker_index * envs_per_runner + vector_index
+
+
 def build_ppo_config(
     graph: WarehouseGraph,
     skus: Mapping[SkuId, SkuType],
@@ -167,7 +188,7 @@ def build_ppo_config(
 
     train_seeds, _ = split_seeds(seed_split)
 
-    def env_creator(_env_config: dict) -> WarehouseMAPDMultiAgentEnv:
+    def env_creator(env_context: dict) -> WarehouseMAPDMultiAgentEnv:
         # Registers the storage rules in WHICHEVER process actually calls
         # this -- with num_env_runners > 0, that is a separate worker
         # process, not the one that imported storage/fixed.py et al. at
@@ -191,6 +212,11 @@ def build_ppo_config(
             credit_signal=credit_signal,
             pooling=pooling,
             zones=zones,
+            # RLlib passes an EnvContext. A plain dict (no runner) starts at 0.
+            first_seed_index=first_seed_index(
+                getattr(env_context, "worker_index", 0),
+                getattr(env_context, "vector_index", 0),
+            ),
         )
 
     register_env(_ENV_NAME, env_creator)

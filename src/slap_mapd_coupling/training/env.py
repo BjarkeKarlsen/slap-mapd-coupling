@@ -36,6 +36,13 @@ covers producing the joint action and not only decoding slots.
 
 Training episodes cycle through `train_seeds` in order, so every training
 seed is used equally often. The thesis fixes the split, not the order.
+
+The cycle of one env starts at `first_seed_index`, an implementation choice.
+Several env runners each build their own env, and if every cycle started at
+the first seed they would all draw the same scenario at the same time, so a
+PPO batch would hold one scenario. The training config gives each runner a
+different start (`first_seed_index` of training/config.py). The default 0 is the
+single-process case, where the cycle starts at the first seed as before.
 """
 
 from __future__ import annotations
@@ -197,6 +204,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         credit_signal: CreditSignal,
         pooling: Pooling,
         zones: Optional[Zones] = None,
+        first_seed_index: int = 0,
     ) -> None:
         check_arm(config.controller, credit_signal, pooling, zones)
         assert config.controller is not None  # check_arm rejects a planner
@@ -214,7 +222,9 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._pooling = pooling
         self._d_max = max_out_degree(graph)
         self._train_seeds = tuple(train_seeds)
-        self._next_train_seed_index = 0
+        # Where in the training cycle this env starts. Taken modulo the
+        # number of seeds, so more runners than seeds wrap around.
+        self._next_train_seed_index = first_seed_index % len(self._train_seeds)
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
         base_observation_space = encoded_observation_space(
