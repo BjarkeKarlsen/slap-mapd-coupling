@@ -5,11 +5,11 @@ Q_t; (2) task assignment (shared across all controllers) matches free
 agents to tasks in Q_t; (3) routing produces one intended action u_i(t)
 per agent, using whichever information the active architecture permits;
 (4) the conflict-resolution operator revises the joint intended action
-into one satisfying eq:vertexconflict/eq:swapconflict, flagging
+into one satisfying the vertex rule and the swap rule, flagging
 overridden agents; (5) the environment applies the resolved joint action,
-advancing l_i(t), the lifecycle sets (eq:lifecycle), and the log; (6) if
+advancing l_i(t), the lifecycle sets (the task stages), and the log; (6) if
 t is a storage epoch, the storage rule additionally applies
-eq:storageupdate. A controller swap touches only stage 3 (routing) and a
+the storage update. A controller swap touches only stage 3 (routing) and a
 storage-rule swap touches only stage 6 -- both go through their
 respective registries (docs/controller_integration.md,
 docs/storage_rule_integration.md), so this loop never changes when either
@@ -44,7 +44,7 @@ silent on both:
 
 Observations returned by reset/step are a placeholder for M2: each
 agent's own current vertex. The full o_i(t) feature vector
-(eq:observation/eq:features) is environment/observation.py, M5 -- not
+(the decentralised observation and the vertex features) is environment/observation.py, M5 -- not
 needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
@@ -75,6 +75,7 @@ from slap_mapd_coupling.core.tasks import Task, TaskId, active_tasks_by_agent
 from slap_mapd_coupling.environment.observation import local_subgraph, occupancy_fraction
 from slap_mapd_coupling.environment.reward_function import RewardTerms, reward_terms
 from slap_mapd_coupling.environment.spaces import action_for_slot
+from slap_mapd_coupling.environment.storage_estimates import WindowEstimator
 from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
@@ -99,9 +100,9 @@ class EpisodeLog:
 
     edge_traversals is not part of the score (sec:pf:measures no longer
     reports traffic concentration or movement cost). It stays logged
-    because the replay-determinism invariant compares it, and per-edge
-    traversal counts are what an online traffic estimator for F (issue
-    #60) would read.
+    because the replay-determinism invariant compares it. The traversal
+    estimate of the storage update is counted separately, over the last
+    storage period only (environment/storage_estimates.py).
     """
 
     edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)
@@ -112,7 +113,7 @@ class EpisodeLog:
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
     # every controller and planner (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
-    # nu_t, units relocated at each storage update (eq:relocation).
+    # nu_t, units relocated at each storage update (relocations per update).
     relocated_units_by_update: list[int] = field(default_factory=list)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
@@ -177,6 +178,7 @@ class WarehouseMAPDEnv:
         self._next_task_id: int
         self._priority: tuple[AgentId, ...]
         self._order_rng: np.random.Generator
+        self._estimator: WindowEstimator
         self._congestion_by_agent: dict[AgentId, float] = {}
         # What the last step proposed and what conflict resolution overrode,
         # read by the episode trace (evaluation/trace.py). Never fed back in.
@@ -221,6 +223,7 @@ class WarehouseMAPDEnv:
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
+        self._estimator = WindowEstimator()
         self.last_proposed = {}
         self.last_overridden = frozenset()
         # An assigner that keeps state (Token Passing's committed paths) must not carry
@@ -296,8 +299,17 @@ class WarehouseMAPDEnv:
         realised_locations = result.fleet.locations()
         before_locations = before_fleet.locations()
         for agent_id, action in proposed.items():
-            if action.kind == "move" and realised_locations[agent_id] == action.target:
-                self.log.record_edge((before_locations[agent_id], action.target))
+            if action.kind != "move":
+                continue
+            assert action.target is not None
+            edge = (before_locations[agent_id], action.target)
+            if realised_locations[agent_id] == action.target:
+                self.log.record_edge(edge)
+                self._estimator.record_traversal(edge)
+            elif realised_locations[agent_id] == before_locations[agent_id]:
+                # An overridden move: the robot stood still instead of moving along the
+                # edge, a wait attributed to that edge (storage_estimates.py).
+                self._estimator.record_wait(edge)
 
         self.fleet = result.fleet
         next_t = self._t + 1
@@ -313,24 +325,20 @@ class WarehouseMAPDEnv:
         # means F_fix's Delta = infinity: never triggers, by construction).
         delta = self.config.storage_epoch_length
         if delta is not None and next_t % delta == 0:
-            # rho_hat_t/mu_hat_t/w_hat_t (demand/traversal/waiting
-            # estimates): online accumulation of these isn't built yet
-            # (no per-timestep demand/traffic estimator exists in this
-            # repo). Empty estimates are exactly correct for F_fix (which
-            # ignores them outright) but a real placeholder for F_dem/
-            # F_cng, which DO read demand_estimate/traversal_estimate/
-            # waiting_estimate -- flagged here, not silently assumed
-            # correct, since those rules will currently only ever see an
-            # empty rho_hat_t (i.e. rank every SKU as equally undemanded).
+            # rho_hat_t/mu_hat_t/w_hat_t of the window that ends now, counted per step
+            # over the last Delta steps only (environment/storage_estimates.py), then
+            # a fresh window. Causal by construction: the order released at next_t
+            # itself is only released after this stage.
+            estimates = self._estimator.close_window(delta)
             before_storage = self.storage
             self.storage = self._storage_rule(
                 self.storage,
                 self.graph,
                 self.config.reassignment_cap,
                 self.config.congestion_weight,
-                {},
-                {},
-                {},
+                estimates.demand,
+                estimates.traversal,
+                estimates.waiting,
             )
             self.log.relocated_units_by_update.append(
                 _relocated_units(before_storage, self.storage)
@@ -359,7 +367,10 @@ class WarehouseMAPDEnv:
     def _release_and_assign(self) -> None:
         """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
         assignment, or the assigner's own) for the current t."""
-        self.tasks.extend(self._generate_tasks())
+        new_tasks = self._generate_tasks()
+        for task in new_tasks:
+            self._estimator.record_order(task.sku)
+        self.tasks.extend(new_tasks)
 
         assign_start = time.perf_counter()
         if self._assigner is not None:
@@ -457,7 +468,7 @@ class WarehouseMAPDEnv:
         self.log.crowding_sum_by_t.append(sum(self._congestion_by_agent.values()))
 
     def _backlog(self, t: int) -> int:
-        """B_t = |Q_t| + |B_t|, the backlog the keep-up check plots (eq:throughput)."""
+        """B_t = |Q_t| + |B_t|, the backlog that the keep-up check plots."""
         return sum(1 for task in self.tasks if task.status(t) in ("waiting", "active"))
 
     def _compute_rewards(
@@ -513,7 +524,7 @@ class WarehouseMAPDEnv:
 
 
 def _relocated_units(before: StorageState, after: StorageState) -> int:
-    """nu_t (eq:relocation): units that arrive at a (SKU, vertex) cell they
+    """nu_t (relocations per update): units that arrive at a (SKU, vertex) cell they
     were not at before. Counted the same way storage/relocation.py's cap
     counts a relocation, so nu_t <= nu by construction."""
     moved = 0
