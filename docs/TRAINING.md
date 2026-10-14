@@ -82,6 +82,31 @@ share of steps moved, chose to wait or overridden, the most overridden moves aft
 completion, and the steps where two agents tried to swap vertices. A log from an older run
 misses some keys, and its panels are left out.
 
+## Comparing the conditions of a study
+
+One run folder holds one condition per arm. `viz/study_report.py` puts several folders side by
+side, so the arms and a variant such as the decentralised arm with communication (run into a
+folder of its own) share the same panels. `examples/05_full_comparison.py` adds a load sweep, the
+checkpoints and the reference planners evaluated at several arrival rates on the same seeds.
+
+```bash
+python examples/05_full_comparison.py --out sweep --planner token_passing \
+    --checkpoint centralised=<path> --checkpoint section=<path> \
+    --checkpoint decentralised=<path> --checkpoint decentralised+comm=<path> \
+    --arrival-rates 0.15 0.25 0.3 0.4
+python -m slap_mapd_coupling.viz.study_report --run runs/base --run comm=runs/comm \
+    --sweep sweep --out report
+```
+
+The report writes `study_overview.png` (training return, tasks completed and overridden moves
+over the iterations, the reward terms, and the evaluation episodes, one line or dot per
+condition), `load_sweep.png` (completion share, service time and backlog against the arrival
+rate, with the range over seeds) and `study_summary.md` with the numbers and their sample sizes.
+It reads values off the files and says nothing about whether two conditions differ, because one
+checkpoint per arm gives no spread over training runs. A checkpoint trained with
+`--communication` is named `decentralised+comm` in the sweep and must be evaluated with the flag,
+which the sweep checks against the module.
+
 ## Evaluating a checkpoint
 
 `examples/04b_evaluate_checkpoint.py --checkpoint=<path>` loads the module with

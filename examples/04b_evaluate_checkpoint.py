@@ -2,8 +2,8 @@
 
 Pass the checkpoint folder Ray wrote at the end of the run, for example
     python examples/04b_evaluate_checkpoint.py --checkpoint=<path> --eval-seeds=3
-Pass the same --arrival-rate the checkpoint was trained at (default 1.0, as in 04).
---horizon sets the episode length in steps (default 2000, as in 04), so a checkpoint can be
+Pass the same --arrival-rate the checkpoint was trained at (default 0.25, as in 04).
+--horizon sets the episode length in steps (default 630, as in 04), so a checkpoint can be
 evaluated at another length than it was trained at. The thesis leaves the evaluation horizon T
 open, so the value is illustrative.
 The module is loaded from the checkpoint's own folder, with no Ray cluster and no
@@ -155,7 +155,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--horizon",
         type=int,
         default=example_04.DEFAULT_HORIZON,
-        help="episode length in steps, used for evaluation (default 2000, as in 04). In "
+        help="episode length in steps, used for evaluation (default 630, as in 04). In "
         "training it is also the rollout length of PPO, so an iteration samples one episode "
         "per runner",
     )
