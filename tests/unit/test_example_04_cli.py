@@ -119,3 +119,60 @@ def test_training_and_evaluation_configs_share_the_horizon(example_04):
         "matched", seed=0, horizon=630
     )
 
+
+def test_communication_is_off_by_default_and_read_as_a_flag(example_04):
+    assert example_04.parse_args([]).communication is False
+    assert example_04.parse_args(["--communication"]).communication is True
+
+
+def test_training_and_evaluation_configs_carry_communication(example_04):
+    assert example_04.build_config("fixed_only", seed=0).communication is False
+    assert example_04.build_config("matched", seed=0, communication=True).communication is True
+    assert example_04.evaluation_config(3, "decentralised").communication is False
+    assert example_04.evaluation_config(3, "decentralised", communication=True).communication
+    # one config for both, so the same seed gives the same config
+    assert example_04.evaluation_config(
+        0, "decentralised", communication=True
+    ) == example_04.build_config("matched", seed=0, communication=True)
+
+
+def test_communication_only_changes_the_communication_field(example_04):
+    off = example_04.build_config("fixed_only", seed=0)
+    on = example_04.build_config("fixed_only", seed=0, communication=True)
+    assert on == off.model_copy(update={"communication": True})
+
+
+def test_the_gnn_encoder_follows_the_communication_of_the_config(example_04):
+    instance = example_04.build_generated_instance()
+    for communication in (False, True):
+        config = example_04.build_config("fixed_only", seed=0, communication=communication)
+        arm = example_04.build_arm(instance, "decentralised", config.observation_depth)
+        assert example_04.build_gnn_config(config, arm).communication is communication
+
+
+def test_the_message_cap_is_the_other_agents_of_the_fleet(example_04):
+    # an agent hears at most the other FLEET_SIZE - 1 agents, so the cap is exactly enough
+    assert example_04.MAX_MESSAGES == example_04.FLEET_SIZE - 1
+    instance = example_04.build_generated_instance()
+    for controller in ("decentralised", "centralised", "section"):
+        arm = example_04.build_arm(instance, controller, 5)
+        assert arm.encoding.max_messages == example_04.FLEET_SIZE - 1
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section"])
+def test_communication_is_rejected_for_the_other_arms(example_04, controller, capsys):
+    with pytest.raises(SystemExit):
+        example_04.parse_args(["--communication"], controller=controller)
+    assert "only applies to the decentralised controller" in capsys.readouterr().err
+    assert example_04.parse_args([], controller=controller).communication is False
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section"])
+def test_the_entry_points_of_the_other_arms_reject_communication(
+    example_04, controller, monkeypatch, capsys
+):
+    # main parses the arguments first, so nothing is built or trained before the error
+    monkeypatch.setattr("sys.argv", ["prog", "--communication"])
+    with pytest.raises(SystemExit):
+        example_04.main(controller)
+    assert "only applies to the decentralised controller" in capsys.readouterr().err
