@@ -107,6 +107,22 @@ checkpoint per arm gives no spread over training runs. A checkpoint trained with
 `--communication` is named `decentralised+comm` in the sweep and must be evaluated with the flag,
 which the sweep checks against the module.
 
+## Running a whole campaign unattended
+
+`scripts/run_campaign.py` trains every arm at every load level, evaluates the checkpoints and
+the reference planner on the same seeds, and writes the report, in one command. It keeps going
+when a run fails, and the same command started again skips the runs that are done.
+
+```bash
+python scripts/run_campaign.py --out ~/thesis_runs/campaign --env-runners 7 --gpu
+python scripts/run_campaign.py --out /tmp/plan --dry-run   # the plan only
+```
+
+It refuses to start on a checkout without the wait cost in the reward and the keep-up threshold.
+Each run's output moves from `examples/output` into `OUT/runs/<condition>_rate<rate>/`, so do not
+start other examples while it runs. `OUT/CAMPAIGN.md` lists what ran and what failed, and
+`OUT/report/` holds one overview per load level and a load sweep across levels.
+
 ## Evaluating a checkpoint
 
 `examples/04b_evaluate_checkpoint.py --checkpoint=<path>` loads the module with
