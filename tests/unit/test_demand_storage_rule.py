@@ -116,3 +116,25 @@ def test_f_dem_registered_under_demand():
     rule = get_storage_rule("demand")
     result = rule(x_prev, graph, 10, None, {"hot": 5.0}, {}, {})
     assert result.units("hot", 1) == 2
+
+
+def test_f_dem_skips_the_update_when_no_order_was_released_in_the_window():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 5}}, {1: 5.0, 2: 5.0, 3: 5.0})
+    # An empty estimate and an explicit zero both mean the window had no orders.
+    assert f_dem(x_prev, graph, 10, None, {}, {}, {}) is x_prev
+    assert f_dem(x_prev, graph, 10, None, {"hot": 0.0, "cold": 0.0}, {}, {}) is x_prev
+
+
+def test_f_dem_still_runs_when_one_order_was_released():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 5}}, {1: 5.0, 2: 5.0, 3: 5.0})
+    result = f_dem(x_prev, graph, 10, None, {"hot": 0.01}, {}, {})
+    assert result.units("hot", 1) == 5  # moved to the vertex nearest the delivery point
+
+
+def test_f_dem_still_validates_its_parameters_before_skipping():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 2}}, {1: 2.0, 2: 2.0, 3: 2.0})
+    with pytest.raises(ValueError, match="reassignment_cap"):
+        f_dem(x_prev, graph, None, None, {}, {}, {})

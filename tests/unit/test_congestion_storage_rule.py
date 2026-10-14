@@ -195,3 +195,25 @@ def test_f_cng_registered_under_congestion():
     rule = get_storage_rule("congestion")
     result = rule(x_prev, graph, 10, 0.5, {"hot": 5.0}, {}, {})
     assert result.units("hot", 1) == 2
+
+
+def test_f_cng_skips_the_update_when_no_order_was_released_in_the_window():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 5}}, {1: 5.0, 2: 5.0, 3: 5.0})
+    traffic = {(0, 1): 1.0, (1, 2): 1.0, (2, 3): 1.0}  # traffic alone is no evidence
+    assert f_cng(x_prev, graph, 10, 1.0, {}, traffic, traffic) is x_prev
+    assert f_cng(x_prev, graph, 10, 1.0, {"hot": 0.0}, traffic, traffic) is x_prev
+
+
+def test_f_cng_still_runs_when_one_order_was_released():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 5}}, {1: 5.0, 2: 5.0, 3: 5.0})
+    result = f_cng(x_prev, graph, 10, 0.0, {"hot": 0.01}, {}, {})
+    assert result.units("hot", 1) == 5
+
+
+def test_f_cng_still_validates_its_parameters_before_skipping():
+    graph = _line_graph()
+    x_prev = _state({"hot": {3: 2}}, {1: 2.0, 2: 2.0, 3: 2.0})
+    with pytest.raises(ValueError, match="congestion_weight"):
+        f_cng(x_prev, graph, 10, None, {}, {}, {})

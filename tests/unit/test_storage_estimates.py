@@ -3,6 +3,7 @@ the step loop (stage 6): the per-step estimates of the last storage period only.
 
 import pytest
 
+import slap_mapd_coupling.storage.congestion  # noqa: F401 -- registers "congestion"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.agents import AgentState, FleetState
@@ -16,6 +17,7 @@ from slap_mapd_coupling.instances.generator import GeneratorParams, generate_war
 from slap_mapd_coupling.planners import PrioritisedAStarPlanner
 from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate
+from slap_mapd_coupling.storage.demand import ranked_storage_vertices
 
 
 def _graph() -> WarehouseGraph:
@@ -273,6 +275,53 @@ def test_the_estimates_replay_bit_for_bit_under_a_fixed_seed():
         return rule.calls
 
     assert run() == run()
+
+
+# --- skipping the update when the window had no orders -------------------------------
+
+
+def _env_with_stock_far_from_delivery(config: ExperimentConfig) -> WarehouseMAPDEnv:
+    graph = _graph()
+    storage_vertices = ranked_storage_vertices(graph)  # nearest the delivery points first
+    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
+    capacities = {v: 10.0 for v in storage_vertices}
+    counts = {"tea": {storage_vertices[-1]: 6}}  # all of it at the farthest vertex
+    return WarehouseMAPDEnv(graph, skus, counts, capacities, config)
+
+
+def _rule_config(storage_mode: str, **overrides) -> ExperimentConfig:
+    extra = {"congestion_weight": 1.0} if storage_mode == "congestion" else {}
+    return _config(storage_mode=storage_mode, **extra, **overrides)
+
+
+@pytest.mark.parametrize("storage_mode", ["demand", "congestion"])
+def test_no_order_in_the_window_leaves_the_placement_and_logs_no_relocation(storage_mode):
+    # An arrival rate this small releases no order in the whole run.
+    config = _rule_config(storage_mode, arrival_rate=1e-9, horizon=25)
+    env = _env_with_stock_far_from_delivery(config)
+    initial = {k: dict(v) for k, v in env.storage.counts.items()}
+    planner = PrioritisedAStarPlanner()
+    for _ in range(25):
+        step_with_planner(env, planner)
+
+    assert env.tasks == []
+    assert env.storage.counts == initial  # x_t = x_{t-Delta} at both epochs
+    assert env.log.relocated_units_by_update == [0, 0]  # nothing relocated at epochs 10, 20
+
+
+@pytest.mark.parametrize("storage_mode", ["demand", "congestion"])
+def test_an_epoch_with_orders_still_runs_the_rule(storage_mode):
+    config = _rule_config(storage_mode, arrival_rate=1.0, horizon=12)
+    env = _env_with_stock_far_from_delivery(config)
+    initial = {k: dict(v) for k, v in env.storage.counts.items()}
+    planner = PrioritisedAStarPlanner()
+    for _ in range(10):
+        step_with_planner(env, planner)
+
+    assert env.tasks  # orders were released in the window
+    (moved,) = env.log.relocated_units_by_update
+    assert 0 < moved <= 3  # the cap nu
+    assert env.storage.counts != initial
 
 
 # --- helpers -------------------------------------------------------------------------

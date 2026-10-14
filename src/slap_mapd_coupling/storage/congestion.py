@@ -1,5 +1,5 @@
 """F_cng: F_dem's ranking extended with a congestion-exposure penalty
-(sec:method:storage, eq:storagegreedy).
+(sec:method:storage, the congestion-aware score).
 
 score(k,v) = rho_hat_t(k) * d_G(v, g*) + beta * sum_{e in path(g*,v)} mu_hat_t(e) * w_hat_t(e)
 
@@ -9,9 +9,14 @@ order F_dem uses (rho_hat_t descending -- "F_cng extends F_dem's
 ranking," not a different structure); what changes is each SKU's OWN
 vertex ranking, now scored per (SKU, vertex) pair instead of by access
 distance alone, since score(k,v) genuinely depends on both. This
-realises D + beta*K from eq:storageobjective greedily, same as F_dem
+realises D + beta*K from the storage objective greedily, same as F_dem
 realises D alone, and reuses demand.py's greedy_fill unchanged (its
 per-SKU vertex_order_by_sku parameter exists specifically for this).
+
+If no order was released in the window the estimates look back over, there is
+no evidence to act on and the update is skipped, x_t = x_{t-Delta}, exactly as
+in F_dem (sec:method:storage). The estimates are per step, so that is the case
+exactly when rho_hat_t(k) is zero for every SKU.
 
 Two points flagged, not literally specified:
 - "g*" (the "nearest delivery point" the congestion term's path starts
@@ -25,8 +30,8 @@ Two points flagged, not literally specified:
   unstated degree of freedom.
 - WarehouseGraph.distance only returns a distance value, not the edges
   along a shortest path, so this module computes its own Dijkstra with
-  predecessor tracking (_shortest_path_edges) to get eq:storagegreedy's
-  path(v) as an explicit edge sequence.
+  predecessor tracking (_shortest_path_edges) to get the congestion-aware
+  score's path(v) as an explicit edge sequence.
 """
 
 from __future__ import annotations
@@ -35,7 +40,12 @@ import heapq
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
-from slap_mapd_coupling.storage.base import DemandEstimate, EdgeKey, TrafficEstimate
+from slap_mapd_coupling.storage.base import (
+    DemandEstimate,
+    EdgeKey,
+    TrafficEstimate,
+    no_orders_in_window,
+)
 from slap_mapd_coupling.storage.demand import delivery_vertices, greedy_fill, storage_vertices
 from slap_mapd_coupling.storage.registry import register_storage_rule
 from slap_mapd_coupling.storage.relocation import apply_relocation_cap
@@ -55,7 +65,7 @@ def _shortest_path_edges(
     """The edge sequence of one shortest (cost-weighted) path from source
     to target, via Dijkstra with predecessor tracking. WarehouseGraph's
     own `distance` only returns the distance value, not the path itself,
-    which eq:storagegreedy's path(v) congestion sum needs."""
+    which the congestion-aware score's path(v) congestion sum needs."""
     if source == target:
         return []
     edge_cost = {(e.source, e.target): e.cost for e in graph.edges}
@@ -107,7 +117,7 @@ def score(
     waiting_estimate: TrafficEstimate,
     congestion_weight: float,
 ) -> float:
-    """score(k,v) (eq:storagegreedy)."""
+    """score(k,v), the congestion-aware score."""
     nearest = nearest_delivery_point(graph, vertex, delivery)
     access_term = demand_estimate.get(sku_id, 0.0) * graph.distance(vertex, nearest)
     exposure_term = congestion_weight * congestion_exposure(
@@ -166,6 +176,8 @@ def f_cng(
             "storage_mode='congestion' requires congestion_weight (beta); "
             "ExperimentConfig already enforces this, so this indicates a caller bug."
         )
+    if no_orders_in_window(demand_estimate):
+        return x_prev  # no evidence to act on: x_t = x_{t-Delta}
 
     storage = storage_vertices(graph)
     delivery = delivery_vertices(graph)
