@@ -2,6 +2,7 @@
 
 Pass the checkpoint folder Ray wrote at the end of the run, for example
     python examples/04b_evaluate_checkpoint.py --checkpoint=<path> --eval-seeds=3
+Pass the same --arrival-rate the checkpoint was trained at (default 1.0, as in 04).
 The module is loaded from the checkpoint's own folder, with no Ray cluster and no
 registered environment, and evaluated through the evaluator as in 04. Use --arm
 for a checkpoint of 02_centralised_fixed.py (centralised) or 03_section_based.py
@@ -39,19 +40,32 @@ build_storage = example_04.build_storage
 load_module = example_04.load_module
 
 
-def build_config(seed: int, controller: str = "decentralised"):
+def build_config(
+    seed: int,
+    controller: str = "decentralised",
+    arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
+):
     """The configuration of an evaluation episode, 04's."""
-    return example_04.evaluation_config(seed, controller)
+    return example_04.evaluation_config(seed, controller, arrival_rate)
 
 
-def render_episode(module, instance, skus, capacities, counts, arm, delay: float = 0.15) -> None:
+def render_episode(
+    module,
+    instance,
+    skus,
+    capacities,
+    counts,
+    arm,
+    arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
+    delay: float = 0.15,
+) -> None:
     """Live pygame preview of one episode driven by the module's sampled slots. Close the
     window (or Ctrl+C) to stop early."""
     from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
     from slap_mapd_coupling.training.policy import ModulePolicy
     from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
-    config = build_config(seed=0, controller=arm.controller)
+    config = build_config(seed=0, controller=arm.controller, arrival_rate=arrival_rate)
     adapter = WarehouseMAPDMultiAgentEnv(
         instance.graph,
         skus,
@@ -95,10 +109,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--arm", choices=["decentralised", "centralised", "section"], default="decentralised"
     )
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
+    parser.add_argument(
+        "--arrival-rate",
+        type=float,
+        default=example_04.DEFAULT_ARRIVAL_RATE,
+        help="task arrival rate in tasks per step, the rate the checkpoint was trained at",
+    )
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args(argv)
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
+    if args.arrival_rate <= 0:
+        parser.error("--arrival-rate must be positive")
     return args
 
 
@@ -112,14 +134,14 @@ def main() -> None:
 
     instance = example_04.build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(seed=0, controller=args.arm)
+    config = build_config(seed=0, controller=args.arm, arrival_rate=args.arrival_rate)
     arm = example_04.build_arm(instance, args.arm, config.observation_depth)
 
     print(f"Loading checkpoint from {args.checkpoint}")
     module = load_module(args.checkpoint)
 
     if args.render:
-        render_episode(module, instance, skus, capacities, counts, arm)
+        render_episode(module, instance, skus, capacities, counts, arm, args.arrival_rate)
     else:
         seed_split = example_04.build_seed_split(config.seed, args.eval_seeds)
         _, eval_seeds = example_04.split_seeds(seed_split)
@@ -132,6 +154,7 @@ def main() -> None:
             arm,
             eval_seeds,
             example_04.OUTPUT_DIR / "traces",
+            args.arrival_rate,
         )
 
 

@@ -29,6 +29,13 @@ estimates of the demand and congestion rules exist. Evaluation samples a legal
 slot with the policy function's rule. Whether it should take the most likely
 slot instead is still open.
 
+Arrival rate. --arrival-rate sets the task arrival rate lambda_task of training
+and of evaluation, so a checkpoint is evaluated at the rate it was trained at by
+passing the same value to 04b_evaluate_checkpoint.py. The default of 1.0 tasks per
+step is far above what the arms complete, so the backlog grows without bound and
+the evaluator's keep-up ratio (throughput over arrival rate) cannot reach 1.
+That ratio is meaningful only at a rate below capacity.
+
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results, with the checkpoint, under ~/ray_results.
@@ -86,6 +93,12 @@ from slap_mapd_coupling.training.env import CreditSignal, Zones
 from slap_mapd_coupling.training.policy import ModulePolicy
 
 FLEET_SIZE = 3
+# Illustrative. The thesis leaves the wait cost c_wait open. One value, used by the
+# generated graph and by the experiment config, because it is one study parameter.
+WAIT_COST = 2.0
+# Illustrative. The default arrival rate, in tasks per step, kept so earlier runs
+# reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
+DEFAULT_ARRIVAL_RATE = 1.0
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
@@ -108,7 +121,7 @@ def build_generated_instance() -> GeneratedInstance:
         default_edge_cost=1.0,
         random_edge_costs=True,
         edge_cost_range=(0.5, 2.0),
-        wait_cost=5.0,
+        wait_cost=WAIT_COST,
         num_storage_vertices=4,
         num_delivery_vertices=4,
         num_endpoints=FLEET_SIZE,
@@ -143,7 +156,10 @@ def build_storage(
 
 
 def build_config(
-    regime: TrainingRegime, seed: int, controller: ControllerArchitecture = "decentralised"
+    regime: TrainingRegime,
+    seed: int,
+    controller: ControllerArchitecture = "decentralised",
+    arrival_rate: float = DEFAULT_ARRIVAL_RATE,
 ) -> ExperimentConfig:
     """The configuration a run trains under. "fixed_only" trains under F_fix and
     "matched" under the storage rule used at evaluation (sec:method:training).
@@ -156,10 +172,10 @@ def build_config(
         congestion_sensitive=False,
         communication=False,
         num_agents=FLEET_SIZE,
-        arrival_rate=1.0,
+        arrival_rate=arrival_rate,
         seed=seed,
         horizon=2000,
-        wait_cost=2.0,
+        wait_cost=WAIT_COST,
         observation_depth=5,
         discount=0.99,
         # n_deliver raised well above 1.0: a 5000-iteration run on this instance
@@ -171,9 +187,13 @@ def build_config(
     )
 
 
-def evaluation_config(seed: int, controller: ControllerArchitecture) -> ExperimentConfig:
+def evaluation_config(
+    seed: int,
+    controller: ControllerArchitecture,
+    arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+) -> ExperimentConfig:
     """The configuration an episode is evaluated under, the "matched" one."""
-    return build_config("matched", seed, controller)
+    return build_config("matched", seed, controller, arrival_rate)
 
 
 def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
@@ -370,6 +390,7 @@ def evaluate(
     arm: Arm,
     eval_seeds: tuple[int, ...],
     trace_dir: Path,
+    arrival_rate: float = DEFAULT_ARRIVAL_RATE,
 ) -> None:
     """Runs `module` for one episode per evaluation seed through the evaluator, so
     the observations are the ones it saw in training. The seeds are the evaluation half
@@ -379,7 +400,7 @@ def evaluate(
     policy = ModulePolicy(module)
     summaries = []
     for episode_idx, eval_seed in enumerate(eval_seeds):
-        config = evaluation_config(eval_seed, arm.controller)
+        config = evaluation_config(eval_seed, arm.controller, arrival_rate)
         trace_path = trace_dir / f"{arm.controller}_episode_{episode_idx + 1}.jsonl"
         metrics = run_episode(
             instance.graph,
@@ -419,6 +440,13 @@ def parse_args(
         default=ILLUSTRATIVE_BUDGET_ENV_STEPS,
         help="training budget in environment steps (illustrative default)",
     )
+    parser.add_argument(
+        "--arrival-rate",
+        type=float,
+        default=DEFAULT_ARRIVAL_RATE,
+        help="task arrival rate in tasks per step, for training and evaluation "
+        "(default 1.0, above the capacity of the arms)",
+    )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
     parser.add_argument("--gpu", action="store_true")
@@ -427,6 +455,8 @@ def parse_args(
         parser.error("--eval-seeds must be at least 1")
     if args.budget_env_steps < 1:
         parser.error("--budget-env-steps must be at least 1")
+    if args.arrival_rate <= 0:
+        parser.error("--arrival-rate must be positive")
     return args
 
 
@@ -436,12 +466,12 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
 
     instance = build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(regime, seed=0, controller=controller)
+    config = build_config(regime, seed=0, controller=controller, arrival_rate=args.arrival_rate)
     arm = build_arm(instance, controller, config.observation_depth)
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
-        f"credit_signal={CREDIT_SIGNAL}"
+        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}"
     )
 
     seed_split = build_seed_split(config.seed, args.eval_seeds)
@@ -468,7 +498,17 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
 
     _, eval_seeds = split_seeds(seed_split)
     module = load_module(run.checkpoint)
-    evaluate(module, instance, skus, capacities, counts, arm, eval_seeds, OUTPUT_DIR / "traces")
+    evaluate(
+        module,
+        instance,
+        skus,
+        capacities,
+        counts,
+        arm,
+        eval_seeds,
+        OUTPUT_DIR / "traces",
+        args.arrival_rate,
+    )
 
 
 if __name__ == "__main__":

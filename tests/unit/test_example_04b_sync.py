@@ -42,3 +42,11 @@ def test_04b_builds_the_same_storage_as_04(example_04, example_04b):
 
 def test_04b_builds_the_same_config_as_04(example_04, example_04b):
     assert example_04b.build_config(seed=0) == example_04.build_config("fixed_only", seed=0)
+
+
+def test_04b_takes_the_arrival_rate_the_checkpoint_was_trained_at(example_04, example_04b):
+    assert example_04b.parse_args(["--checkpoint=x"]).arrival_rate == 1.0
+    assert example_04b.parse_args(["--checkpoint=x", "--arrival-rate=0.15"]).arrival_rate == 0.15
+    assert example_04b.build_config(seed=0, arrival_rate=0.15) == example_04.build_config(
+        "matched", seed=0, arrival_rate=0.15
+    )

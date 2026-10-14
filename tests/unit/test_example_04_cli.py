@@ -69,3 +69,25 @@ def test_evaluation_config_uses_the_evaluation_storage_rule_and_seed(example_04)
     config = example_04.evaluation_config(17, "centralised")
     assert (config.seed, config.controller) == (17, "centralised")
     assert config.storage_mode == example_04.EVALUATION_STORAGE_MODE
+
+
+def test_arrival_rate_defaults_to_one_and_must_be_positive(example_04):
+    assert example_04.parse_args([]).arrival_rate == 1.0
+    assert example_04.parse_args(["--arrival-rate=0.15"]).arrival_rate == 0.15
+    assert example_04.parse_args(["--arrival-rate", "0.15"]).arrival_rate == 0.15
+    with pytest.raises(SystemExit):
+        example_04.parse_args(["--arrival-rate=0"])
+
+
+def test_training_and_evaluation_configs_carry_the_arrival_rate(example_04):
+    assert example_04.build_config("fixed_only", seed=0).arrival_rate == 1.0
+    assert example_04.build_config("matched", seed=0, arrival_rate=0.15).arrival_rate == 0.15
+    assert example_04.evaluation_config(3, "section").arrival_rate == 1.0
+    assert example_04.evaluation_config(3, "section", 0.15).arrival_rate == 0.15
+
+
+def test_the_wait_cost_is_one_value_for_the_graph_and_the_config(example_04):
+    instance = example_04.build_generated_instance()
+    config = example_04.build_config("fixed_only", seed=0)
+    assert config.wait_cost == example_04.WAIT_COST
+    assert instance.graph.wait_cost == example_04.WAIT_COST
