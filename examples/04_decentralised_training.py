@@ -46,6 +46,13 @@ runners the default of 2000 samples 14000 steps per iteration and a smaller valu
 is the practical choice for a long run. A checkpoint can be evaluated at another length by
 passing --horizon to 04b_evaluate_checkpoint.py.
 
+Communication. --communication switches on the thesis' local communication (an agent hears every
+agent inside its own field of view, and a message is the sender's own learned embedding). It is the
+thesis' conditional ablation (RQ5), decentralised arm only, so it is rejected for 02 and 03. Run it as
+a separate condition next to the run without it, never in place of it, and pass the same flag to
+04b_evaluate_checkpoint.py, because a checkpoint trained with messages cannot be evaluated without them.
+Messages are learned, so they need training to carry information.
+
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results, with the checkpoint, under ~/ray_results.
@@ -122,6 +129,10 @@ CREDIT_SIGNAL: CreditSignal = "per_agent"
 NUM_ZONES = 3
 # The storage rule a policy is evaluated under. "matched" training uses it too.
 EVALUATION_STORAGE_MODE = "fixed"
+# Illustrative. The cap on the messages an agent hears. With FLEET_SIZE agents an agent hears at most the
+# FLEET_SIZE - 1 others, so this cap is exactly enough, and it follows the fleet size so a larger fleet
+# does not silently drop senders. It only matters with --communication, and it was 2 before.
+MAX_MESSAGES = FLEET_SIZE - 1
 POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
 OUTPUT_DIR = Path(__file__).parent / "output"
 
@@ -176,17 +187,19 @@ def build_config(
     controller: ControllerArchitecture = "decentralised",
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
     horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> ExperimentConfig:
     """The configuration a run trains under. "fixed_only" trains under F_fix and
     "matched" under the storage rule used at evaluation (sec:method:training).
     The two differ only once EVALUATION_STORAGE_MODE is not "fixed", which needs the
-    online storage estimates of the demand and congestion rules."""
+    online storage estimates of the demand and congestion rules. `communication` is the
+    thesis' conditional ablation (RQ5), decentralised arm only, off unless asked for."""
     storage_mode = "fixed" if regime == "fixed_only" else EVALUATION_STORAGE_MODE
     return ExperimentConfig(
         storage_mode=storage_mode,
         controller=controller,
         congestion_sensitive=False,
-        communication=False,
+        communication=communication,
         num_agents=FLEET_SIZE,
         arrival_rate=arrival_rate,
         seed=seed,
@@ -208,9 +221,11 @@ def evaluation_config(
     controller: ControllerArchitecture,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
     horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> ExperimentConfig:
-    """The configuration an episode is evaluated under, the "matched" one."""
-    return build_config("matched", seed, controller, arrival_rate, horizon)
+    """The configuration an episode is evaluated under, the "matched" one. It must carry
+    the `communication` the checkpoint was trained with."""
+    return build_config("matched", seed, controller, arrival_rate, horizon, communication)
 
 
 def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
@@ -271,7 +286,7 @@ def build_arm(
         controller=controller,
         pooling=POOLING[controller],
         zones=zones,
-        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=2),
+        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=MAX_MESSAGES),
     )
 
 
@@ -402,6 +417,7 @@ def evaluate(
     trace_dir: Path,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
     horizon: int = DEFAULT_HORIZON,
+    communication: bool = False,
 ) -> None:
     """Runs `module` for one episode per evaluation seed through the evaluator, so
     the observations are the ones it saw in training. The seeds are the evaluation half
@@ -411,7 +427,7 @@ def evaluate(
     policy = ModulePolicy(module)
     summaries = []
     for episode_idx, eval_seed in enumerate(eval_seeds):
-        config = evaluation_config(eval_seed, arm.controller, arrival_rate, horizon)
+        config = evaluation_config(eval_seed, arm.controller, arrival_rate, horizon, communication)
         trace_path = trace_dir / f"{arm.controller}_episode_{episode_idx + 1}.jsonl"
         metrics = run_episode(
             instance.graph,
@@ -471,7 +487,18 @@ def parse_args(
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
     parser.add_argument("--gpu", action="store_true")
+    # Illustrative. The thesis' conditional ablation (RQ5), implemented but unevaluated. Run it as a
+    # separate condition next to the run without it, and pass it identically to 04b.
+    parser.add_argument(
+        "--communication",
+        action="store_true",
+        help="local communication, the thesis' conditional ablation (RQ5), decentralised arm "
+        "only. Run it as a separate condition, and pass the same flag to "
+        "04b_evaluate_checkpoint.py",
+    )
     args = parser.parse_args(argv)
+    if args.communication and controller != "decentralised":
+        parser.error("--communication only applies to the decentralised controller")
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
     if args.budget_env_steps < 1:
@@ -495,13 +522,14 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         controller=controller,
         arrival_rate=args.arrival_rate,
         horizon=args.horizon,
+        communication=args.communication,
     )
     arm = build_arm(instance, controller, config.observation_depth)
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
         f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}, "
-        f"horizon={config.horizon}"
+        f"horizon={config.horizon}, communication={config.communication}"
     )
 
     seed_split = build_seed_split(config.seed, args.eval_seeds)
@@ -539,6 +567,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         OUTPUT_DIR / "traces",
         args.arrival_rate,
         args.horizon,
+        args.communication,
     )
 
 
