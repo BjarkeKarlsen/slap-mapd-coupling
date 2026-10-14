@@ -73,9 +73,9 @@ def generate_config(config, output):
               help='Checkpoint to inspect')
 def inspect(checkpoint):
     """Inspect checkpoint details"""
-    from slap_mapd_coupling.training.utils import load_checkpoint
-    ckpt = load_checkpoint(checkpoint)
-    click.echo(f"Checkpoint info: {ckpt.keys()}")
+    from ray.rllib.algorithms.algorithm import Algorithm
+    algo = Algorithm.from_checkpoint(str(checkpoint))
+    click.echo(f"Checkpoint info: {algo.config.env}")
 
 if __name__ == '__main__':
     cli()

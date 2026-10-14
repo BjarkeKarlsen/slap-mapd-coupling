@@ -76,7 +76,9 @@ class GNNEncoderConfig(BaseModel):
     # No default. It must equal ExperimentConfig.communication, which
     # training/config.py::build_ppo_config checks.
     communication: bool
-    # No default, because the thesis leaves global pooling TBD (issue #82).
+    # No default. tab:modelparams fixes the pooled readout per arm, none for the
+    # decentralised arm, and it must equal the pooling of the observations
+    # (training/env.py::check_arm).
     pooling: Pooling
 
 

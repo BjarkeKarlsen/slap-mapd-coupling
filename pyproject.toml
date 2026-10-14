@@ -30,6 +30,7 @@ dev = [
     "black>=23.0.0",
     "flake8>=5.0.0",
     "mypy>=0.990",
+    "tensorboard>=2.21.0",
 ]
 viz = [
     "pygame>=2.5.0",

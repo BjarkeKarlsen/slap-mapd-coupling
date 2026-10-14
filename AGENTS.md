@@ -78,15 +78,17 @@ once, then the portable commands above.
 
 ## Layout and extensibility
 
-Two swap points, each behind a Protocol + registry, so the environment
-loop never changes when a new one is added:
+Two swap points, so the environment loop never changes when a new one is added:
 
-- `storage/` — storage rules (`F_fix`, `F_dem`, `F_cng`) via
-  `storage/registry.py`. Adding one: see `docs/storage_rule_integration.md`.
-- `controllers/` — routing architectures (centralised / section-based /
-  decentralised) via `controllers/registry.py`, sharing one task-assignment
-  function (`controllers/assignment.py`). Adding one: see
-  `docs/controller_integration.md`.
+- `storage/` — storage rules (`F_fix`, `F_dem`, `F_cng`) behind a Protocol +
+  registry (`storage/registry.py`). Adding one: see
+  `docs/storage_rule_integration.md`.
+- Routing — the simulator core has one step mode, `step(slots)`. A non-learned
+  planner runs through `planners/driver.py`, and a learned arm runs through the
+  RLlib adapter of `training/env.py` with the policy function of
+  `training/policy.py`. Both share one task-assignment function
+  (`controllers/assignment.py`), which an `Assigner` can replace. There is no
+  controller registry. Adding one: see `docs/controller_integration.md`.
 
 Everything else (`core/`, `instances/`, `resolution/`, `environment/`,
 `models/`, `training/`, `evaluation/`, `viz/`) is described in `README.md`.
@@ -96,9 +98,9 @@ Everything else (`core/`, `instances/`, `resolution/`, `environment/`,
 - "Controller" means a routing architecture (`pi`); "policy" is reserved
   for the decentralised controller's neural net (`pi_theta`) specifically.
   Don't use the two interchangeably.
-- Adding a controller or storage rule needs, in this order: an
-  implementation behind the matching protocol, a registry entry, a unit
-  test, and an `examples/` script (see the integration docs above).
+- Adding a planner or storage rule needs, in this order: an implementation
+  behind the matching protocol, a registry entry, a unit test, and an
+  `examples/` script (see the integration docs above).
 - Four correctness checks are non-negotiable for any change to
   `environment/`, `resolution/`, `storage/`, or `controllers/`: no
   vertex/swap conflicts on a realised trace, every storage configuration

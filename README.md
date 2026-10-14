@@ -27,13 +27,14 @@ for real bugs found and fixed along the way.
 - `instances/` — parametric warehouse generator + instance validation
 - `storage/` — storage rules (`F_fix`, `F_dem`, `F_cng`) behind a registry
 - `resolution/` — the conflict-resolution operator
-- `controllers/` — shared task assignment + swappable routing
-  (centralised / section-based / decentralised) behind a registry
+- `controllers/` — the task-assignment rule shared by every router, and the
+  `Assigner` protocol that can replace it
 - `planners/` — non-learned reference planners (Token Passing, prioritised A*), outside
   the three controllers
-- `environment/` — the RLlib `MultiAgentEnv`, spaces/masking, reward
+- `environment/` — the simulator core with one step mode, spaces/masking, reward, zones
 - `models/` — the GNN encoder and policy/value heads
-- `training/` — PPO wiring, seeding, training regimes
+- `training/` — the RLlib adapter for the three learned arms, PPO wiring, seeding,
+  training regimes, the policy function
 - `evaluation/` — run metrics and the correctness/validation checks
 - `viz/` — warehouse and occupancy plotting
 
@@ -57,14 +58,13 @@ pip install -e ".[dev]"
 ### CLI
 
 Three verbs, matching the thesis's own experimental design rather than a
-generic train/evaluate/checkpoint workflow (which only fits the
-decentralised controller):
+generic train/evaluate/checkpoint workflow:
 
 ```bash
 # Run one (storage rule, controller, load) configuration
 slap-mapd simulate --storage-rule fixed --planner prioritised_astar --num-agents 10
 
-# Train the decentralised controller only - the other two need no training
+# Train a learned controller (examples/04_decentralised_training.py shows the Tune run)
 slap-mapd train --storage-rule fixed --num-iterations 500
 
 # Run the full experimental grid and write one results table

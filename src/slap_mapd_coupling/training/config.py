@@ -1,35 +1,19 @@
-"""PPO configuration: full parameter sharing, disjoint train/eval seeds,
-storage-rule training regime (sec:method:training, tab:trainparams,
-issue #30).
+"""PPO configuration for the learned controllers, with full parameter
+sharing and disjoint training and evaluation seeds (sec:method:training,
+tab:trainparams, #30).
 
-Every PPO core hyperparameter tab:trainparams lists (learning rate, clip
-epsilon, GAE lambda, minibatch size, epochs/update, rollout length,
-entropy coeff., value-loss coeff.) is TBD-by-sweep -- exposed here as
-named, required PPOHyperparameters fields, never hard-coded, matching
-the same "no default for a thesis-undetermined value" convention
-models/gnn_encoder.py's GNNEncoderConfig already established.
+Every PPO hyperparameter of tab:trainparams is TBD, so PPOHyperparameters
+has a required field for each and no defaults, the training budget included.
+`c_wait` is a parameter of the study, so it stays in ExperimentConfig.
 
-`c_wait` is deliberately NOT part of PPOHyperparameters: it is already an
-ExperimentConfig field (a parameter of the STUDY), and tab:trainparams's
-own text says to report it "alongside training configuration," not fold
-it into the PPO config table -- so it stays wherever ExperimentConfig is
-threaded through, not duplicated here.
-
-Training regime (TrainingRegime): "fixed_only" (train under F_fix,
-evaluate against all three storage rules) vs "matched" (train under the
-same storage rule used at evaluation) -- sec:method:training is explicit
-these must be "distinguished and reported as an experimental variable,
-not folded together." This module only names the regime; which
-ExperimentConfig.storage_mode a given run actually trains under is the
-caller's concern (build_ppo_config takes one already-built environment
-instance, not a regime switch) -- TrainingRegime exists so the caller
-records / reports which one a run represents, not so this module can
-silently pick a storage_mode.
+TrainingRegime names the two regimes of sec:method:training, training under
+F_fix only or under the storage rule used at evaluation. The caller picks
+the storage mode and records which regime a run is.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, NonNegativeFloat, PositiveFloat, PositiveInt
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -44,16 +28,17 @@ from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import (
     LocalSubgraphEncodingConfig,
     check_communication_caps,
-    check_slot_targets,
 )
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
-from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
+from slap_mapd_coupling.training.env import (
+    CreditSignal,
+    WarehouseMAPDMultiAgentEnv,
+    Zones,
+    arm_windows,
+    check_arm,
+)
 
 TrainingRegime = Literal["fixed_only", "matched"]  # sec:method:training
-# tab:trainparams credit signal [A9], open for the centralised and
-# section-based arms (issue #83). The decentralised arm always learns
-# from each agent's own R_i.
-CreditSignal = Literal["team_mean", "per_agent"]
 DEFAULT_POLICY_ID = "shared_policy"  # full parameter sharing, sec:method:training
 _ENV_NAME = "warehouse_mapd_multi_agent_env"
 
@@ -80,10 +65,13 @@ class PPOHyperparameters(BaseModel):
     entropy_coeff: NonNegativeFloat
     vf_loss_coeff: PositiveFloat
     train_batch_size: PositiveInt  # RLlib API requirement, see docstring
-    # No default: the thesis leaves it open for the centralised and
-    # section-based arms (#83), so a run must state it rather than inherit
-    # an RLlib default. build_ppo_config only accepts "per_agent" while
-    # the decentralised arm is the only one that trains.
+    # The training budget of tab:trainparams, equal across the learned arms and counted
+    # in environment steps. build_ppo_config does not read it. A run stops on it with
+    # Tune's stop={"num_env_steps_sampled_lifetime": budget}, at the first iteration at
+    # or above it, so it overshoots by up to one train_batch_size.
+    training_budget_env_steps: PositiveInt
+    # No default, because the thesis leaves it open for the centralised and
+    # section-based arms (#83). The decentralised arm takes "per_agent" only.
     credit_signal: CreditSignal
 
 
@@ -112,6 +100,27 @@ def split_seeds(config: SeedSplitConfig) -> tuple[tuple[int, ...], tuple[int, ..
     return train_seeds, eval_seeds
 
 
+def first_seed_index(worker_index: int, vector_index: int = 0, envs_per_runner: int = 1) -> int:
+    """Where in the training cycle the env of one runner starts.
+
+    The thesis fixes the training and evaluation seeds as a disjoint split,
+    not how training draws from the training seeds. Training cycles through
+    them in order (training/env.py). Every runner builds its own env, so if
+    every cycle started at the first seed the runners would draw the same
+    scenario at the same time. This rule starts them apart:
+    worker_index * envs_per_runner + vector_index, which numbers the envs of
+    all runners consecutively. The adapter takes it modulo the number of
+    seeds, so more envs than seeds wrap around. Worker 0 with vector index 0,
+    the single-process case, starts at 0 and draws the same sequence as
+    without an offset. This is an implementation choice, not a thesis value.
+
+    RLlib's multi-agent runner passes one EnvContext to all the envs of a
+    runner, so vector_index is 0 there and the envs of one runner (RLlib's
+    default is one) share a start.
+    """
+    return worker_index * envs_per_runner + vector_index
+
+
 def build_ppo_config(
     graph: WarehouseGraph,
     skus: Mapping[SkuId, SkuType],
@@ -124,60 +133,62 @@ def build_ppo_config(
     ppo_hyperparameters: PPOHyperparameters,
     seed_split: SeedSplitConfig,
     *,
+    zones: Optional[Zones] = None,
     policy_id: str = DEFAULT_POLICY_ID,
     num_env_runners: int = 0,
     use_gpu: bool = False,
 ) -> PPOConfig:
-    """Assembles a ray.rllib.algorithms.ppo.PPOConfig for the
-    decentralised regime: registers training/env.py's MultiAgentEnv
-    adapter, wires full parameter sharing (every agent -> policy_id,
-    RLlib's standard multi-agent scaling lever), and plugs
-    models/rl_module.py's GNN architecture in as the RLModule instead of
-    RLlib's Catalog-built default -- see module docstring for what's
-    TBD vs fixed here. `experiment_config.controller` must already be
-    "decentralised" (WarehouseMAPDMultiAgentEnv enforces this itself), and
-    its `communication` must equal `gnn_encoder_config.communication`.
+    """A PPOConfig for the learned controller `experiment_config.controller`.
+    It registers the adapter of training/env.py, maps every robot to
+    `policy_id` (full parameter sharing) and uses models/rl_module.py's GNN
+    as the RLModule.
 
-    `seed_split` feeds the adapter its training seeds (training/env.py
-    cycles through them, see that module's docstring) and sets RLlib's
-    own `seed` (PPOConfig.debugging) to `seed_split.base_seed`, so the
-    disjoint split (sec:method:training) actually reaches training
-    rather than only being exercised in tests.
+    The adapter gets the credit signal from `ppo_hyperparameters`, the
+    pooling from `gnn_encoder_config` and `zones` (the section arm only), so
+    the module and the observations always agree on pooling. Every setting
+    the adapter would reject raises here, before Ray starts, including
+    pooling with the decentralised arm, team_mean with the decentralised arm,
+    and a window above max_local_nodes.
 
-    `use_gpu` requests one GPU for the local learner
-    (PPOConfig.learners(num_gpus_per_learner=...)); RLlib otherwise
-    defaults to CPU-only training regardless of what's available on the
-    machine. Execution detail, not a study parameter -- defaulted off,
-    same as `policy_id`/`num_env_runners`.
-
-    `policy_id`/`num_env_runners` are naming/execution details, not
-    study parameters -- defaulted, unlike every PPOHyperparameters/
-    SeedSplitConfig field above.
+    `seed_split` gives the adapter its training seeds and sets RLlib's own
+    seed to `seed_split.base_seed`. `policy_id`, `num_env_runners` and
+    `use_gpu` (one GPU for the local learner) are execution details, not
+    study parameters, so they have defaults.
     """
-    if ppo_hyperparameters.credit_signal != "per_agent":
-        raise ValueError(
-            "the decentralised arm learns from each agent's own R_i "
-            "(sec:method:training); credit_signal must be 'per_agent'. "
-            "team_mean applies only to the centralised and section-based arms (#83, #86)."
-        )
     if experiment_config.discount is None:
         raise ValueError(
             "experiment_config.discount (gamma, the learning objective) is required to build a "
-            "PPOConfig; ExperimentConfig already enforces this for controller='decentralised', "
-            "so this indicates a caller bug."
+            "PPOConfig. ExperimentConfig already requires it for every controller, so this "
+            "indicates a caller bug."
         )
     if experiment_config.communication != gnn_encoder_config.communication:
         raise ValueError(
             f"experiment_config.communication={experiment_config.communication} != "
-            f"gnn_encoder_config.communication={gnn_encoder_config.communication}; the "
+            f"gnn_encoder_config.communication={gnn_encoder_config.communication}. The "
             "environment and the encoder must agree on whether messages are used."
         )
+    credit_signal = ppo_hyperparameters.credit_signal
+    pooling = gnn_encoder_config.pooling
+    try:
+        check_arm(experiment_config.controller, credit_signal, pooling, zones)
+    except ValueError as error:
+        raise ValueError(
+            f"{error} (ppo_hyperparameters.credit_signal={credit_signal!r}, "
+            f"gnn_encoder_config.pooling={pooling!r})"
+        ) from error
+    assert experiment_config.controller is not None  # check_arm rejects a planner
     check_communication_caps(encoding_config, experiment_config.communication)
-    check_slot_targets(graph, experiment_config.observation_depth, encoding_config)
+    arm_windows(
+        graph,
+        experiment_config.controller,
+        experiment_config.observation_depth,
+        encoding_config,
+        zones,
+    )
 
     train_seeds, _ = split_seeds(seed_split)
 
-    def env_creator(_env_config: dict) -> WarehouseMAPDMultiAgentEnv:
+    def env_creator(env_context: dict) -> WarehouseMAPDMultiAgentEnv:
         # Registers the storage rules in WHICHEVER process actually calls
         # this -- with num_env_runners > 0, that is a separate worker
         # process, not the one that imported storage/fixed.py et al. at
@@ -198,6 +209,14 @@ def build_ppo_config(
             experiment_config,
             encoding_config,
             train_seeds,
+            credit_signal=credit_signal,
+            pooling=pooling,
+            zones=zones,
+            # RLlib passes an EnvContext. A plain dict (no runner) starts at 0.
+            first_seed_index=first_seed_index(
+                getattr(env_context, "worker_index", 0),
+                getattr(env_context, "vector_index", 0),
+            ),
         )
 
     register_env(_ENV_NAME, env_creator)
