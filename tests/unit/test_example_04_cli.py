@@ -91,3 +91,25 @@ def test_the_wait_cost_is_one_value_for_the_graph_and_the_config(example_04):
     config = example_04.build_config("fixed_only", seed=0)
     assert config.wait_cost == example_04.WAIT_COST
     assert instance.graph.wait_cost == example_04.WAIT_COST
+
+
+def test_horizon_defaults_to_2000_and_must_be_positive(example_04):
+    assert example_04.DEFAULT_HORIZON == 2000
+    assert example_04.parse_args([]).horizon == 2000
+    assert example_04.parse_args(["--horizon=630"]).horizon == 630
+    assert example_04.parse_args(["--horizon", "630"]).horizon == 630
+    for bad in ("0", "-5"):
+        with pytest.raises(SystemExit):
+            example_04.parse_args([f"--horizon={bad}"])
+
+
+def test_training_and_evaluation_configs_share_the_horizon(example_04):
+    assert example_04.build_config("fixed_only", seed=0).horizon == 2000
+    assert example_04.build_config("matched", seed=0, horizon=630).horizon == 630
+    assert example_04.evaluation_config(3, "section").horizon == 2000
+    assert example_04.evaluation_config(3, "section", horizon=630).horizon == 630
+    # one episode length for both, so the same seed gives the same config
+    assert example_04.evaluation_config(0, "decentralised", horizon=630) == example_04.build_config(
+        "matched", seed=0, horizon=630
+    )
+

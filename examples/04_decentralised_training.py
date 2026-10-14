@@ -36,6 +36,14 @@ step is far above what the arms complete, so the backlog grows without bound and
 the evaluator's keep-up ratio (throughput over arrival rate) cannot reach 1.
 That ratio is meaningful only at a rate below capacity.
 
+Episode length. --horizon sets the number of steps of an episode, the horizon T, for training
+and for evaluation alike, so both use one value. The thesis leaves the evaluation horizon T
+open, so the default of 2000 is illustrative. With several env runners one PPO iteration
+advances each runner by only part of an episode (about 90 steps with 7 runners), so an episode
+ends only every few dozen iterations. The episode-end keys of the progress file are then null
+on most rows, and the window_* keys are the ones to read between episode ends. A checkpoint
+can be evaluated at another length by passing --horizon to 04b_evaluate_checkpoint.py.
+
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results, with the checkpoint, under ~/ray_results.
@@ -99,6 +107,9 @@ WAIT_COST = 2.0
 # Illustrative. The default arrival rate, in tasks per step, kept so earlier runs
 # reproduce. It is above the capacity of the arms, so lower it with --arrival-rate.
 DEFAULT_ARRIVAL_RATE = 1.0
+# Illustrative. The thesis leaves the evaluation horizon T open, so the episode length in steps
+# is a study parameter. One value, used by training and by evaluation.
+DEFAULT_HORIZON = 2000
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
@@ -160,6 +171,7 @@ def build_config(
     seed: int,
     controller: ControllerArchitecture = "decentralised",
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
 ) -> ExperimentConfig:
     """The configuration a run trains under. "fixed_only" trains under F_fix and
     "matched" under the storage rule used at evaluation (sec:method:training).
@@ -174,7 +186,7 @@ def build_config(
         num_agents=FLEET_SIZE,
         arrival_rate=arrival_rate,
         seed=seed,
-        horizon=2000,
+        horizon=horizon,
         wait_cost=WAIT_COST,
         observation_depth=5,
         discount=0.99,
@@ -191,9 +203,10 @@ def evaluation_config(
     seed: int,
     controller: ControllerArchitecture,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
 ) -> ExperimentConfig:
     """The configuration an episode is evaluated under, the "matched" one."""
-    return build_config("matched", seed, controller, arrival_rate)
+    return build_config("matched", seed, controller, arrival_rate, horizon)
 
 
 def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
@@ -391,6 +404,7 @@ def evaluate(
     eval_seeds: tuple[int, ...],
     trace_dir: Path,
     arrival_rate: float = DEFAULT_ARRIVAL_RATE,
+    horizon: int = DEFAULT_HORIZON,
 ) -> None:
     """Runs `module` for one episode per evaluation seed through the evaluator, so
     the observations are the ones it saw in training. The seeds are the evaluation half
@@ -400,7 +414,7 @@ def evaluate(
     policy = ModulePolicy(module)
     summaries = []
     for episode_idx, eval_seed in enumerate(eval_seeds):
-        config = evaluation_config(eval_seed, arm.controller, arrival_rate)
+        config = evaluation_config(eval_seed, arm.controller, arrival_rate, horizon)
         trace_path = trace_dir / f"{arm.controller}_episode_{episode_idx + 1}.jsonl"
         metrics = run_episode(
             instance.graph,
@@ -447,6 +461,13 @@ def parse_args(
         help="task arrival rate in tasks per step, for training and evaluation "
         "(default 1.0, above the capacity of the arms)",
     )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=DEFAULT_HORIZON,
+        help="episode length in steps, used for training and for evaluation; with 7 runners "
+        "an iteration advances each runner about 90 steps (default 2000, illustrative)",
+    )
     parser.add_argument("--env-runners", type=int, default=0)
     parser.add_argument("--eval-seeds", type=int, default=3, help="number of evaluation seeds")
     parser.add_argument("--gpu", action="store_true")
@@ -457,6 +478,8 @@ def parse_args(
         parser.error("--budget-env-steps must be at least 1")
     if args.arrival_rate <= 0:
         parser.error("--arrival-rate must be positive")
+    if args.horizon <= 0:
+        parser.error("--horizon must be positive")
     return args
 
 
@@ -466,12 +489,19 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
 
     instance = build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(regime, seed=0, controller=controller, arrival_rate=args.arrival_rate)
+    config = build_config(
+        regime,
+        seed=0,
+        controller=controller,
+        arrival_rate=args.arrival_rate,
+        horizon=args.horizon,
+    )
     arm = build_arm(instance, controller, config.observation_depth)
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
-        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}"
+        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}, "
+        f"horizon={config.horizon}"
     )
 
     seed_split = build_seed_split(config.seed, args.eval_seeds)
@@ -508,6 +538,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         eval_seeds,
         OUTPUT_DIR / "traces",
         args.arrival_rate,
+        args.horizon,
     )
 
 

@@ -50,3 +50,15 @@ def test_04b_takes_the_arrival_rate_the_checkpoint_was_trained_at(example_04, ex
     assert example_04b.build_config(seed=0, arrival_rate=0.15) == example_04.build_config(
         "matched", seed=0, arrival_rate=0.15
     )
+
+
+def test_04b_takes_the_same_horizon_as_04(example_04, example_04b):
+    assert example_04b.parse_args(["--checkpoint=x"]).horizon == 2000
+    assert example_04b.parse_args(["--checkpoint=x", "--horizon=630"]).horizon == 630
+    for bad in ("0", "-5"):
+        with pytest.raises(SystemExit):
+            example_04b.parse_args(["--checkpoint=x", f"--horizon={bad}"])
+    assert example_04b.build_config(seed=0).horizon == example_04.DEFAULT_HORIZON
+    assert example_04b.build_config(seed=0, horizon=630) == example_04.build_config(
+        "matched", seed=0, horizon=630
+    )

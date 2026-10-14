@@ -3,6 +3,9 @@
 Pass the checkpoint folder Ray wrote at the end of the run, for example
     python examples/04b_evaluate_checkpoint.py --checkpoint=<path> --eval-seeds=3
 Pass the same --arrival-rate the checkpoint was trained at (default 1.0, as in 04).
+--horizon sets the episode length in steps (default 2000, as in 04), so a checkpoint can be
+evaluated at another length than it was trained at. The thesis leaves the evaluation horizon T
+open, so the value is illustrative.
 The module is loaded from the checkpoint's own folder, with no Ray cluster and no
 registered environment, and evaluated through the evaluator as in 04. Use --arm
 for a checkpoint of 02_centralised_fixed.py (centralised) or 03_section_based.py
@@ -44,9 +47,10 @@ def build_config(
     seed: int,
     controller: str = "decentralised",
     arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
+    horizon: int = example_04.DEFAULT_HORIZON,
 ):
     """The configuration of an evaluation episode, 04's."""
-    return example_04.evaluation_config(seed, controller, arrival_rate)
+    return example_04.evaluation_config(seed, controller, arrival_rate, horizon)
 
 
 def render_episode(
@@ -58,6 +62,7 @@ def render_episode(
     arm,
     arrival_rate: float = example_04.DEFAULT_ARRIVAL_RATE,
     delay: float = 0.15,
+    horizon: int = example_04.DEFAULT_HORIZON,
 ) -> None:
     """Live pygame preview of one episode driven by the module's sampled slots. Close the
     window (or Ctrl+C) to stop early."""
@@ -65,7 +70,9 @@ def render_episode(
     from slap_mapd_coupling.training.policy import ModulePolicy
     from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
-    config = build_config(seed=0, controller=arm.controller, arrival_rate=arrival_rate)
+    config = build_config(
+        seed=0, controller=arm.controller, arrival_rate=arrival_rate, horizon=horizon
+    )
     adapter = WarehouseMAPDMultiAgentEnv(
         instance.graph,
         skus,
@@ -115,12 +122,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=example_04.DEFAULT_ARRIVAL_RATE,
         help="task arrival rate in tasks per step, the rate the checkpoint was trained at",
     )
+    # Illustrative. The thesis leaves the evaluation horizon T open.
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=example_04.DEFAULT_HORIZON,
+        help="episode length in steps, used for evaluation; with 7 runners an iteration "
+        "advances each runner about 90 steps (default 2000, as in 04)",
+    )
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args(argv)
     if args.eval_seeds < 1:
         parser.error("--eval-seeds must be at least 1")
     if args.arrival_rate <= 0:
         parser.error("--arrival-rate must be positive")
+    if args.horizon <= 0:
+        parser.error("--horizon must be positive")
     return args
 
 
@@ -134,14 +151,25 @@ def main() -> None:
 
     instance = example_04.build_generated_instance()
     skus, capacities, counts = build_storage(instance.graph)
-    config = build_config(seed=0, controller=args.arm, arrival_rate=args.arrival_rate)
+    config = build_config(
+        seed=0, controller=args.arm, arrival_rate=args.arrival_rate, horizon=args.horizon
+    )
     arm = example_04.build_arm(instance, args.arm, config.observation_depth)
 
     print(f"Loading checkpoint from {args.checkpoint}")
     module = load_module(args.checkpoint)
 
     if args.render:
-        render_episode(module, instance, skus, capacities, counts, arm, args.arrival_rate)
+        render_episode(
+            module,
+            instance,
+            skus,
+            capacities,
+            counts,
+            arm,
+            args.arrival_rate,
+            horizon=args.horizon,
+        )
     else:
         seed_split = example_04.build_seed_split(config.seed, args.eval_seeds)
         _, eval_seeds = example_04.split_seeds(seed_split)
@@ -155,6 +183,7 @@ def main() -> None:
             eval_seeds,
             example_04.OUTPUT_DIR / "traces",
             args.arrival_rate,
+            args.horizon,
         )
 
 
