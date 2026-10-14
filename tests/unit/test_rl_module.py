@@ -177,6 +177,21 @@ def test_every_forward_mode_and_the_value_run_with_the_dict_actor_output(communi
     assert values.shape == (2,)
 
 
+@pytest.mark.parametrize("communication", [False, True])
+def test_the_value_is_the_same_when_computed_in_chunks(communication, monkeypatch):
+    graph = _line_graph(6)
+    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
+    module, d_max = _build_module(graph, enc_config, communication)
+
+    with torch.no_grad():
+        whole = module.compute_values(_two_robot_batch(graph, enc_config, communication, d_max))
+        monkeypatch.setattr("slap_mapd_coupling.environment.action_masking.VALUE_CHUNK_ROWS", 1)
+        chunked = module.compute_values(_two_robot_batch(graph, enc_config, communication, d_max))
+
+    assert chunked.shape == whole.shape == (2,)
+    assert torch.allclose(chunked, whole, atol=1e-6)
+
+
 def test_the_module_passes_the_pool_mask_to_the_encoder():
     graph = _line_graph(6)
     enc_config = LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=2)
