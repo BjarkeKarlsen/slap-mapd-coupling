@@ -58,18 +58,16 @@ Messages are learned, so they need training to carry information.
 
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
-Ray writes its results, with the checkpoint, under ~/ray_results.
+Ray writes its results under ~/ray_results, with a checkpoint every few iterations, the best ones by
+episode return and the one at the end. The PPO hyperparameters, the budget and the model sizes are in
+configs/<arm>.yaml.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import math
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple
-
-from ray import tune
+from typing import Any
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import (
@@ -78,8 +76,6 @@ from slap_mapd_coupling.core.experiment_config import (
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
-from slap_mapd_coupling.environment.observation import local_subgraph
-from slap_mapd_coupling.environment.zones import halo, zones_by_aisle
 from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.evaluation.trace import (
     format_summary,
@@ -94,23 +90,29 @@ from slap_mapd_coupling.instances.generator import (
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
-from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig, Pooling
-from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
-from slap_mapd_coupling.training.callbacks import (
-    TrainingProgressCallbacks,
-    format_iteration,
-    iteration_record,
-)
+from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
+from slap_mapd_coupling.training.arm import Arm, build_arm as _build_arm
 from slap_mapd_coupling.training.config import (
-    DEFAULT_POLICY_ID,
     PPOHyperparameters,
     SeedSplitConfig,
     TrainingRegime,
     build_ppo_config,
     split_seeds,
 )
-from slap_mapd_coupling.training.env import CreditSignal, Zones
+from slap_mapd_coupling.training.env import CreditSignal
 from slap_mapd_coupling.training.policy import ModulePolicy
+from slap_mapd_coupling.training.spec import (
+    TrainingSpec,
+    build_storage as build_storage_from,
+    load_spec,
+    with_budget,
+)
+from slap_mapd_coupling.training.trainer import (
+    CheckpointSettings,
+    TrainingRun,
+    load_module,  # noqa: F401 -- 04b and 05 take it from here
+    train as run_training,
+)
 
 FLEET_SIZE = 3
 
@@ -133,9 +135,23 @@ DEFAULT_ARRIVAL_RATE = 0.25
 # env runner), see PPOHyperparameters.
 DEFAULT_HORIZON = 630
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
-ILLUSTRATIVE_BUDGET_ENV_STEPS = 4200
+# The PPO hyperparameters, the budget, the model sizes and the checkpointing are in the YAML file
+# that `slap-mapd train` reads, so there is one place to change them.
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+_SPECS: dict[str, TrainingSpec] = {}
+
+
+def spec_for(controller: ControllerArchitecture) -> TrainingSpec:
+    """The spec of `controller` in configs/<controller>.yaml, which 02 and 03 train with too."""
+    if controller not in _SPECS:
+        _SPECS[controller] = load_spec(CONFIG_DIR / f"{controller}.yaml")
+    return _SPECS[controller]
+
+
+_SPEC = spec_for("decentralised")
+ILLUSTRATIVE_BUDGET_ENV_STEPS = _SPEC.ppo.training_budget_env_steps
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
-CREDIT_SIGNAL: CreditSignal = "per_agent"
+CREDIT_SIGNAL: CreditSignal = _SPEC.ppo.credit_signal
 # Illustrative. The number of zones is a sweep parameter (tab:modelparams).
 NUM_ZONES = 3
 # The storage rule a policy is evaluated under. "matched" training uses it too.
@@ -145,7 +161,6 @@ EVALUATION_STORAGE_MODE = "fixed"
 # larger fleet does not silently drop senders. It only matters with --communication, and it was 2
 # before.
 MAX_MESSAGES = FLEET_SIZE - 1
-POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 
@@ -186,11 +201,8 @@ def build_instance() -> WarehouseGraph:
 def build_storage(
     graph: WarehouseGraph,
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
-    storage_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
-    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
-    capacities = {v: 20.0 for v in storage_vertices}
-    counts = {"tea": {storage_vertices[0]: 8, storage_vertices[1]: 8}}
-    return skus, capacities, counts
+    """The SKUs, vertex capacities and initial counts of configs/<arm>.yaml (storage section)."""
+    return build_storage_from(spec_for("decentralised").storage, graph)
 
 
 def build_config(
@@ -246,93 +258,32 @@ def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfi
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
-def build_hyperparameters(budget_env_steps: int) -> PPOHyperparameters:
-    # Illustrative values, sized so a longer run learns some navigation on this instance.
-    return PPOHyperparameters(
-        lr=3e-4,
-        clip_param=0.2,
-        gae_lambda=0.95,
-        minibatch_size=128,
-        num_epochs=5,
-        entropy_coeff=0.02,
-        vf_loss_coeff=1.0,
-        training_budget_env_steps=budget_env_steps,
-        credit_signal=CREDIT_SIGNAL,
-    )
-
-
-# NamedTuple, not a dataclass, so a test can load this file by path without registering it.
-class Arm(NamedTuple):
-    """What an arm needs besides the graph: its pooling, its zones (section only)
-    and the padding caps."""
-
-    controller: ControllerArchitecture
-    pooling: Pooling
-    zones: Zones | None
-    encoding: LocalSubgraphEncodingConfig
-
-
-def largest_window(
-    graph: WarehouseGraph,
-    controller: ControllerArchitecture,
-    observation_depth: int,
-    zones: Zones | None,
-) -> int:
-    """The vertices of the largest window the arm uses, so the cap truncates none."""
-    movable = [v for v, vertex in graph.vertices.items() if vertex.role.movable]
-    if controller == "centralised":
-        return len(movable)
-    if controller == "section":
-        assert zones is not None
-        return max(len(zone | halo(graph, zone, observation_depth)) for zone in zones)
-    return max(len(local_subgraph(graph, v, observation_depth)) for v in movable)
+def build_hyperparameters(
+    budget_env_steps: int, controller: ControllerArchitecture = "decentralised"
+) -> PPOHyperparameters:
+    """The PPO hyperparameters of the YAML file of `controller`, with the budget given."""
+    return with_budget(spec_for(controller), budget_env_steps).ppo
 
 
 def build_arm(
     instance: GeneratedInstance, controller: ControllerArchitecture, observation_depth: int
 ) -> Arm:
-    zones = None
-    if controller == "section":
-        zones = zones_by_aisle(instance.graph, instance.aisle_index, NUM_ZONES)
-    cap = largest_window(instance.graph, controller, observation_depth, zones)
-    return Arm(
-        controller=controller,
-        pooling=POOLING[controller],
-        zones=zones,
-        encoding=LocalSubgraphEncodingConfig(max_local_nodes=cap, max_messages=MAX_MESSAGES),
+    return _build_arm(
+        instance,
+        controller,
+        observation_depth,
+        num_zones=NUM_ZONES,
+        max_messages=MAX_MESSAGES,
     )
 
 
 def build_gnn_config(config: ExperimentConfig, arm: Arm) -> GNNEncoderConfig:
     return GNNEncoderConfig(
-        num_rounds=2,
-        hidden_width=32,
+        num_rounds=spec_for(arm.controller).model.num_rounds,
+        hidden_width=spec_for(arm.controller).model.hidden_width,
         communication=config.communication,
         pooling=arm.pooling,
     )
-
-
-class ProgressLog(tune.Callback):
-    """Prints one line per iteration and appends it to a JSON Lines file."""
-
-    def __init__(self, expected_iterations: int, progress_path: Path | None) -> None:
-        self._expected_iterations = expected_iterations
-        self._progress_path = progress_path
-        if progress_path is not None:
-            progress_path.parent.mkdir(parents=True, exist_ok=True)
-            progress_path.write_text("", encoding="utf-8")
-
-    def on_trial_result(self, iteration, trials, trial, result: dict, **info: Any) -> None:
-        i = result["training_iteration"]
-        print(format_iteration(i, self._expected_iterations, result))
-        if self._progress_path is not None:
-            with self._progress_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(iteration_record(i, result)) + "\n")
-
-
-class TrainingRun(NamedTuple):
-    checkpoint: Path
-    env_steps_sampled: int
 
 
 def train(
@@ -348,9 +299,10 @@ def train(
     num_env_runners: int = 0,
     use_gpu: bool = False,
     progress_path: Path | None = None,
+    checkpoint_settings: CheckpointSettings | None = None,
 ) -> TrainingRun:
-    """Trains with Ray Tune, stops at the first iteration at or above the training
-    budget, and returns Ray's default checkpoint of the end of the run."""
+    """Trains with Ray Tune through training/trainer.py. It stops at the first iteration at or
+    above the training budget and returns the checkpoint of the end of the run and the best one."""
     ppo_config = build_ppo_config(
         instance.graph,
         skus,
@@ -359,49 +311,21 @@ def train(
         config,
         arm.encoding,
         build_gnn_config(config, arm),
-        PolicyValueHeadConfig(hidden_width=32),
+        PolicyValueHeadConfig(hidden_width=spec_for(arm.controller).model.head_hidden_width),
         hyperparameters,
         seed_split,
         zones=arm.zones,
         num_env_runners=num_env_runners,
         use_gpu=use_gpu,
-    ).callbacks(TrainingProgressCallbacks)
-    budget = hyperparameters.training_budget_env_steps
-    # An iteration samples one episode per runner, so this is the number of iterations.
-    expected_iterations = math.ceil(budget / ppo_config.total_train_batch_size)
-    print(
-        f"=== Training the {arm.controller} GNN+PPO controller "
-        f"(budget {budget} environment steps) ==="
     )
-    results = tune.Tuner(
-        "PPO",
-        param_space=ppo_config,
-        run_config=tune.RunConfig(
-            name=run_name,
-            stop={"num_env_steps_sampled_lifetime": budget},
-            checkpoint_config=tune.CheckpointConfig(checkpoint_at_end=True),
-            callbacks=[ProgressLog(expected_iterations, progress_path)],
-        ),
-    ).fit()
-    result = results[0]
-    if result.error is not None:
-        raise result.error
-    assert result.checkpoint is not None and result.metrics is not None
-    return TrainingRun(
-        checkpoint=Path(result.checkpoint.path),
-        env_steps_sampled=int(result.metrics["num_env_steps_sampled_lifetime"]),
+    return run_training(
+        ppo_config,
+        hyperparameters.training_budget_env_steps,
+        run_name,
+        arm_label=arm.controller,
+        settings=checkpoint_settings or spec_for(arm.controller).checkpoint,
+        progress_path=progress_path,
     )
-
-
-def load_module(checkpoint: Path, policy_id: str = DEFAULT_POLICY_ID):
-    """The trained RLModule of `policy_id` from an Algorithm checkpoint, with no Ray
-    cluster and no registered environment. The path is built from Ray's own constants
-    for the layout of a checkpoint, which a test guards."""
-    from ray.rllib.core import COMPONENT_LEARNER, COMPONENT_LEARNER_GROUP, COMPONENT_RL_MODULE
-    from ray.rllib.core.rl_module.rl_module import RLModule
-
-    path = checkpoint / COMPONENT_LEARNER_GROUP / COMPONENT_LEARNER / COMPONENT_RL_MODULE
-    return RLModule.from_checkpoint(str(path.resolve() / policy_id))
 
 
 def trace_is_collision_free(steps: list[dict[str, Any]], initial: dict[str, int]) -> bool:
@@ -552,7 +476,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         counts,
         config,
         arm,
-        build_hyperparameters(args.budget_env_steps),
+        build_hyperparameters(args.budget_env_steps, controller),
         seed_split,
         run_name=f"{controller}_{regime}",
         num_env_runners=args.env_runners,
@@ -560,6 +484,9 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         progress_path=OUTPUT_DIR / f"{controller}_training_progress.jsonl",
     )
     print(f"\nCheckpoint saved to {run.checkpoint}")
+    print(
+        f"Best checkpoint by {spec_for(controller).checkpoint.score_attribute} saved to {run.best_checkpoint}"
+    )
     overshoot = run.env_steps_sampled - args.budget_env_steps
     print(
         f"Sampled {run.env_steps_sampled} environment steps for a budget of "

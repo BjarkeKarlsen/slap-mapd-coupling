@@ -187,6 +187,12 @@ class StandingStillCounter:
         self._total = 0
 
 
+# The training return under a top-level key of the result. Tune ranks checkpoints by a score only
+# when the score is a top-level key, and RLlib nests the return under "env_runners", so
+# on_train_result copies it here (see training/trainer.py::CheckpointSettings).
+EPISODE_RETURN_KEY = "episode_return_mean"
+
+
 class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     """The invariant checks plus progress numbers in every iteration.
 
@@ -213,6 +219,15 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         super().on_episode_step(env=env, env_index=env_index, **kwargs)
         if env is not None and before is not None:
             self._standing_still.update(before, _unwrap(env, env_index).core.fleet)
+
+    def on_train_result(
+        self, *, algorithm=None, metrics_logger=None, result: dict, **kwargs: Any
+    ) -> None:
+        """Copies the mean episode return to the top level of the result, which is where Tune
+        looks for the score of a checkpoint. An iteration without a finished episode has none."""
+        value = result.get("env_runners", {}).get("episode_return_mean")
+        if _is_number(value):
+            result[EPISODE_RETURN_KEY] = float(value)
 
     def on_sample_end(self, *, env_runner=None, metrics_logger=None, **kwargs: Any) -> None:
         if env_runner is None or metrics_logger is None or env_runner.env is None:

@@ -1,0 +1,85 @@
+# The training run of examples/04_decentralised_training.py, read by `slap-mapd train`.
+# configs/centralised.yaml and configs/section.yaml differ only in `controller`.
+#
+# Every number is illustrative. tab:trainparams and tab:modelparams leave the PPO
+# hyperparameters, the budget, the seed counts and the model sizes TBD, and the load levels
+# (arrival_rate, horizon) are open too. Change a value here instead of in the code.
+# See training/spec.py for what each section means.
+
+controller: decentralised   # decentralised | centralised | section
+regime: fixed_only          # fixed_only | matched
+communication: false        # RQ5, decentralised arm only
+evaluation_storage_mode: fixed
+
+# About 80% of what Token Passing completes on this instance (about 0.3 tasks per step), so
+# the arms are loaded but can keep up. The horizon is also the rollout length of PPO, so one
+# sampling call of a runner is one episode.
+arrival_rate: 0.25
+horizon: 630
+
+experiment:
+  num_agents: 3
+  wait_cost: 0.1            # c_wait, one value for the graph and the reward
+  keep_up_threshold: 0.8    # f_up of eq:throughput
+  observation_depth: 5      # d_obs
+  discount: 0.99            # gamma
+  # n_deliver is raised well above 1.0. A 5000-iteration run on this instance showed rising
+  # training return with zero evaluation completions, consistent with the per-step shaping
+  # term outweighing a small completion bonus.
+  deliver_reward: 10.0
+  override_penalty: 0.5
+  congestion_reward_weight: 0.1
+  congestion_sensitive: false
+  seed: 0
+
+# GeneratorParams without wait_cost and num_endpoints, which follow the experiment section.
+instance:
+  max_num_aisles: 7
+  max_aisle_length: 7
+  max_num_cross_aisles: 6
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: true
+  edge_cost_range: [0.5, 2.0]
+  num_storage_vertices: 4
+  num_delivery_vertices: 4
+  min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
+  seed: 42
+
+# 20 SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), spread over the storage
+# vertices, each vertex holding up to 100. Illustrative. A new task picks a random (SKU, vertex)
+# pair that is in stock, so more SKUs mean more distinct pickups. See StorageSettings.
+storage:
+  num_skus: 20
+  unit_capacities: [0.5, 1.0, 2.0]
+  vertex_capacity: 100.0
+  initial_units: 8
+
+arm:
+  num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)
+  # max_messages defaults to num_agents - 1, so no sender is dropped. Communication only.
+
+model:
+  num_rounds: 2
+  hidden_width: 32
+  head_hidden_width: 32
+
+ppo:
+  lr: 0.0003
+  clip_param: 0.2
+  gae_lambda: 0.95
+  minibatch_size: 128
+  num_epochs: 5
+  entropy_coeff: 0.02
+  vf_loss_coeff: 1.0
+  training_budget_env_steps: 4200
+  credit_signal: per_agent  # the thesis leaves it open for the wider arms (#83)
+
+train_seed_count: 5
+eval_seed_count: 3
+
+checkpoint:
+  frequency: 10             # iterations between checkpoints, 0 keeps only the one at the end
+  num_to_keep: 3
+  score_attribute: episode_return_mean   # a top-level key of the result
+  score_order: max
