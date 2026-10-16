@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `training/trainer.py` is real. `train` runs a `PPOConfig` under Ray Tune with periodic
+  checkpoints, keeps the best ones by `env_runners/episode_return_mean` and returns the final and
+  the best checkpoint (`TrainingRun`). `load_module`, `ProgressLog` and `CheckpointSettings` live
+  there too, moved out of `examples/04_decentralised_training.py`.
+- `training/spec.py` and `configs/decentralised.yaml`. The PPO hyperparameters, the budget, the
+  model sizes, the instance and the checkpointing are one YAML file, and `training/arm.py` holds
+  the arm helpers that were in example 04.
+- `slap-mapd train --config` runs it. Its options override the file, and the effective settings are
+  written beside the run.
 - `PPOHyperparameters.training_budget_env_steps`, with no default, since the thesis counts
   the training budget in environment steps and leaves its value TBD.
 - `tensorboard` in the dev extras.

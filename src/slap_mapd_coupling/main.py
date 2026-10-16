@@ -102,24 +102,113 @@ def simulate(
 @cli.command()
 @click.option(
     "--config",
-    type=click.Path(exists=True),
-    help="Training config (YAML); overrides the options below.",
+    type=click.Path(exists=True, dir_okay=False),
+    required=True,
+    help="Training config (YAML), for example configs/decentralised.yaml. It holds the "
+    "instance, the model, the PPO hyperparameters and the checkpointing. The options below "
+    "override its settings.",
+)
+@click.option("--controller", type=click.Choice(CONTROLLERS), default=None)
+@click.option(
+    "--regime",
+    type=click.Choice(["fixed_only", "matched"]),
+    default=None,
+    help="Training regime (sec:method:training): F_fix only, or the evaluation storage rule.",
 )
 @click.option(
-    "--storage-rule",
-    type=click.Choice(STORAGE_RULES),
-    default="fixed",
-    help="Storage rule used during training (the F_fix-only vs matched training regime).",
+    "--communication/--no-communication",
+    default=None,
+    help="Local communication (RQ5, decentralised controller only).",
 )
-@click.option("--num-iterations", default=500, type=int, help="Number of PPO training iterations.")
-@click.option("--num-gpus", default=0, type=int, help="Number of GPUs to use.")
-@click.option("--seed", default=0, type=int, help="Training seed (disjoint from evaluation seeds).")
+@click.option("--arrival-rate", type=float, default=None, help="Tasks released per step.")
+@click.option("--horizon", type=int, default=None, help="Episode length in steps.")
 @click.option(
-    "--output", type=click.Path(), default="./checkpoints", help="Checkpoint output directory."
+    "--budget-env-steps", type=int, default=None, help="Training budget in environment steps."
 )
-def train(config, storage_rule, num_iterations, num_gpus, seed, output):
+@click.option("--seed", type=int, default=None, help="Base seed of the train/eval seed split.")
+@click.option("--env-runners", default=0, type=int, help="Number of RLlib env runners.")
+@click.option("--gpu", is_flag=True, help="Use one GPU for the learner.")
+@click.option(
+    "--checkpoint-every",
+    type=int,
+    default=None,
+    help="Iterations between checkpoints, 0 keeps only the one at the end.",
+)
+@click.option(
+    "--keep-checkpoints",
+    type=int,
+    default=None,
+    help="Checkpoints to keep, the best by episode return and the latest.",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default="./checkpoints",
+    help="Where Ray Tune writes the run, with its checkpoints.",
+)
+def train(
+    config,
+    controller,
+    regime,
+    communication,
+    arrival_rate,
+    horizon,
+    budget_env_steps,
+    seed,
+    env_runners,
+    gpu,
+    checkpoint_every,
+    keep_checkpoints,
+    output,
+):
     """Train a learned controller (PPO). The reference planner needs no training."""
-    raise NotImplementedError("Training is not implemented yet.")
+    # Imported here so the other verbs do not pay for starting Ray.
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import (
+        build_study,
+        build_study_ppo_config,
+        load_spec,
+        override_spec,
+    )
+    from slap_mapd_coupling.training.trainer import train as run_training
+
+    try:
+        spec = override_spec(
+            load_spec(Path(config)),
+            controller=controller,
+            regime=regime,
+            communication=communication,
+            arrival_rate=arrival_rate,
+            horizon=horizon,
+            budget_env_steps=budget_env_steps,
+            seed=seed,
+            checkpoint_every=checkpoint_every,
+            keep_checkpoints=keep_checkpoints,
+        )
+        study = build_study(spec)
+        ppo_config = build_study_ppo_config(spec, study, num_env_runners=env_runners, use_gpu=gpu)
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
+
+    out = Path(output)
+    name = f"{spec.controller}_{spec.regime}" + ("_comm" if spec.communication else "")
+    out.mkdir(parents=True, exist_ok=True)
+    # The effective settings, so a checkpoint can be evaluated as it was trained.
+    (out / f"{name}_spec.json").write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    run = run_training(
+        ppo_config,
+        spec.ppo.training_budget_env_steps,
+        name,
+        arm_label=spec.controller,
+        settings=spec.checkpoint,
+        storage_path=out,
+        progress_path=out / f"{name}_training_progress.jsonl",
+    )
+    click.echo(f"Checkpoint saved to {run.checkpoint}")
+    click.echo(
+        f"Best checkpoint by {spec.checkpoint.score_attribute} saved to {run.best_checkpoint}"
+    )
 
 
 @cli.command()

@@ -11,11 +11,10 @@ and `02_centralised_fixed.py` and `03_section_based.py` are its variants.
 encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 `PPOConfig`. It rejects, before Ray starts, any setting the adapter would reject.
 
-- The credit signal (`PPOHyperparameters.credit_signal`) has no default. The examples
-  pass `"per_agent"`, an illustrative choice.
+- The credit signal (`PPOHyperparameters.credit_signal`) has no default. The YAML file
+  sets `per_agent`, an illustrative choice.
 - The training budget, `PPOHyperparameters.training_budget_env_steps`, has no default.
-  It is counted in environment steps and is equal across arms. The examples pass an
-  illustrative value.
+  It is counted in environment steps and is equal across arms. It is set in the YAML file.
 - `GNNEncoderConfig.pooling` has no default. Use `"mean"` for the centralised and
   section arms and `"none"` for the decentralised arm.
 - `LocalSubgraphEncodingConfig.max_local_nodes` must be at least the largest window the
@@ -27,30 +26,63 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 
 ## Running it
 
-The examples run the config with Ray Tune, which stops at the first iteration whose
-sampled environment steps reach the budget, so a run overshoots by up to one
+`training/trainer.py::train` runs a finished `PPOConfig` with Ray Tune. It stops at the first
+iteration whose sampled environment steps reach the budget, so a run overshoots by up to one
 iteration's samples. `build_ppo_config` sets the rollout length and the train batch from the
 horizon, so an iteration samples one episode per runner, `num_env_runners * horizon` steps
-(`horizon` steps with no env runner).
+(`horizon` steps with no env runner). The trainer holds no graph. The caller builds the config.
 
 ```python
-from ray import tune
+from slap_mapd_coupling.training.trainer import CheckpointSettings, train
 
-results = tune.Tuner(
-    "PPO",
-    param_space=ppo_config,  # the PPOConfig object, not to_dict()
-    run_config=tune.RunConfig(
-        name="my_run",
-        stop={"num_env_steps_sampled_lifetime": budget},
-        checkpoint_config=tune.CheckpointConfig(checkpoint_at_end=True),
-    ),
-).fit()
-checkpoint = results[0].checkpoint.path
+run = train(
+    ppo_config,  # the PPOConfig object, not to_dict()
+    budget_env_steps,
+    "my_run",
+    settings=CheckpointSettings(frequency=10, num_to_keep=3),
+)
+run.checkpoint, run.best_checkpoint
 ```
 
-Ray writes the results and the checkpoint under `~/ray_results/<name>/<trial>/`.
-There is no checkpoint folder of our own. Tune also writes CSV, JSON and TensorBoard
-files for every trial.
+Ray writes the results and the checkpoints under `~/ray_results/<name>/<trial>/`, or under
+`storage_path` when one is given. Tune also writes CSV, JSON and TensorBoard files for every trial.
+
+### Checkpoints and the best one
+
+Checkpointing is Tune's own (`tune.CheckpointConfig`), set by `CheckpointSettings`.
+
+- `frequency` is the number of iterations between checkpoints, and 0 keeps only the one written at
+  the end of the run, which is always written.
+- `num_to_keep` keeps that many checkpoints, the best by `score_attribute`, and always the latest.
+  None keeps all of them.
+- `score_attribute` is `env_runners/episode_return_mean` and `score_order` is `max`, so the best
+  checkpoint is the one with the highest training return.
+
+`TrainingRun.checkpoint` is the checkpoint at the end of the run and `TrainingRun.best_checkpoint`
+the best one that was kept. They are the same folder when the last iteration scored best. The
+score is the training return, not an evaluation. A run can raise its return while completing no
+tasks (see `deliver_reward` in `configs/decentralised.yaml`), so evaluate the best checkpoint
+with `04b_evaluate_checkpoint.py` before trusting it.
+
+### The config file and `slap-mapd train`
+
+One YAML file describes a run: the instance, storage, experiment settings, model sizes, the PPO
+hyperparameters, the budget and the checkpointing. `configs/decentralised.yaml` is the file of
+example 04, and its values are illustrative because the thesis leaves them TBD.
+`training/spec.py` loads it and builds everything `train` needs.
+
+```bash
+slap-mapd train --config configs/decentralised.yaml --budget-env-steps 4200 \
+    --env-runners 7 --checkpoint-every 10 --keep-checkpoints 3 --output runs/dec
+```
+
+The command only loads the file, applies the options it was given (`--controller`, `--regime`,
+`--communication`, `--arrival-rate`, `--horizon`, `--budget-env-steps`, `--seed`,
+`--checkpoint-every`, `--keep-checkpoints`) and hands the result to the trainer. It writes the
+effective settings to `<output>/<name>_spec.json`, prints the same `Checkpoint saved to <path>`
+line as example 04 and then the best checkpoint. Example 04 reads its hyperparameters, model
+sizes and checkpointing from the same file, and keeps its own copy of the instance and
+experiment values, which `tests/unit/test_training_spec.py` checks against the file.
 
 ## Reading the curves
 

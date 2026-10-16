@@ -65,7 +65,7 @@ generic train/evaluate/checkpoint workflow:
 slap-mapd simulate --storage-rule fixed --planner prioritised_astar --num-agents 10
 
 # Train a learned controller (examples/04_decentralised_training.py shows the Tune run)
-slap-mapd train --storage-rule fixed --num-iterations 500
+slap-mapd train --config configs/decentralised.yaml --budget-env-steps 4200
 
 # Run the full experimental grid and write one results table
 slap-mapd sweep --config path/to/experiment_grid.yaml
