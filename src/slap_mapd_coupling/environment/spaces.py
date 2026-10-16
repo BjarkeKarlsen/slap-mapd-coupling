@@ -6,9 +6,13 @@ This is the mask logic itself, independent of RLlib. The RLlib wiring is in
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from gymnasium.spaces import Discrete
 
+from slap_mapd_coupling.core.agents import AgentId
 from slap_mapd_coupling.core.graph import Action, VertexId, WarehouseGraph
+from slap_mapd_coupling.resolution.conflict_resolution import move_blocked
 
 Mask = tuple[float, ...]  # M(v, .): d_max+1 entries, 0.0 (legal) or -inf (illegal)
 
@@ -67,3 +71,38 @@ def slot_for_action(graph: WarehouseGraph, vertex: VertexId, action: Action) -> 
     if action in legal:
         return legal.index(action)
     raise ValueError(f"{action} is not legal at vertex {vertex} (not in the action set).")
+
+
+def claim_mask(
+    graph: WarehouseGraph,
+    agent_id: AgentId,
+    before_locations: Mapping[AgentId, VertexId],
+    chosen: Mapping[AgentId, VertexId],
+    d_max: int | None = None,
+) -> Mask:
+    """The claim mask of the agent inside a centralised or section decision.
+
+    `chosen` holds the successor vertex of each earlier agent in the same
+    unit, an agent that waits included. An agent missing from it counts as
+    not having chosen, and so do agents in other zones. A move is switched
+    off when `move_blocked` rejects it, and the wait slot is never touched.
+    The result has the shape of `legality_mask`, with -inf on every slot the
+    claim mask switches off and 0.0 elsewhere, so the two masks combine by
+    adding.
+    """
+    if d_max is None:
+        d_max = max_out_degree(graph)
+    start = before_locations[agent_id]
+    if move_blocked(agent_id, start, start, before_locations, chosen):
+        raise RuntimeError(
+            f"Agent {agent_id} cannot wait at {start}. A collision-free state and "
+            "earlier choices that each passed the claim mask rule this out, so this "
+            "is a correctness bug."
+        )
+    mask = [0.0] * (d_max + 1)
+    for slot, action in enumerate(graph.legal_actions(start)):
+        if action.kind == "move" and move_blocked(
+            agent_id, start, action.target, before_locations, chosen
+        ):
+            mask[slot] = float("-inf")
+    return tuple(mask)
