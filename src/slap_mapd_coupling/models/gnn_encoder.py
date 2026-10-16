@@ -26,7 +26,11 @@ decentralised router does not pool. The mean is over real vertices
 only, never padding. The thesis leaves pooling TBD (tab:modelparams,
 issue #82), so GNNEncoderConfig.pooling has no default. The readout is the own embedding,
 then the message mean if communication is on, then the pooled mean, then
-the congestion feature last.
+the congestion feature, and with the conflict signals on (an extension the
+thesis does not contain, environment/observation.py) the override flag and then
+the priority rank, last of all. Existing layout order is kept, so the signals
+only add two entries at the end. A message is the sender's own embedding, so
+the senders carry no signals.
 
 `forward` is the unbatched oracle, one Observation (and its senders'
 Observations) in, one z_i out, and `embed_moves` gives its h_w and message
@@ -45,7 +49,12 @@ from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
 from torch import nn
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
-from slap_mapd_coupling.environment.observation import Observation, VertexFeatures
+from slap_mapd_coupling.environment.observation import (
+    ConflictSignalsConfig,
+    Observation,
+    ObservationWithConflictSignals,
+    VertexFeatures,
+)
 
 NODE_FEATURE_DIM = 6  # storage, delivery, endpoint, transit, eta, occupied (the vertex features)
 
@@ -80,6 +89,11 @@ class GNNEncoderConfig(BaseModel):
     # decentralised arm, and it must equal the pooling of the observations
     # (training/env.py::check_arm).
     pooling: Pooling
+    # Off by default, so an existing config and checkpoint mean what they did.
+    # The encoder only needs the switch (two more readout entries). It is stored
+    # here so the checkpoint carries the switch and the rank encoding the
+    # observations were built with, and an evaluation reads them from the module.
+    conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig()
 
 
 def _node_feature_vector(features: VertexFeatures) -> list[float]:
@@ -150,11 +164,29 @@ class GNNEncoder(nn.Module):
     @property
     def output_dim(self) -> int:
         """z_i's dimension: the own embedding, the mean of the messages
-        (only with communication on), the pooled mean (only with pooling on)
-        and the congestion scalar."""
+        (only with communication on), the pooled mean (only with pooling on),
+        the congestion scalar and the two conflict signals (only when on)."""
         message_dim = self._node_embedding_dim if self.config.communication else 0
         pooled_dim = self._node_embedding_dim if self.config.pooling == "mean" else 0
-        return self._node_embedding_dim + message_dim + pooled_dim + 1
+        signal_dim = 2 if self.config.conflict_signals.enabled else 0
+        return self._node_embedding_dim + message_dim + pooled_dim + 1 + signal_dim
+
+    def _signal_parts(
+        self, overridden_last_step: Optional[torch.Tensor], priority_rank: Optional[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        """The readout entries of the conflict signals, [B, 1] each, or none with the
+        switch off. They are given exactly when the switch is on."""
+        enabled = self.config.conflict_signals.enabled
+        if (overridden_last_step is None) != (not enabled) or (priority_rank is None) != (
+            not enabled
+        ):
+            raise ValueError(
+                "overridden_last_step and priority_rank must be given exactly when the conflict "
+                "signals are on"
+            )
+        if overridden_last_step is None or priority_rank is None:
+            return []
+        return [overridden_last_step.unsqueeze(-1), priority_rank.unsqueeze(-1)]
 
     def _embed_vertices(
         self, graph: WarehouseGraph, observation: Observation
@@ -202,7 +234,8 @@ class GNNEncoder(nn.Module):
         Observation of each agent it hears, and must stay empty with
         communication off. `pool_vertices` are the vertices of the window to
         pool over, the whole window if None, and must be None with pooling
-        off."""
+        off. With the conflict signals on, `observation` must carry them, and
+        with them off it must not."""
         if senders and not self.config.communication:
             raise ValueError("senders were given but the encoder has communication off")
         if pool_vertices is not None and self.config.pooling == "none":
@@ -232,6 +265,12 @@ class GNNEncoder(nn.Module):
         # not the policy is meant to condition on it (the "sensitivity"
         # toggle governs training/interpretation, not tensor shape).
         parts.append(torch.tensor([observation.congestion], dtype=torch.float32))
+        flag: Optional[torch.Tensor] = None
+        rank: Optional[torch.Tensor] = None
+        if isinstance(observation, ObservationWithConflictSignals):
+            flag = torch.tensor([float(observation.overridden_last_step)], dtype=torch.float32)
+            rank = torch.tensor([observation.priority_rank], dtype=torch.float32)
+        parts.extend(part.squeeze(0) for part in self._signal_parts(flag, rank))
         return torch.cat(parts, dim=-1)
 
     def embed_moves(
@@ -316,6 +355,8 @@ class GNNEncoder(nn.Module):
         sender_own_index: Optional[torch.Tensor] = None,
         sender_mask: Optional[torch.Tensor] = None,
         pool_mask: Optional[torch.Tensor] = None,
+        overridden_last_step: Optional[torch.Tensor] = None,
+        priority_rank: Optional[torch.Tensor] = None,
     ) -> EncoderOutput:
         """Batched z_i (the readout), h^(L) at every vertex and the messages,
         over padded tensors. B is the batch size, N max_local_nodes, E the
@@ -339,6 +380,10 @@ class GNNEncoder(nn.Module):
         pooling is on. The pooled term is the mean of h^(L) over the vertices
         it marks, times node_mask so that padding never counts. The senders
         get no pooled term, since a message is the sender's own embedding.
+
+        overridden_last_step [B] and priority_rank [B] are given exactly when
+        the conflict signals are on. They follow the congestion entry in the
+        readout, in that order.
         """
         sender_tensors = (
             sender_node_features,
@@ -391,7 +436,8 @@ class GNNEncoder(nn.Module):
             pooled = (node_embeddings * weight).sum(dim=1) / weight.sum(dim=1).clamp(min=1.0)
             parts.append(pooled)  # [B,D]
 
-        z = torch.cat([*parts, congestion.unsqueeze(-1)], dim=-1)
+        signals = self._signal_parts(overridden_last_step, priority_rank)
+        z = torch.cat([*parts, congestion.unsqueeze(-1), *signals], dim=-1)
         return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=messages)
 
     def forward_padded(
@@ -409,6 +455,8 @@ class GNNEncoder(nn.Module):
         sender_own_index: Optional[torch.Tensor] = None,
         sender_mask: Optional[torch.Tensor] = None,
         pool_mask: Optional[torch.Tensor] = None,
+        overridden_last_step: Optional[torch.Tensor] = None,
+        priority_rank: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Batched z_i (the readout), the `z` of `encode_padded`, which
         documents the arguments."""
@@ -426,4 +474,6 @@ class GNNEncoder(nn.Module):
             sender_own_index,
             sender_mask,
             pool_mask,
+            overridden_last_step,
+            priority_rank,
         ).z

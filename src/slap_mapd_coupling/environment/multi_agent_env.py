@@ -194,6 +194,13 @@ class WarehouseMAPDEnv:
         return MappingProxyType(self._congestion_by_agent)
 
     @property
+    def priority(self) -> tuple[AgentId, ...]:
+        """sigma, the priority permutation of this episode, highest priority first. It is
+        drawn at reset and fixed for the episode. Read-only, for the conflict signals
+        of the observation (environment/observation.py)."""
+        return self._priority
+
+    @property
     def t(self) -> int:
         """Current timestep -- exposed read-only for callers building o_i(t)
         (environment/observation.py) alongside self.fleet/self.tasks

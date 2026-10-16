@@ -20,6 +20,10 @@ owns. These are every movable vertex for the centralised router and the zone
 for the section-based router. The decentralised readout does not pool, so
 pooling with that arm raises.
 
+Conflict signals (an extension, off by default, see environment/observation.py). With
+`conflict_signals.enabled` every robot's observation also holds its own override flag
+and its rank in the priority order, for every arm alike.
+
 The credit signal (tab:trainparams, #83) has no default. "per_agent" keeps
 each robot's own reward. "team_mean" gives each robot the mean reward of its
 group, the whole fleet for the centralised arm and the robots in the same
@@ -59,7 +63,11 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
-from slap_mapd_coupling.environment.observation import local_subgraph
+from slap_mapd_coupling.environment.observation import (
+    ConflictSignals,
+    ConflictSignalsConfig,
+    local_subgraph,
+)
 from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
 from slap_mapd_coupling.environment.zones import check_partition, halo
 from slap_mapd_coupling.models.gnn_encoder import Pooling
@@ -205,6 +213,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         pooling: Pooling,
         zones: Optional[Zones] = None,
         first_seed_index: int = 0,
+        conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig(),
     ) -> None:
         check_arm(config.controller, credit_signal, pooling, zones)
         assert config.controller is not None  # check_arm rejects a planner
@@ -220,6 +229,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self._encoding_config = encoding_config
         self._credit_signal = credit_signal
         self._pooling = pooling
+        self._conflict_signals = conflict_signals
         self._d_max = max_out_degree(graph)
         self._train_seeds = tuple(train_seeds)
         # Where in the training cycle this env starts. Taken modulo the
@@ -228,7 +238,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
         base_observation_space = encoded_observation_space(
-            encoding_config, self._d_max, config.communication, pooling
+            encoding_config, self._d_max, config.communication, pooling, conflict_signals
         )
         per_agent_observation_space = masked_observation_space(
             base_observation_space, self._d_max + 1
@@ -305,6 +315,15 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             windows = {agent_id: self._arm.window[v] for agent_id, v in locations.items()}
             if self._pooling != "none":
                 pool_vertices = {agent_id: self._arm.pool[v] for agent_id, v in locations.items()}
+        # The robot's own override flag and rank in sigma, read from the core. Reset clears
+        # the flags, so the first observation of an episode says nobody was overridden.
+        signals: Optional[ConflictSignals] = None
+        if self._conflict_signals.enabled:
+            signals = ConflictSignals(
+                priority=self.core.priority,
+                overridden=self.core.last_overridden,
+                rank_encoding=self._conflict_signals.rank_encoding,
+            )
         encoded = encode_all_observations(
             self.graph,
             self.core.fleet,
@@ -316,6 +335,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             windows=windows,
             pooling=self._pooling,
             pool_vertices=pool_vertices,
+            conflict_signals=signals,
         )
         observations = {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}
         # The build is part of producing the joint action, so it counts as routing time

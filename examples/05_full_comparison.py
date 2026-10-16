@@ -141,6 +141,10 @@ def sweep(
                 seeds[0], arm_name, rates[0], horizon, communication  # type: ignore[arg-type]
             )
             arm = example_04.build_arm(instance, arm_name, policy_config.observation_depth)
+            # The switch is the module's own, so a checkpoint trained with it needs no label.
+            conflict_signals = example_04.conflict_signals_of(module)
+            if conflict_signals.enabled:
+                print(f"{label}: conflict signals on ({conflict_signals.rank_encoding} rank)")
             for rate in rates:
                 for seed in seeds:
                     config = example_04.evaluation_config(
@@ -156,6 +160,7 @@ def sweep(
                         encoding_config=arm.encoding,
                         zones=arm.zones,
                         pooling=arm.pooling,
+                        conflict_signals=conflict_signals,
                     )
                     record(row_of(label, "controller", rate, seed, horizon, metrics))
                 print(f"checkpoint {label} at {rate}: {len(seeds)} seeds", flush=True)

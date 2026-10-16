@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Conflict signals, an extension the thesis does not contain, off by default
+  (`ConflictSignalsConfig` in `environment/observation.py`, stored as
+  `GNNEncoderConfig.conflict_signals`, `--conflict-signals` in example 04). With it on,
+  every robot of every arm also observes whether conflict resolution overrode its move
+  at the step that just ended and its own rank in the priority order sigma. The
+  readout grows by two entries after the congestion feature. The rank encoding
+  (`rank / (m - 1)` by default) is illustrative. Examples 04b and 05 read the switch
+  from the checkpoint.
 - `PPOHyperparameters.training_budget_env_steps`, with no default, since the thesis counts
   the training budget in environment steps and leaves its value TBD.
 - `tensorboard` in the dev extras.

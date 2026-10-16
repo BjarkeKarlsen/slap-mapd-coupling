@@ -54,6 +54,8 @@ class _GNNSharedEncoder(nn.Module):
         communication = self.gnn.config.communication
         sender_blocks = {key: obs[key] for key in SENDER_KEYS} if communication else {}
         pooling = self.gnn.config.pooling != "none"
+        # the two conflict signal keys are in the observation exactly when the switch is on
+        signals = self.gnn.config.conflict_signals.enabled
         out = self.gnn.encode_padded(
             obs["node_features"],
             obs["node_mask"],
@@ -63,6 +65,8 @@ class _GNNSharedEncoder(nn.Module):
             obs["congestion"],
             **sender_blocks,
             pool_mask=obs["pool_mask"] if pooling else None,
+            overridden_last_step=obs["overridden_last_step"] if signals else None,
+            priority_rank=obs["priority_rank"] if signals else None,
         )
         actor: Dict[str, Any] = {
             "z": out.z,

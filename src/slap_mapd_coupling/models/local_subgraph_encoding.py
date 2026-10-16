@@ -31,6 +31,12 @@ names the sender standing on that vertex, if the receiver hears it. With
 communication off the sender keys are absent. `encode_all_observations`
 builds the sample of every robot for one timestep.
 
+With the conflict signals on (environment/observation.py, an extension the
+thesis does not contain), the observation holds two more scalars next to
+`congestion`, `overridden_last_step` and `priority_rank`. They are absent with
+the switch off. Senders carry neither, since a message is the sender's own
+embedding.
+
 With pooling on, the sample also carries `pool_mask`, which marks the
 vertices of the robot's own view that the readout pools over. It is 0.0
 for the halo and for padding. Senders need none, since a message is the
@@ -53,7 +59,10 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
 from slap_mapd_coupling.environment.action_masking import to_action_mask
 from slap_mapd_coupling.environment.observation import (
+    ConflictSignals,
+    ConflictSignalsConfig,
     Observation,
+    ObservationWithConflictSignals,
     build_observation,
     communication_neighbours,
     local_subgraph,
@@ -184,6 +193,8 @@ class EncodedObservation:
     move_sender_index: Optional[np.ndarray] = None  # [d_max] int64, sender standing on slot k
     move_sender_mask: Optional[np.ndarray] = None  # [d_max], 1.0 if that sender is heard
     pool_mask: Optional[np.ndarray] = None  # [max_local_nodes], 1.0 pool / 0.0 halo or pad
+    overridden_last_step: Optional[float] = None  # {0.0, 1.0}, only with the conflict signals on
+    priority_rank: Optional[float] = None  # the encoded rank in sigma, only with them on
 
     def as_rllib_dict(self) -> dict[str, Any]:
         """{"action_mask": ..., "observations": {...}}, the Dict shape that
@@ -210,6 +221,10 @@ class EncodedObservation:
             )
         if self.pool_mask is not None:
             observations["pool_mask"] = self.pool_mask
+        if self.overridden_last_step is not None:
+            observations["overridden_last_step"] = np.float32(self.overridden_last_step)
+        if self.priority_rank is not None:
+            observations["priority_rank"] = np.float32(self.priority_rank)
         return {"action_mask": self.action_mask, "observations": observations}
 
 
@@ -223,11 +238,13 @@ def encoded_observation_space(
     d_max: int,
     communication: bool,
     pooling: Pooling = "none",
+    conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig(),
 ) -> gym.spaces.Dict:
     """The "observations" half of masked_observation_space() for one agent.
     `d_max` is max_out_degree(graph), which sets the edge list's size and
     the length of the move slot arrays. The sender keys are present only
-    with `communication` on, and pool_mask only with `pooling` on."""
+    with `communication` on, pool_mask only with `pooling` on, and the two
+    conflict signal keys only with `conflict_signals.enabled`."""
     check_communication_caps(config, communication)
     _check_cap_fits(config, d_max)
     num_nodes = config.max_local_nodes
@@ -270,6 +287,14 @@ def encoded_observation_space(
     if pooling != "none":
         spaces["pool_mask"] = gym.spaces.Box(
             low=0.0, high=1.0, shape=(num_nodes,), dtype=np.float32
+        )
+    if conflict_signals.enabled:
+        spaces["overridden_last_step"] = gym.spaces.Box(
+            low=0.0, high=1.0, shape=(), dtype=np.float32
+        )
+        rank_high = 1.0 if conflict_signals.rank_encoding == "normalised" else np.inf
+        spaces["priority_rank"] = gym.spaces.Box(
+            low=0.0, high=rank_high, shape=(), dtype=np.float32
         )
     return gym.spaces.Dict(spaces)
 
@@ -420,6 +445,11 @@ def _assemble(
     config: LocalSubgraphEncodingConfig,
     pool_mask: Optional[np.ndarray] = None,
 ) -> EncodedObservation:
+    overridden_last_step: Optional[float] = None
+    priority_rank: Optional[float] = None
+    if isinstance(observation, ObservationWithConflictSignals):
+        overridden_last_step = float(observation.overridden_last_step)
+        priority_rank = observation.priority_rank
     senders: dict[str, np.ndarray] = {}
     if sender_views is not None:
         senders = _pad_senders(sender_views, config.max_messages, view)
@@ -434,6 +464,8 @@ def _assemble(
         action_mask=to_action_mask(mask),
         move_target_index=view.move_target_index,
         pool_mask=pool_mask,
+        overridden_last_step=overridden_last_step,
+        priority_rank=priority_rank,
         **senders,
     )
 
@@ -468,6 +500,7 @@ def encode_all_observations(
     windows: Optional[Mapping[AgentId, Sequence[VertexId]]] = None,
     pooling: Pooling = "none",
     pool_vertices: Optional[Mapping[AgentId, Collection[VertexId]]] = None,
+    conflict_signals: Optional[ConflictSignals] = None,
 ) -> dict[AgentId, EncodedObservation]:
     """The EncodedObservation of every robot at timestep t, keyed by agent
     id in ascending order. `d_max` is max_out_degree(graph). `windows`
@@ -478,6 +511,9 @@ def encode_all_observations(
     every robot to the vertices of its window it pools over, its zone for
     the section-based router. None means the whole window. It must be None
     with pooling off.
+
+    `conflict_signals` None leaves the two conflict signals out of every
+    sample. Otherwise every sample carries them (environment/observation.py).
 
     Each robot's view is encoded once and reused as a sender block by every
     robot that hears it. With experiment_config.communication on, a robot
@@ -512,6 +548,7 @@ def encode_all_observations(
             t,
             experiment_config,
             window=None if windows is None else windows[agent_id],
+            conflict_signals=conflict_signals,
         )
         for agent_id in agent_ids
     }

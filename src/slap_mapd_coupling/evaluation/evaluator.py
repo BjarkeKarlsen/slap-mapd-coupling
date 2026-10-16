@@ -18,6 +18,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
+from slap_mapd_coupling.environment.observation import ConflictSignalsConfig
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
 from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter
 from slap_mapd_coupling.planners import get_planner
@@ -42,6 +43,7 @@ def run_episode(
     encoding_config: LocalSubgraphEncodingConfig | None = None,
     zones: Sequence[frozenset[VertexId]] | None = None,
     pooling: Pooling | None = None,
+    conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig(),
 ) -> RunMetrics:
     """Run one full episode (config.horizon timesteps) and reduce it to
     one RunMetrics row.
@@ -55,12 +57,14 @@ def run_episode(
     raises ValueError. `zones` is needed for the section arm only. The episode
     runs through the adapter that trains the arm (training/env.py), built with
     the one evaluation seed `config.seed` and reset with it, so the policy sees
-    the observations it saw in training. `encoding_config` and `pooling` must be
-    those the module was trained with. The adapter requires a credit signal, and
-    the loop never reads the rewards, so "per_agent" is passed because every arm
-    accepts it. The policy is reset with the episode seed, so its sampling replays
-    bit for bit. The policy samples a legal slot with a seeded stream per robot,
-    and whether evaluation should take the most likely slot instead is still open.
+    the observations it saw in training. `encoding_config`, `pooling` and
+    `conflict_signals` must be those the module was trained with, and the last
+    is the module's own `gnn_encoder_config["conflict_signals"]`. The adapter
+    requires a credit signal, and the loop never reads the rewards, so "per_agent"
+    is passed because every arm accepts it. The policy is reset with the episode
+    seed, so its sampling replays bit for bit. The policy samples a legal slot
+    with a seeded stream per robot, and whether evaluation should take the most
+    likely slot instead is still open.
 
     With `trace_path` the episode also writes a per-step trace there
     (evaluation/trace.py). The writer only reads the environment, so the
@@ -81,6 +85,7 @@ def run_episode(
             encoding_config,
             zones,
             pooling,
+            conflict_signals,
         )
 
     if trace_path is None:
@@ -123,6 +128,7 @@ def _controller_run(
     encoding_config: LocalSubgraphEncodingConfig | None,
     zones: Sequence[frozenset[VertexId]] | None,
     pooling: Pooling | None,
+    conflict_signals: ConflictSignalsConfig,
 ) -> tuple[WarehouseMAPDEnv, Callable[[], None]]:
     """The simulator core of a learned arm, reset for the episode, and a function
     that advances it one step through the adapter and the policy."""
@@ -144,6 +150,7 @@ def _controller_run(
         credit_signal="per_agent",
         pooling=pooling,
         zones=zones,
+        conflict_signals=conflict_signals,
     )
     observations: dict[str, Any]
     observations, _ = adapter.reset(seed=config.seed)

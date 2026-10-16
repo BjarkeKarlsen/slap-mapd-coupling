@@ -149,7 +149,9 @@ def build_ppo_config(
 
     The adapter gets the credit signal from `ppo_hyperparameters`, the
     pooling from `gnn_encoder_config` and `zones` (the section arm only), so
-    the module and the observations always agree on pooling. Every setting
+    the module and the observations always agree on pooling. The conflict
+    signals work the same way, `gnn_encoder_config.conflict_signals` gives the
+    adapter its switch and the module its two extra readout entries. Every setting
     the adapter would reject raises here, before Ray starts, including
     pooling with the decentralised arm, team_mean with the decentralised arm,
     and a window above max_local_nodes.
@@ -216,6 +218,7 @@ def build_ppo_config(
             credit_signal=credit_signal,
             pooling=pooling,
             zones=zones,
+            conflict_signals=gnn_encoder_config.conflict_signals,
             # RLlib passes an EnvContext. A plain dict (no runner) starts at 0.
             first_seed_index=first_seed_index(
                 getattr(env_context, "worker_index", 0),

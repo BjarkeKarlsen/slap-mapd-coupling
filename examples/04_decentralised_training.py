@@ -56,6 +56,17 @@ as a separate condition next to the run without it, never in place of it, and pa
 them.
 Messages are learned, so they need training to carry information.
 
+Conflict signals. --conflict-signals gives every robot two scalars about itself, whether conflict
+resolution overrode its move at the step that just ended and its own rank in the priority order
+that conflict resolution uses. It exists because a policy that sees only the current observation
+meets the same head-on swap again after both robots were overridden to wait, and a greedy policy
+then repeats the same choice. The thesis does not contain this signal, so it is off by default
+and the thesis' observation is what runs without it. The three arms get it identically, and only
+the window differs. --priority-rank-encoding picks how the rank enters, "normalised" (rank over
+m minus 1, in 0 to 1) or "raw". Both are illustrative, since the thesis leaves them open. The
+switch is stored in the module's encoder config, so a checkpoint carries it and 04b and 05 read it
+from the loaded module, with no flag to repeat.
+
 Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results, with the checkpoint, under ~/ray_results.
@@ -78,7 +89,7 @@ from slap_mapd_coupling.core.experiment_config import (
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
-from slap_mapd_coupling.environment.observation import local_subgraph
+from slap_mapd_coupling.environment.observation import ConflictSignalsConfig, local_subgraph
 from slap_mapd_coupling.environment.zones import halo, zones_by_aisle
 from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.evaluation.trace import (
@@ -303,13 +314,26 @@ def build_arm(
     )
 
 
-def build_gnn_config(config: ExperimentConfig, arm: Arm) -> GNNEncoderConfig:
+def build_gnn_config(
+    config: ExperimentConfig,
+    arm: Arm,
+    conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig(),
+) -> GNNEncoderConfig:
     return GNNEncoderConfig(
         num_rounds=2,
         hidden_width=32,
         communication=config.communication,
         pooling=arm.pooling,
+        conflict_signals=conflict_signals,
     )
+
+
+def conflict_signals_of(module) -> ConflictSignalsConfig:
+    """The conflict signal switch a module was trained with, read from its own encoder config.
+    A checkpoint from before the switch has no entry, which means off. An evaluation must run
+    with this, since the module's readout has two more entries when it is on."""
+    encoder_config = module.model_config["gnn_encoder_config"]
+    return ConflictSignalsConfig(**encoder_config.get("conflict_signals", {}))
 
 
 class ProgressLog(tune.Callback):
@@ -348,6 +372,7 @@ def train(
     num_env_runners: int = 0,
     use_gpu: bool = False,
     progress_path: Path | None = None,
+    conflict_signals: ConflictSignalsConfig = ConflictSignalsConfig(),
 ) -> TrainingRun:
     """Trains with Ray Tune, stops at the first iteration at or above the training
     budget, and returns Ray's default checkpoint of the end of the run."""
@@ -358,7 +383,7 @@ def train(
         capacities,
         config,
         arm.encoding,
-        build_gnn_config(config, arm),
+        build_gnn_config(config, arm, conflict_signals),
         PolicyValueHeadConfig(hidden_width=32),
         hyperparameters,
         seed_split,
@@ -435,7 +460,8 @@ def evaluate(
     """Runs `module` for one episode per evaluation seed through the evaluator, so
     the observations are the ones it saw in training. The seeds are the evaluation half
     of split_seeds, disjoint from the training seeds. Each episode writes a trace, and
-    the vertex rule and the swap rule are checked on it."""
+    the vertex rule and the swap rule are checked on it. The conflict signal switch is the
+    module's own (conflict_signals_of), so the observations are the ones it trained on."""
     print(f"\n=== Evaluating the trained policy over {len(eval_seeds)} evaluation seeds ===")
     policy = ModulePolicy(module)
     summaries = []
@@ -453,6 +479,7 @@ def evaluate(
             encoding_config=arm.encoding,
             zones=arm.zones,
             pooling=arm.pooling,
+            conflict_signals=conflict_signals_of(module),
         )
         header, steps = load_trace(trace_path)
         assert trace_is_collision_free(steps, header["initial"]), "collision during evaluation"
@@ -508,6 +535,20 @@ def parse_args(
         "only. Run it as a separate condition, and pass the same flag to "
         "04b_evaluate_checkpoint.py",
     )
+    # Illustrative. An extension the thesis does not contain, off by default. All arms take it.
+    parser.add_argument(
+        "--conflict-signals",
+        action="store_true",
+        help="give every robot its own override flag and its priority rank (not in the thesis, "
+        "off by default). 04b and 05 read the switch from the checkpoint",
+    )
+    parser.add_argument(
+        "--priority-rank-encoding",
+        choices=["normalised", "raw"],
+        default="normalised",
+        help="how the rank enters with --conflict-signals, rank / (m - 1) in [0, 1] or the raw "
+        "rank (illustrative, the thesis leaves it open)",
+    )
     args = parser.parse_args(argv)
     if args.communication and controller != "decentralised":
         parser.error("--communication only applies to the decentralised controller")
@@ -537,11 +578,15 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         communication=args.communication,
     )
     arm = build_arm(instance, controller, config.observation_depth)
+    conflict_signals = ConflictSignalsConfig(
+        enabled=args.conflict_signals, rank_encoding=args.priority_rank_encoding
+    )
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
         f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}, "
-        f"horizon={config.horizon}, communication={config.communication}"
+        f"horizon={config.horizon}, communication={config.communication}, "
+        f"conflict_signals={conflict_signals.enabled}"
     )
 
     seed_split = build_seed_split(config.seed, args.eval_seeds)
@@ -558,6 +603,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         num_env_runners=args.env_runners,
         use_gpu=args.gpu,
         progress_path=OUTPUT_DIR / f"{controller}_training_progress.jsonl",
+        conflict_signals=conflict_signals,
     )
     print(f"\nCheckpoint saved to {run.checkpoint}")
     overshoot = run.env_steps_sampled - args.budget_env_steps

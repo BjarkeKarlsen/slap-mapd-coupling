@@ -147,9 +147,12 @@ class GNNPolicyValueModel(nn.Module):
         congestion: torch.Tensor,
         move_target_index: torch.Tensor,
         pool_mask: Optional[torch.Tensor] = None,
+        overridden_last_step: Optional[torch.Tensor] = None,
+        priority_rank: Optional[torch.Tensor] = None,
         **sender_blocks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """`pool_mask` is given exactly when pooling is on. `sender_blocks`
+        """`pool_mask` is given exactly when pooling is on, and the two conflict
+        signals exactly when they are on. `sender_blocks`
         are the GNNEncoder.forward_padded sender tensors and
         MOVE_SENDER_KEYS, given exactly when communication is on."""
         move_sender = {
@@ -164,6 +167,8 @@ class GNNPolicyValueModel(nn.Module):
             congestion,
             **sender_blocks,
             pool_mask=pool_mask,
+            overridden_last_step=overridden_last_step,
+            priority_rank=priority_rank,
         )
         logits, value = self.head(
             out.z, out.node_embeddings, move_target_index, out.messages, **move_sender

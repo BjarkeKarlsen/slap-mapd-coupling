@@ -17,6 +17,10 @@ separate condition. The module is checked against the flag before the episodes r
 checkpoint trained with messages cannot run without them, and one trained without them would
 ignore them silently.
 
+A checkpoint trained with --conflict-signals needs no flag here. The switch and the rank
+encoding are read from the module's own encoder config, so the episodes run with the observations
+it trained on.
+
 The instance, storage, configuration, caps and pooling are 04's, imported from it,
 because the module was built against that graph's action and observation spaces.
 A checkpoint trained against another instance or another arm loads without an error
@@ -111,6 +115,7 @@ def render_episode(
         credit_signal=example_04.CREDIT_SIGNAL,
         pooling=arm.pooling,
         zones=arm.zones,
+        conflict_signals=example_04.conflict_signals_of(module),
     )
     observations, _ = adapter.reset(seed=config.seed)
     policy = ModulePolicy(module)
