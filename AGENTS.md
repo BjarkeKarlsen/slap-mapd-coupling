@@ -108,6 +108,10 @@ Everything else (`core/`, `instances/`, `resolution/`, `environment/`,
   at a time, and replay is bit-for-bit deterministic under a fixed seed.
   Treat a failure in any of these as a correctness bug, not a metric to
   tune around.
+- RLlib's new API stack only: `RLModule`, `Learner`, `ConnectorV2`, `EnvRunner`,
+  `MultiAgentEpisode`. No `Policy`, `ModelV2`/`TorchModelV2`, `SampleBatch`
+  postprocessing, `postprocess_trajectory`, `RolloutWorker`, or
+  `enable_rl_module_and_learner=False`.
 - `examples/NN_name.py` files are numbered by build milestone
   (`docs/implementation_phases.md`), not by topic. Keep new examples in
   that sequence rather than renaming or reordering existing ones.

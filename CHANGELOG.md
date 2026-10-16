@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Real centralised and section-based controllers. A timestep is split into turns. The centralised
+  arm chooses one robot at a time in priority order and the section arm runs its zones in parallel,
+  each robot seeing the earlier choices of its unit (the claim feature and the claim mask), so
+  conflict resolution never overrides a centralised robot. Credit follows the robots that choose
+  together, so `credit_signal` is gone. `configs/full_view.yaml` is the new full-view setting. The
+  training budget counts one environment step per timestep, an episode is one sampling call
+  (`complete_episodes`), and the training env draws its seeds from the cycle (`seed_from_cycle`).
+  Evaluation steps through the turns. RLlib's new API stack only is now a convention in `AGENTS.md`,
+  and `docs/model_integration.md` no longer points at `TorchModelV2`. `docs/MODELS.md` is written.
 - `training/trainer.py` is real. `train` runs a `PPOConfig` under Ray Tune with periodic
   checkpoints, keeps the best ones by `episode_return_mean` and returns the final and
   the best checkpoint (`TrainingRun`). `load_module`, `ProgressLog` and `CheckpointSettings` live

@@ -1,8 +1,9 @@
 # Training and evaluating a learned arm
 
-The three learned arms (centralised, section-based, decentralised) train through one
-RLlib adapter, `training/env.py::WarehouseMAPDMultiAgentEnv`, with one agent per robot
-and one shared policy. `examples/04_decentralised_training.py` is the worked example,
+The three learned arms (centralised, section-based, decentralised) and the full-view
+setting train through one RLlib adapter, `training/env.py::WarehouseMAPDMultiAgentEnv`,
+with one agent per robot and one shared policy. A timestep is one or more turns, and each
+robot's choice is one training sample. `examples/04_decentralised_training.py` is the worked example,
 and `02_centralised_fixed.py` and `03_section_based.py` are its variants.
 
 ## Configuring a run
@@ -15,9 +16,10 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
   robot with the mean reward of the fleet, the section arm with the mean reward of the robots
   in its zone, and the decentralised arm and the full-view setting with its own reward.
 - The training budget, `PPOHyperparameters.training_budget_env_steps`, has no default.
-  It is counted in environment steps and is equal across arms. It is set in the YAML file.
+  One environment step is one timestep, however many robots choose within it, and the budget
+  is equal across arms. It is set in the YAML file.
 - `GNNEncoderConfig.pooling` has no default. Use `"mean"` for the centralised and
-  section arms and `"none"` for the decentralised arm.
+  section arms and the full-view setting, and `"none"` for the decentralised arm.
 - `LocalSubgraphEncodingConfig.max_local_nodes` must be at least the largest window the
   arm uses, because a window is never truncated. That is every movable vertex for the
   centralised arm, the largest field of view for the decentralised arm, and the largest
@@ -28,10 +30,11 @@ encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 ## Running it
 
 `training/trainer.py::train` runs a finished `PPOConfig` with Ray Tune. It stops at the first
-iteration whose sampled environment steps reach the budget, so a run overshoots by up to one
-iteration's samples. `build_ppo_config` sets the rollout length and the train batch from the
-horizon, so an iteration samples one episode per runner, `num_env_runners * horizon` steps
-(`horizon` steps with no env runner). The trainer holds no graph. The caller builds the config.
+iteration whose sampled timesteps reach the budget, so a run overshoots by up to one
+iteration's timesteps. `build_ppo_config` samples complete episodes and sets the train batch
+from the horizon, so an iteration is one episode per runner, `num_env_runners * horizon`
+timesteps (`horizon` with no env runner). The training env draws its seeds from the training
+cycle, whatever seed RLlib passes to `reset`. The trainer holds no graph. The caller builds the config.
 
 ```python
 from slap_mapd_coupling.training.trainer import CheckpointSettings, train
@@ -72,8 +75,8 @@ with `04b_evaluate_checkpoint.py` before trusting it.
 
 One YAML file describes a run: the instance, storage, experiment settings, model sizes, the PPO
 hyperparameters, the budget and the checkpointing. `configs/decentralised.yaml`, `centralised.yaml` and `section.yaml` are the files of examples 04, 02
-and 03. They differ only in `controller`, and their values are illustrative because the thesis
-leaves them TBD. Edit all three to change a value for every arm.
+and 03, and `full_view.yaml` is the full-view setting. They differ only in `controller`, and their
+values are illustrative because the thesis leaves them TBD. Edit all four to change a value for every arm.
 `training/spec.py` loads it and builds everything `train` needs.
 
 ```bash

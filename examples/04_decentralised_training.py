@@ -6,7 +6,9 @@ saves Ray's default checkpoint, loads the module back from it and runs it for
 one episode per evaluation seed through the evaluator, with a trace per
 episode. This file trains the decentralised arm. 02_centralised_fixed.py and
 03_section_based.py are thin variants of it for the other two arms, and
-04b_evaluate_checkpoint.py evaluates a saved checkpoint without retraining.
+04b_evaluate_checkpoint.py evaluates a saved checkpoint without retraining. The
+full-view setting, which is not one of the three arms, trains with
+`slap-mapd train --config configs/full_view.yaml`.
 
 Values that are illustrative, not the thesis's (tab:trainparams and
 tab:modelparams leave them TBD, or this script has no reason to fix them):
@@ -39,11 +41,11 @@ a rate below capacity. The value is illustrative, since the thesis leaves the lo
 
 Episode length. --horizon sets the number of steps of an episode, the horizon T, for training
 and for evaluation alike, so both use one value. The thesis leaves the evaluation horizon T
-open, so the default of 630 is illustrative. The horizon is also the rollout length of PPO
-and the train batch is one episode per runner, so one sampling call of a runner is exactly one
-episode and every iteration ends one episode per runner, whatever the number of runners. An
-iteration samples num_env_runners * horizon steps (horizon steps with no env runner), so with 7
-runners the default of 630 samples 4410 steps per iteration. A checkpoint can be evaluated at
+open, so the default of 630 is illustrative. A sampling call of a runner is one complete
+episode, and every iteration ends one episode per runner, whatever the number of runners. The
+budget counts timesteps, one per timestep however many robots choose within it, so an
+iteration is num_env_runners * horizon timesteps (horizon with no env runner), and with 7
+runners the default of 630 is 4410 timesteps per iteration. A checkpoint can be evaluated at
 another length by passing --horizon to 04b_evaluate_checkpoint.py.
 
 Communication. --communication switches on the thesis' local communication (an agent hears every
