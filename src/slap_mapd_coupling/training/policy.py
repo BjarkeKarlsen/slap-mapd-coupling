@@ -26,10 +26,11 @@ _ACTION_SAMPLING_SEED_OFFSET = 2_000_000_011
 class ModulePolicy:
     """pi_theta as a function from the adapter's observations to slots.
 
-    One module call per step for all robots, because a message is the
-    sender's embedding and the receiver needs it in the same timestep (the
-    message of sec:method:model). Execution stays decentralised, since each
-    robot's row holds only its own window and the messages it hears.
+    One module call per turn, for the robots that choose in that turn. The
+    decentralised arm has one turn, so all robots go through together, which a
+    message needs because it is the sender's embedding in the same timestep (the
+    message of sec:method:model). The centralised and section arms call once per
+    turn, and each robot's row holds its own window and the earlier choices.
 
     A slot is sampled from the action mask's categorical distribution over the
     legal slots only, the softmax of the raw logits with illegal slots zeroed
@@ -43,7 +44,7 @@ class ModulePolicy:
     episode seed comes from `reset`, which must be called before the first
     call of an episode. Otherwise `__call__` raises.
 
-    With `record_runtime` given to `reset`, every call records its time, the
+    With `record_runtime` given to `reset`, every call (one per turn) records its time, the
     batch building, the forward pass and the sampling, through that function,
     which is the routing runtime of the episode log.
     """
@@ -62,8 +63,8 @@ class ModulePolicy:
         self._record_runtime = record_runtime
 
     def __call__(self, observations: Mapping[str, Mapping[str, Any]], t: int) -> dict[str, int]:
-        """One legal slot for every robot in `observations`, keyed like it.
-        The observations are what the adapter returns, one per robot id."""
+        """One legal slot for every robot in `observations`, keyed like it. The
+        observations are what the adapter returns for one turn, any subset of the robots."""
         if self._episode_seed is None:
             raise RuntimeError("ModulePolicy was called before reset(episode_seed).")
         start = time.perf_counter()

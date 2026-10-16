@@ -123,7 +123,8 @@ def _controller_run(
     pooling: Pooling | None,
 ) -> tuple[WarehouseMAPDEnv, Callable[[], None]]:
     """The simulator core of a learned arm, reset for the episode, and a function
-    that advances it one step through the adapter and the policy."""
+    that advances it one timestep through the adapter and the policy. A timestep is
+    one or more turns, so the function steps the adapter until it has run the core."""
     if policy is None or encoding_config is None or pooling is None:
         raise ValueError(
             "a controller config needs policy, encoding_config and pooling, the ones the "
@@ -149,7 +150,10 @@ def _controller_run(
 
     def step() -> None:
         nonlocal observations
-        observations = adapter.step(policy(observations, adapter.core.t))[0]
+        while True:
+            observations = adapter.step(policy(observations, adapter.core.t))[0]
+            if adapter.timestep_completed:
+                return
 
     return adapter.core, step
 

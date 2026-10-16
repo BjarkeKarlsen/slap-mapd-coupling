@@ -21,13 +21,18 @@ from slap_mapd_coupling.training import policy as policy_module
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 from slap_mapd_coupling.training.policy import ModulePolicy
 
-_POOLING = {"decentralised": "none", "centralised": "mean", "section": "mean"}
+_POOLING = {
+    "decentralised": "none",
+    "centralised": "mean",
+    "section": "mean",
+    "full_view": "mean",
+}
 ARMS = list(_POOLING)
 
 # The largest field of view of the instance at d_obs = 3 has 20 vertices, and the instance has 30
 # movable vertices, the centralised window and the largest section window. A window is never
 # truncated, so the cap must fit it.
-_CAP = {"decentralised": 20, "centralised": 30, "section": 30}
+_CAP = {"decentralised": 20, "centralised": 30, "section": 30, "full_view": 30}
 
 
 def _instance():
@@ -138,6 +143,17 @@ class _Arm:
             zones=self.zones,
             pooling=self.pooling,
         )
+
+
+def _play_timestep(env, policy, observations):
+    """One timestep through the adapter, one policy call per turn. Returns the observations
+    for the next timestep and the number of turns it took."""
+    turns = 0
+    while True:
+        observations = env.step(policy(observations, env.core.t))[0]
+        turns += 1
+        if env.timestep_completed:
+            return observations, turns
 
 
 class _CountingModule:
@@ -351,7 +367,7 @@ def test_a_learned_episode_through_the_adapter_respects_the_correctness_invarian
     before = env.core.fleet
 
     for t in range(arm.config.horizon):
-        observations = env.step(policy(observations, t))[0]
+        observations, _ = _play_timestep(env, policy, observations)
         now = t + 1
         assert is_collision_free(before, env.core.fleet), f"collision at t={t}"
         assert is_feasible(env.core.storage), f"infeasible storage at t={t}"
@@ -377,12 +393,18 @@ def test_the_routing_runtime_covers_every_decision_once_the_observation_build_an
     observations, _ = env.reset(seed=arm.config.seed)
     policy.reset(arm.config.seed, record_runtime=env.core.log.record_routing_runtime)
 
+    turns = 0
     for _ in range(arm.config.horizon):
-        observations = env.step(policy(observations, env.core.t))[0]
+        observations, taken = _play_timestep(env, policy, observations)
+        turns += taken
 
-    # Per timestep, one observation build and one policy call. The observation after the
+    # Per turn, one observation build and one policy call. The observation after the
     # last step feeds no decision, so it is not recorded.
-    assert len(env.core.log.routing_runtime_seconds) == 2 * arm.config.horizon
+    assert env.core.t == arm.config.horizon
+    assert len(env.core.log.routing_runtime_seconds) == 2 * turns
+    assert turns >= arm.config.horizon
+    if controller == "centralised":
+        assert turns == arm.config.num_agents * arm.config.horizon
 
 
 @pytest.mark.parametrize("controller", ARMS)
@@ -405,6 +427,30 @@ def test_run_episode_with_an_untrained_module(controller, tmp_path):
     second = arm.run_episode(module)
     exclude = {"mean_decision_runtime_seconds"}  # wall-clock time is not part of replay
     assert first.model_dump(exclude=exclude) == second.model_dump(exclude=exclude)
+
+
+@pytest.mark.parametrize("controller", ARMS)
+def test_an_evaluation_runs_every_timestep_and_each_run_episode_step_is_one_timestep(
+    controller, tmp_path
+):
+    arm = _Arm(controller, horizon=10)
+    path = tmp_path / "episode.jsonl"
+    metrics = arm.run_episode(arm.module(), path)
+
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert metrics.horizon == 10
+    assert [line["t"] for line in lines[1:]] == list(range(1, 11))
+
+
+def test_a_centralised_evaluation_never_overrides():
+    arm = _Arm("centralised", horizon=30)
+    env = arm.adapter()
+    policy = ModulePolicy(arm.module())
+    observations, _ = env.reset(seed=arm.config.seed)
+    policy.reset(arm.config.seed)
+    for _ in range(arm.config.horizon):
+        observations, _ = _play_timestep(env, policy, observations)
+        assert not env.core.last_overridden
 
 
 def _assert_no_conflicts_in_the_trace(lines):
