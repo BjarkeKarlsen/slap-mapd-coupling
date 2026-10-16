@@ -301,9 +301,7 @@ def test_the_callbacks_check_and_log_every_arm_through_the_core(controller):
     rng = np.random.default_rng(0)
     truncated = {"__all__": False}
     while not truncated["__all__"]:
-        actions = {
-            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
-        }
+        actions = {aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in obs}
         obs, _, _, truncated, _ = env.step(actions)
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
     callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)
@@ -328,6 +326,7 @@ def test_the_callbacks_raise_on_a_vertex_conflict_in_the_core(controller):
     locations = env.core.fleet.locations()
     shared = locations[1]
     env.core.fleet = _fleet({aid: shared for aid in locations})  # every robot on one vertex
+    env.timestep_completed = True  # as after the last turn of a timestep
     with pytest.raises(RuntimeError, match="vertex rule"):
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
 
@@ -343,9 +342,7 @@ def test_on_episode_end_logs_the_terms_that_add_up_to_the_episode_return(control
     truncated = {"__all__": False}
     episode_return = 0.0
     while not truncated["__all__"]:
-        actions = {
-            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
-        }
+        actions = {aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in obs}
         obs, rewards, _, truncated, _ = env.step(actions)
         episode_return += sum(rewards.values())
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
@@ -416,9 +413,7 @@ def test_a_sample_logs_the_snapshot_keys_and_no_rates_over_the_fragment():
     callbacks = TrainingProgressCallbacks()
     rng = np.random.default_rng(0)
     for _ in range(5):
-        actions = {
-            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
-        }
+        actions = {aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in obs}
         obs, *_ = env.step(actions)
         callbacks.on_episode_step(episode=None, env=vector, env_index=0)
     callbacks.on_sample_end(env_runner=_Runner(vector), metrics_logger=logger)

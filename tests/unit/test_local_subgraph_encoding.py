@@ -741,3 +741,51 @@ def test_pooling_leaves_every_other_array_unchanged():
 def test_bad_pool_vertices_are_rejected(pooling, pool_vertices, match):
     with pytest.raises(ValueError, match=match):
         _encode_windows(_WINDOWS["zone plus halo"], pooling=pooling, pool_vertices=pool_vertices)
+
+
+def _encode_turn(fleet, acting=None, chosen=None, communication=False, **config_overrides):
+    graph = _line_graph(6)
+    config = _config(observation_depth=3, communication=communication, **config_overrides)
+    return encode_all_observations(
+        graph,
+        fleet,
+        [],
+        0,
+        config,
+        LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1),
+        max_out_degree(graph),
+        acting=acting,
+        chosen=chosen,
+    )
+
+
+def test_only_the_acting_robots_are_encoded():
+    fleet = _fleet({1: 0, 2: 2, 3: 5})
+    assert set(_encode_turn(fleet, acting=[3, 1])) == {1, 3}
+    assert set(_encode_turn(fleet)) == {1, 2, 3}
+
+
+def test_chosen_vertices_become_claims_and_close_those_moves():
+    fleet = _fleet({1: 0, 2: 2})
+    # robot 2 chose vertex 1, the only vertex robot 1 can move to
+    encoded = _encode_turn(fleet, acting=[1], chosen={1: {2: 1}})[1]
+    observation = build_observation(
+        _line_graph(6), fleet, [], agent_id=1, t=0, config=_config(observation_depth=3)
+    )
+    index = {v: i for i, v in enumerate(observation.visible_vertices)}
+    assert encoded.node_features[index[1], -1] == 1.0
+    assert encoded.node_features[index[0], -1] == 0.0
+    assert encoded.action_mask.tolist()[:2] == [1.0, 0.0]  # wait stays, the move to 1 is closed
+
+
+def test_a_robot_without_an_entry_in_chosen_has_no_claims():
+    fleet = _fleet({1: 0, 2: 1})
+    encoded = _encode_turn(fleet, chosen={})
+    assert encoded[1].action_mask.tolist()[1] == 1.0  # robot 2 stands on vertex 1, still open
+    assert not encoded[1].node_features[:, -1].any()
+
+
+def test_communication_needs_every_robot_to_act():
+    fleet = _fleet({1: 0, 2: 1})
+    with pytest.raises(ValueError, match="communication"):
+        _encode_turn(fleet, acting=[1], communication=True)

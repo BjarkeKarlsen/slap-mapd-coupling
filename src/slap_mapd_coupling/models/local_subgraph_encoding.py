@@ -58,7 +58,7 @@ from slap_mapd_coupling.environment.observation import (
     communication_neighbours,
     local_subgraph,
 )
-from slap_mapd_coupling.environment.spaces import Mask, legality_mask, max_out_degree
+from slap_mapd_coupling.environment.spaces import Mask, claim_mask, legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, Pooling
 
 
@@ -469,11 +469,20 @@ def encode_all_observations(
     windows: Optional[Mapping[AgentId, Sequence[VertexId]]] = None,
     pooling: Pooling = "none",
     pool_vertices: Optional[Mapping[AgentId, Collection[VertexId]]] = None,
+    acting: Optional[Sequence[AgentId]] = None,
+    chosen: Optional[Mapping[AgentId, Mapping[AgentId, VertexId]]] = None,
 ) -> dict[AgentId, EncodedObservation]:
-    """The EncodedObservation of every robot at timestep t, keyed by agent
-    id in ascending order. `d_max` is max_out_degree(graph). `windows`
+    """The EncodedObservation of every acting robot at timestep t, keyed by
+    agent id in ascending order. `d_max` is max_out_degree(graph). `windows`
     maps every robot to the window its observation covers. None means the
     field of view for every robot.
+
+    `acting` lists the robots that choose in this turn. None means every
+    robot. `chosen` maps each acting robot to the successor vertices its unit's
+    earlier agents have chosen. A robot with an entry gets the claimed column
+    from them and the claim mask added to its action mask. None means no
+    claims, as for the decentralised router. Communication needs every robot
+    to act.
 
     With `pooling` on, every sample carries pool_mask. `pool_vertices` maps
     every robot to the vertices of its window it pools over, its zone for
@@ -493,7 +502,12 @@ def encode_all_observations(
         raise ValueError("encode_all_observations requires experiment_config.observation_depth")
 
     locations = fleet.locations()
-    agent_ids = sorted(locations)
+    agent_ids = sorted(locations if acting is None else acting)
+    if communication and agent_ids != sorted(locations):
+        raise ValueError("communication needs every robot to act in the same turn.")
+    unknown = sorted(set(agent_ids) - set(locations))
+    if unknown:
+        raise ValueError(f"acting lists the unknown robots {unknown}.")
     if windows is not None:
         missing = [agent_id for agent_id in agent_ids if agent_id not in windows]
         if missing:
@@ -513,6 +527,7 @@ def encode_all_observations(
             t,
             experiment_config,
             window=None if windows is None else windows[agent_id],
+            claimed=() if chosen is None or agent_id not in chosen else chosen[agent_id].values(),
         )
         for agent_id in agent_ids
     }
@@ -539,6 +554,9 @@ def encode_all_observations(
             )
             pool_mask = _pool_mask(observation, pool, encoding_config.max_local_nodes)
         mask = legality_mask(graph, locations[agent_id], d_max=d_max)
+        if chosen is not None and agent_id in chosen:
+            claim = claim_mask(graph, agent_id, locations, chosen[agent_id], d_max)
+            mask = tuple(a + b for a, b in zip(mask, claim))
         encoded[agent_id] = _assemble(
             views[agent_id],
             observations[agent_id],

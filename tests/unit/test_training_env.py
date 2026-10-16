@@ -1,5 +1,7 @@
 """Unit tests for slap_mapd_coupling.training.env."""
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -7,7 +9,7 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
 from slap_mapd_coupling.environment.observation import local_subgraph
-from slap_mapd_coupling.environment.spaces import action_for_slot
+from slap_mapd_coupling.environment.spaces import action_for_slot, claim_mask, legality_mask
 from slap_mapd_coupling.environment.zones import halo, zone_of, zones_by_aisle
 from slap_mapd_coupling.instances.generator import (
     GeneratorParams,
@@ -368,9 +370,9 @@ def test_each_arm_builds_and_its_observations_cover_its_window(controller, pooli
     env = _arm_env(controller, pooling, zones=zones if controller == "section" else None)
     obs, _ = env.reset()
     rng = np.random.default_rng(0)
-    for _ in range(5):
+    for _ in range(6):  # sub-steps, so only the agents of the turn are in obs
         locations = env.core.fleet.locations()
-        for aid in env.agents:
+        for aid in obs:
             assert env.observation_spaces[aid].contains(obs[aid])
             view = obs[aid]["observations"]
             window = env.window_of(int(aid))
@@ -381,9 +383,7 @@ def test_each_arm_builds_and_its_observations_cover_its_window(controller, pooli
                 pool = _expected_pool(env, locations[int(aid)], zones)
                 assert view["pool_mask"].sum() == len(pool)
                 assert np.all(view["pool_mask"] <= view["node_mask"])
-        actions = {
-            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
-        }
+        actions = {aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in obs}
         obs, *_ = env.step(actions)
 
 
@@ -404,36 +404,45 @@ def test_the_section_window_follows_the_robot_into_the_next_zone():
     zones = _zones()
     owner = zone_of(zones)
     env = _arm_env("section", "mean", zones=zones, num_agents=4)
-    env.reset()
+    obs, _ = env.reset()
     agent_id, slot, target = _robot_at_a_zone_boundary(env, owner)
     start = env.core.fleet.locations()[agent_id]
     before = env.window_of(agent_id)
     assert frozenset(before) == _expected_window(env, start, zones)
 
-    actions = {aid: 0 for aid in env.agents}
-    actions[str(agent_id)] = slot
-    obs, *_ = env.step(actions)
+    _play_timestep(env, obs, lambda aid, view: slot if aid == str(agent_id) else 0)
 
     assert env.core.fleet.locations()[agent_id] == target
     after = env.window_of(agent_id)
     assert after != before
     assert frozenset(after) == _expected_window(env, target, zones)
-    view = obs[str(agent_id)]["observations"]
+    view = env._encode([agent_id])[str(agent_id)]["observations"]
     assert view["node_mask"].sum() == len(after)
     assert view["pool_mask"].sum() == len(zones[owner[target]])
 
 
+def _play_timestep(env: WarehouseMAPDMultiAgentEnv, obs: dict, choose):
+    """Plays sub-steps until the core has advanced one timestep. `choose(aid, view)` gives
+    the slot of one agent. Returns what the last sub-step returned and every chosen slot."""
+    actions: dict[str, int] = {}
+    while True:
+        turn = {aid: choose(aid, view) for aid, view in obs.items()}
+        actions.update(turn)
+        obs, rewards, terminated, truncated, infos = env.step(turn)
+        if env.timestep_completed:
+            return obs, rewards, terminated, truncated, infos, actions
+
+
 def _random_rollout(env: WarehouseMAPDMultiAgentEnv, steps: int, seed: int):
-    """(start locations, actions, rewards) of every step under a fixed action stream."""
+    """(start locations, actions, rewards) of every timestep under a fixed action stream."""
     rng = np.random.default_rng(seed)
     obs, _ = env.reset()
     record = []
     for _ in range(steps):
         start = env.core.fleet.locations()
-        actions = {
-            aid: int(rng.choice(np.flatnonzero(obs[aid]["action_mask"]))) for aid in env.agents
-        }
-        obs, rewards, *_ = env.step(actions)
+        obs, rewards, _, _, _, actions = _play_timestep(
+            env, obs, lambda aid, view: int(rng.choice(np.flatnonzero(view["action_mask"])))
+        )
         record.append((start, actions, rewards))
     return record
 
@@ -473,7 +482,10 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
     assert summed_terms == pytest.approx(sum(returned.values()), abs=1e-9)
     # the run is not vacuous, every term but the congestion one has something in it
     overrides = sum(log.overrides_by_agent.values())
-    assert overrides > 0
+    if controller == "centralised":
+        assert overrides == 0  # the claim mask leaves conflict resolution nothing to change
+    else:
+        assert overrides > 0
     assert sum(log.return_override_by_agent.values()) == pytest.approx(-0.5 * overrides)
     assert sum(log.return_delivery_by_agent.values()) > 0
     assert sum(log.return_shaping_by_agent.values()) != 0.0
@@ -485,14 +497,10 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
 
 
 def test_the_centralised_arm_credits_every_robot_with_the_fleet_mean():
-    # full_view has the same windows and credits each robot with its own reward
-    own = _random_rollout(_arm_env("full_view", arrival_rate=3.0), 15, seed=1)
-    team = _random_rollout(_arm_env("centralised", arrival_rate=3.0), 15, seed=1)
-    assert any(len(set(rewards.values())) > 1 for _, _, rewards in own)
-    for (_, actions, rewards), (_, team_actions, team_rewards) in zip(own, team):
-        assert actions == team_actions
-        mean = sum(rewards.values()) / len(rewards)
-        assert team_rewards == {aid: pytest.approx(mean) for aid in rewards}
+    team = _random_rollout(_arm_env("centralised", arrival_rate=3.0, horizon=15), 15, seed=1)
+    assert any(abs(value) > 0.0 for _, _, rewards in team for value in rewards.values())
+    for _, _, rewards in team:
+        assert len(set(rewards.values())) == 1
 
 
 def test_the_section_arm_credits_the_zone_mean_at_the_start_of_the_step():
@@ -502,12 +510,12 @@ def test_the_section_arm_credits_the_zone_mean_at_the_start_of_the_step():
     # full_view credits each robot with its own reward, so it gives the unaveraged rewards
     own_env = _arm_env("full_view", **kwargs)
     team_env = _arm_env("section", zones=zones, **kwargs)
-    team_env.reset()
+    obs, _ = team_env.reset()
     agent_id, slot, _ = _robot_at_a_zone_boundary(team_env, owner)
     start = team_env.core.fleet.locations()
-    actions = {aid: 0 for aid in team_env.agents}
-    actions[str(agent_id)] = slot
-    _, team, *_ = team_env.step(actions)
+    _, team, *_, actions = _play_timestep(
+        team_env, obs, lambda aid, view: slot if aid == str(agent_id) else 0
+    )
     own_env.reset()
     _, own, *_ = own_env.step(actions)
 
@@ -567,3 +575,232 @@ def test_a_window_above_the_cap_is_rejected_when_the_env_is_built(controller):
 def test_a_planner_config_is_rejected():
     with pytest.raises(ValueError, match="planner"):
         _env(controller=None, planner="token_passing")
+
+
+def _first_legal_move_trajectory() -> str:
+    """A digest of the locations, rewards, overrides and backlog of every timestep of a
+    decentralised episode under the rule "the first legal move, else wait"."""
+    env = _env(horizon=40, num_agents=3, arrival_rate=2.0)
+    obs, _ = env.reset(seed=11)
+    trajectory = []
+    for _ in range(40):
+        obs, rewards, *_ = env.step(
+            {aid: 1 if view["action_mask"][1] == 1 else 0 for aid, view in obs.items()}
+        )
+        trajectory.append(
+            (
+                sorted(env.core.fleet.locations().items()),
+                sorted(rewards.items()),
+                sorted(env.core.last_overridden),
+                env.core.log.backlog_by_t[-1],
+            )
+        )
+    return hashlib.sha256(repr(trajectory).encode()).hexdigest()
+
+
+# --- turns -----------------------------------------------------------------------------
+
+CLAIM_COLUMN = -1  # the claimed flag in a node feature row (models/gnn_encoder.py)
+
+# Recorded on main before the adapter became turn-based.
+_DECENTRALISED_DIGEST = "1f50d1931a5b604dd6b02b4923910236d70413f16e6a15714d2494bb3b73fea3"
+
+
+def _random_slot(rng):
+    return lambda aid, view: int(rng.choice(np.flatnonzero(view["action_mask"])))
+
+
+def test_the_decentralised_arm_still_plays_the_trajectory_recorded_before_turns():
+    assert _first_legal_move_trajectory() == _DECENTRALISED_DIGEST
+
+
+def test_the_centralised_arm_has_one_turn_per_agent_in_priority_order():
+    env = _arm_env("centralised", num_agents=3, horizon=6, arrival_rate=3.0)
+    obs, _ = env.reset()
+    rng = np.random.default_rng(0)
+    for t in range(6):
+        assert env.core.t == t
+        for k, agent_id in enumerate(env.core.priority):
+            assert list(obs) == [str(agent_id)]
+            assert env.core.t == t  # the core has not moved inside the timestep
+            obs, rewards, *_ = env.step({str(agent_id): _random_slot(rng)(None, obs[str(agent_id)])})
+            assert env.timestep_completed == (k == 2)
+            assert (rewards == {}) == (k < 2)
+        assert env.core.t == t + 1
+
+
+def test_a_later_centralised_agent_sees_the_choice_of_an_earlier_one():
+    env = _arm_env("centralised", num_agents=3, arrival_rate=3.0)
+    obs, _ = env.reset()
+    first, second = env.core.priority[:2]
+    locations = env.core.fleet.locations()
+    first_view = obs[str(first)]["observations"]
+    assert first_view["node_mask"].sum() == len(env.window_of(first))
+    assert not (first_view["node_features"][:, CLAIM_COLUMN]).any()
+
+    slot = int(np.flatnonzero(obs[str(first)]["action_mask"])[-1])  # a move if there is one
+    target = action_for_slot(env.graph, locations[first], slot)
+    chosen = locations[first] if target.kind == "wait" else target.target
+    obs, *_ = env.step({str(first): slot})
+
+    view = obs[str(second)]["observations"]
+    window = list(env.window_of(second))
+    claimed = {window[i] for i in np.flatnonzero(view["node_features"][:, CLAIM_COLUMN])}
+    assert claimed == {chosen}
+    d_max = env.action_spaces[str(second)].n - 1
+    expected = np.array(
+        [
+            a + b
+            for a, b in zip(
+                legality_mask(env.graph, locations[second], d_max),
+                claim_mask(env.graph, second, locations, {first: chosen}, d_max),
+            )
+        ]
+    )
+    np.testing.assert_array_equal(obs[str(second)]["action_mask"], (expected == 0.0).astype(float))
+
+
+def test_a_centralised_run_under_the_claim_mask_is_never_overridden():
+    env = _arm_env("centralised", num_agents=3, horizon=100, arrival_rate=3.0)
+    obs, _ = env.reset()
+    rng = np.random.default_rng(1)
+    for _ in range(100):
+        obs, *_ = _play_timestep(env, obs, _random_slot(rng))
+        assert env.core.last_overridden == frozenset()
+
+
+def test_section_turn_k_holds_the_kth_agent_of_every_zone():
+    zones = _zones()
+    owner = zone_of(zones)
+    env = _arm_env("section", "mean", zones=zones, num_agents=4, horizon=60, arrival_rate=3.0)
+    obs, _ = env.reset()
+    rng = np.random.default_rng(2)
+    saw_a_parallel_turn = False
+    for _ in range(60):
+        locations = env.core.fleet.locations()
+        queues: dict[int, list] = {}
+        for agent_id in env.core.priority:
+            queues.setdefault(owner[locations[agent_id]], []).append(agent_id)
+        expected = [
+            {str(q[k]) for q in queues.values() if len(q) > k}
+            for k in range(max(len(q) for q in queues.values()))
+        ]
+        turns = []
+        while True:
+            turns.append(set(obs))
+            obs = env.step({aid: _random_slot(rng)(aid, view) for aid, view in obs.items()})[0]
+            if env.timestep_completed:
+                break
+        assert turns == expected
+        saw_a_parallel_turn |= any(len(turn) > 1 for turn in turns)
+    assert saw_a_parallel_turn
+
+
+def test_a_section_agent_does_not_see_choices_made_in_another_zone():
+    zones = _zones()
+    owner = zone_of(zones)
+    env = _arm_env(
+        "section", "mean", zones=zones, num_agents=4, horizon=40, arrival_rate=3.0
+    )
+    obs, _ = env.reset()
+    rng = np.random.default_rng(3)
+    for _ in range(40):
+        locations = env.core.fleet.locations()
+        chosen: dict[int, int] = {}
+        while True:
+            for aid, view in obs.items():
+                window = list(env.window_of(int(aid)))
+                seen = {
+                    window[i] for i in np.flatnonzero(view["observations"]["node_features"][:, -1])
+                }
+                same_zone = {
+                    v for j, v in chosen.items() if owner[locations[j]] == owner[locations[int(aid)]]
+                }
+                assert seen == same_zone
+            slots = {aid: _random_slot(rng)(aid, view) for aid, view in obs.items()}
+            for aid, slot in slots.items():
+                action = action_for_slot(env.graph, locations[int(aid)], slot)
+                chosen[int(aid)] = locations[int(aid)] if action.kind == "wait" else action.target
+            obs, *_ = env.step(slots)
+            if env.timestep_completed:
+                break
+
+
+def test_a_section_agent_cannot_move_onto_an_occupied_halo_vertex():
+    zones = _zones()
+    owner = zone_of(zones)
+    env = _arm_env(
+        "section", "mean", zones=zones, num_agents=4, horizon=60, arrival_rate=3.0
+    )
+    obs, _ = env.reset()
+    rng = np.random.default_rng(4)
+    checked = 0
+    for _ in range(60):
+        locations = env.core.fleet.locations()
+        occupied = set(locations.values())
+        for aid, view in obs.items():
+            for slot in range(1, len(env.graph.legal_actions(locations[int(aid)]))):
+                target = action_for_slot(env.graph, locations[int(aid)], slot).target
+                if owner[target] != owner[locations[int(aid)]] and target in occupied:
+                    assert view["action_mask"][slot] == 0.0
+                    checked += 1
+        obs, *_ = _play_timestep(env, obs, _random_slot(rng))
+    assert checked > 0
+
+
+def test_the_full_view_setting_has_one_turn_and_no_claims():
+    env = _arm_env("full_view", "mean", num_agents=3)
+    obs, _ = env.reset()
+    assert set(obs) == set(env.agents)
+    for view in obs.values():
+        assert not view["observations"]["node_features"][:, CLAIM_COLUMN].any()
+        assert "pool_mask" in view["observations"]
+    _, rewards, *_ = env.step({aid: 0 for aid in obs})
+    assert env.timestep_completed
+    assert set(rewards) == set(env.agents)
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section", "decentralised"])
+def test_a_step_with_the_wrong_agents_raises(controller):
+    env = _arm_env(controller, num_agents=3)
+    obs, _ = env.reset()
+    turn = set(obs)
+    other = sorted(set(env.agents) - turn)
+    with pytest.raises(ValueError, match="agents of this turn"):
+        env.step({aid: 0 for aid in turn | set(other[:1] or ["99"])})
+    with pytest.raises(ValueError, match="agents of this turn"):
+        env.step({})
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section", "full_view"])
+def test_replay_under_a_fixed_seed_gives_an_identical_log(controller):
+    def run():
+        env = _arm_env(controller, num_agents=3, horizon=30, arrival_rate=3.0)
+        obs, _ = env.reset(seed=5)
+        rng = np.random.default_rng(6)
+        trace = []
+        for _ in range(30):
+            obs, rewards, *_ = _play_timestep(env, obs, _random_slot(rng))
+            trace.append((sorted(env.core.fleet.locations().items()), sorted(rewards.items())))
+        return trace, env.core.log.backlog_by_t, dict(env.core.log.overrides_by_agent)
+
+    assert run() == run()
+
+
+@pytest.mark.parametrize("controller", ["centralised", "section"])
+def test_the_last_sub_step_returns_every_agent_with_no_claims(controller):
+    env = _arm_env(controller, num_agents=3, horizon=3, arrival_rate=3.0)
+    obs, _ = env.reset()
+    rng = np.random.default_rng(7)
+    for _ in range(3):
+        obs, rewards, terminated, truncated, _, _ = _play_timestep(env, obs, _random_slot(rng))
+    assert truncated["__all__"] is True
+    assert set(obs) == set(env.agents)
+    assert set(rewards) == set(env.agents)
+    assert all(truncated[aid] for aid in env.agents)
+    locations = env.core.fleet.locations()
+    d_max = env.action_spaces["1"].n - 1
+    for aid, view in obs.items():
+        assert not view["observations"]["node_features"][:, CLAIM_COLUMN].any()
+        plain = (np.array(legality_mask(env.graph, locations[int(aid)], d_max)) == 0.0).astype(float)
+        np.testing.assert_array_equal(view["action_mask"], plain)

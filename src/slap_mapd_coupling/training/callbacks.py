@@ -52,9 +52,9 @@ def _unwrap(env: gym.Env, env_index: int) -> WarehouseMAPDMultiAgentEnv:
 
 class CorrectnessInvariantCallbacks(DefaultCallbacks):
     """Checks is_collision_free and is_feasible on the realised trace at
-    every step of every training rollout. The vertex rule and the swap rule
-    are about a transition, so the fleet before the step is kept per
-    env_index, since RLlib hands over one snapshot at a time.
+    every timestep of every training rollout, not at the turns inside one. The
+    vertex rule and the swap rule are about a transition, so the fleet before
+    the step is kept per env_index, since RLlib hands over one snapshot at a time.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -96,6 +96,8 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
         if env is None:
             return
         sub_env = _unwrap(env, env_index)
+        if not sub_env.timestep_completed:
+            return  # a turn inside a timestep, the fleet has not moved
         before = self._previous_fleet.get(env_index)
         after = sub_env.core.fleet
         if before is not None and not is_collision_free(before, after):
@@ -218,7 +220,9 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         before = self._previous_fleet.get(env_index)
         super().on_episode_step(env=env, env_index=env_index, **kwargs)
         if env is not None and before is not None:
-            self._standing_still.update(before, _unwrap(env, env_index).core.fleet)
+            sub_env = _unwrap(env, env_index)
+            if sub_env.timestep_completed:
+                self._standing_still.update(before, sub_env.core.fleet)
 
     def on_train_result(
         self, *, algorithm=None, metrics_logger=None, result: dict, **kwargs: Any
