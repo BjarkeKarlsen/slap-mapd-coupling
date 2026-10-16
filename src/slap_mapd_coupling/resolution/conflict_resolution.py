@@ -26,7 +26,7 @@ against, agent 2 is then correctly caught as a swap conflict and
 already claimed: a fresh vertex conflict the text's proof says cannot
 happen. This implementation closes the gap by also reserving each other
 agent's *current* vertex against being moved into until that agent has
-itself been finalised as having vacated it (`_blocked`'s second check
+itself been finalised as having vacated it (`move_blocked`'s second check
 below) -- still a single deterministic pass over sigma, still a pure
 function of state and seed, just conservative about chains of moves that
 depend on a not-yet-processed agent's own choice.
@@ -40,7 +40,7 @@ are processed in:
   `finalised` is pairwise collision-free (no vertex-rule or
   swap-rule violation among any two of them) -- vacuously true for k=1.
 
-  Step: when agent sigma(k) is processed, `_blocked` either accepts its
+  Step: when agent sigma(k) is processed, `move_blocked` either accepts its
   proposed candidate (then it doesn't conflict with any already-finalised
   successor by construction, and `finalised` for k agents is still
   pairwise collision-free by the hypothesis plus this one check), or
@@ -99,13 +99,21 @@ def _successor(start: VertexId, action: Action) -> VertexId:
     return action.target
 
 
-def _blocked(
+def move_blocked(
     agent_id: AgentId,
     start: VertexId,
     candidate: VertexId,
     before_loc: Mapping[AgentId, VertexId],
     finalised: Mapping[AgentId, VertexId],
 ) -> bool:
+    """Whether `agent_id` may not go from `start` to `candidate`.
+
+    `finalised` holds the successors of the agents that have chosen, and an
+    agent missing from it counts as not having chosen. A move is blocked by
+    the vertex rule, by the swap rule, or by an agent that has not chosen yet
+    and stands on `candidate`. The claim mask uses this same rule, so
+    conflict resolution never overrides a centralised agent.
+    """
     for other_id, other_candidate in finalised.items():
         if other_candidate == candidate:  # vertex rule
             return True
@@ -157,10 +165,10 @@ def resolve_conflicts(
                 "(the move rule); conflict resolution assumes already-masked proposals."
             )
 
-        if _blocked(agent_id, start, candidate, before_loc, finalised):
+        if move_blocked(agent_id, start, candidate, before_loc, finalised):
             candidate = start
             overridden.add(agent_id)
-            if _blocked(agent_id, start, candidate, before_loc, finalised):
+            if move_blocked(agent_id, start, candidate, before_loc, finalised):
                 raise RuntimeError(
                     f"Agent {agent_id} still conflicts after being overridden to wait at "
                     f"{start}. With the current-vertex reservation in place (see module "

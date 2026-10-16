@@ -5,6 +5,7 @@ import pytest
 from slap_mapd_coupling.core.agents import AgentState, FleetState, is_collision_free
 from slap_mapd_coupling.core.graph import Action, Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.resolution.conflict_resolution import (
+    move_blocked,
     priority_permutation,
     resolve_conflicts,
 )
@@ -173,3 +174,15 @@ def test_three_agents_all_targeting_one_vertex_only_top_priority_moves():
     assert result.fleet.locations() == {1: 1, 2: 9, 3: 3}
     assert result.overridden == frozenset({1, 3})
     assert is_collision_free(before, result.fleet)
+
+
+def test_move_blocked_is_the_rule_resolve_conflicts_applies():
+    before_loc = {1: 1, 2: 2, 3: 3}
+    # vertex rule
+    assert move_blocked(2, 2, 9, before_loc, {1: 9})
+    # swap rule
+    assert move_blocked(2, 2, 1, before_loc, {1: 2})
+    # an agent that has not chosen stands on the target
+    assert move_blocked(2, 2, 3, before_loc, {1: 1})
+    # following an agent that has left the target is allowed
+    assert not move_blocked(2, 2, 1, before_loc, {1: 9})
