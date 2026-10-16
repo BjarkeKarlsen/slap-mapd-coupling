@@ -31,7 +31,6 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
 )
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training.env import (
-    CreditSignal,
     WarehouseMAPDMultiAgentEnv,
     Zones,
     arm_windows,
@@ -74,9 +73,6 @@ class PPOHyperparameters(BaseModel):
     # Tune's stop={"num_env_steps_sampled_lifetime": budget}, at the first iteration at
     # or above it, so it overshoots by up to one iteration's samples (num_env_runners * horizon).
     training_budget_env_steps: PositiveInt
-    # No default, because the thesis leaves it open for the centralised and
-    # section-based arms (#83). The decentralised arm takes "per_agent" only.
-    credit_signal: CreditSignal
 
 
 class SeedSplitConfig(BaseModel):
@@ -147,12 +143,11 @@ def build_ppo_config(
     `policy_id` (full parameter sharing) and uses models/rl_module.py's GNN
     as the RLModule.
 
-    The adapter gets the credit signal from `ppo_hyperparameters`, the
-    pooling from `gnn_encoder_config` and `zones` (the section arm only), so
+    The adapter gets the pooling from `gnn_encoder_config` and `zones` (the
+    section arm only), so
     the module and the observations always agree on pooling. Every setting
     the adapter would reject raises here, before Ray starts, including
-    pooling with the decentralised arm, team_mean with the decentralised arm,
-    and a window above max_local_nodes.
+    pooling with the decentralised arm and a window above max_local_nodes.
 
     `seed_split` gives the adapter its training seeds and sets RLlib's own
     seed to `seed_split.base_seed`. `policy_id`, `num_env_runners` and
@@ -171,14 +166,12 @@ def build_ppo_config(
             f"gnn_encoder_config.communication={gnn_encoder_config.communication}. The "
             "environment and the encoder must agree on whether messages are used."
         )
-    credit_signal = ppo_hyperparameters.credit_signal
     pooling = gnn_encoder_config.pooling
     try:
-        check_arm(experiment_config.controller, credit_signal, pooling, zones)
+        check_arm(experiment_config.controller, pooling, zones)
     except ValueError as error:
         raise ValueError(
-            f"{error} (ppo_hyperparameters.credit_signal={credit_signal!r}, "
-            f"gnn_encoder_config.pooling={pooling!r})"
+            f"{error} (gnn_encoder_config.pooling={pooling!r})"
         ) from error
     assert experiment_config.controller is not None  # check_arm rejects a planner
     check_communication_caps(encoding_config, experiment_config.communication)
@@ -213,7 +206,6 @@ def build_ppo_config(
             experiment_config,
             encoding_config,
             train_seeds,
-            credit_signal=credit_signal,
             pooling=pooling,
             zones=zones,
             # RLlib passes an EnvContext. A plain dict (no runner) starts at 0.

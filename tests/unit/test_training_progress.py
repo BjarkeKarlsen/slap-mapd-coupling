@@ -266,7 +266,6 @@ def _adapter(controller: str, horizon: int = 12) -> WarehouseMAPDMultiAgentEnv:
         config,
         LocalSubgraphEncodingConfig(max_local_nodes=30, max_messages=1),
         (1, 2),
-        credit_signal="per_agent",
         pooling="none" if controller == "decentralised" else "mean",
         zones=zones_by_aisle(graph, instance.aisle_index, 2) if controller == "section" else None,
     )

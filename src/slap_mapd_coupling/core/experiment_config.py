@@ -17,7 +17,9 @@ from pydantic import (
 from slap_mapd_coupling.planners.registry import PlannerName
 
 StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
-ControllerArchitecture = Literal["centralised", "section", "decentralised"]
+# "full_view" is the full-view setting (sec:method:controllers), the decentralised router with
+# every movable vertex in view and the pooled readout. It is not a controller in Pi.
+ControllerArchitecture = Literal["centralised", "section", "decentralised", "full_view"]
 
 
 class ExperimentConfig(BaseModel):

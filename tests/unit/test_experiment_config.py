@@ -144,3 +144,8 @@ def test_congestion_mode_still_requires_congestion_weight_set():
         ExperimentConfig(
             **_base(storage_mode="congestion", storage_epoch_length=25, reassignment_cap=10)
         )
+
+
+def test_communication_is_rejected_for_the_full_view_setting():
+    with pytest.raises(ValidationError, match="communication"):
+        ExperimentConfig(**_base(communication=True, **_reward_kwargs(controller="full_view")))

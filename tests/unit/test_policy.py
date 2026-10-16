@@ -101,7 +101,6 @@ class _Arm:
             self.config,
             self.encoding_config,
             (self.config.seed,),
-            credit_signal="per_agent",
             pooling=self.pooling,
             zones=self.zones,
         )

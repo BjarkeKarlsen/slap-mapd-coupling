@@ -91,7 +91,6 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
         entropy_coeff=0.0,
         vf_loss_coeff=1.0,
         training_budget_env_steps=120,
-        credit_signal="per_agent",
     )
     defaults.update(overrides)
     return PPOHyperparameters(**defaults)
@@ -273,28 +272,6 @@ def test_build_ppo_config_rejects_missing_discount():
         )
 
 
-def test_build_ppo_config_rejects_team_mean_credit_for_decentralised():
-    graph = _graph()
-    skus, capacities, counts = _instance(graph)
-    enc_config = LocalSubgraphEncodingConfig(max_local_nodes=10, max_messages=2)
-    gnn_config = GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none")
-    head_config = PolicyValueHeadConfig(hidden_width=8)
-
-    with pytest.raises(ValueError, match="credit_signal"):
-        build_ppo_config(
-            graph,
-            skus,
-            counts,
-            capacities,
-            _config(),
-            enc_config,
-            gnn_config,
-            head_config,
-            _ppo_hp(credit_signal="team_mean"),
-            _seed_split(),
-        )
-
-
 def test_build_ppo_config_builds_a_valid_ppo_config():
     graph = _graph()
     skus, capacities, counts = _instance(graph)
@@ -358,7 +335,7 @@ def test_build_ppo_config_samples_one_episode_per_runner_per_iteration(num_env_r
     ppo_config.validate_train_batch_size_vs_rollout_fragment_length()
 
 
-def _build_for_arm(controller: str, pooling: str, credit_signal: str = "per_agent", **kwargs):
+def _build_for_arm(controller: str, pooling: str, **kwargs):
     """build_ppo_config for one arm, with zones for the section arm."""
     graph = _graph()
     skus, capacities, counts = _instance(graph)
@@ -374,19 +351,16 @@ def _build_for_arm(controller: str, pooling: str, credit_signal: str = "per_agen
         LocalSubgraphEncodingConfig(max_local_nodes=max_local_nodes, max_messages=2),
         GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling=pooling),
         PolicyValueHeadConfig(hidden_width=8),
-        _ppo_hp(credit_signal=credit_signal),
+        _ppo_hp(),
         _seed_split(train_seed_count=train_seed_count),
         zones=zones,
         **kwargs,
     )
 
 
-@pytest.mark.parametrize("controller", ["centralised", "section"])
-@pytest.mark.parametrize("credit_signal", ["per_agent", "team_mean"])
-def test_build_ppo_config_accepts_the_wider_arms_with_either_credit_signal(
-    controller, credit_signal
-):
-    ppo_config = _build_for_arm(controller, "mean", credit_signal)
+@pytest.mark.parametrize("controller", ["centralised", "section", "full_view"])
+def test_build_ppo_config_accepts_the_wider_arms(controller):
+    ppo_config = _build_for_arm(controller, "mean")
     assert ppo_config.gamma == pytest.approx(0.99)
 
 

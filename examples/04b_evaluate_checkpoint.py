@@ -108,7 +108,6 @@ def render_episode(
         config,
         arm.encoding,
         (config.seed,),
-        credit_signal=example_04.CREDIT_SIGNAL,
         pooling=arm.pooling,
         zones=arm.zones,
     )

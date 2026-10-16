@@ -83,7 +83,6 @@ def _config(**overrides) -> ExperimentConfig:
 def _env(
     train_seeds: tuple[int, ...] = (100, 101, 102),
     *,
-    credit_signal="per_agent",
     pooling="none",
     zones=None,
     max_local_nodes=_MAX_LOCAL_NODES,
@@ -101,7 +100,6 @@ def _env(
         _config(**config_overrides),
         enc_config,
         train_seeds,
-        credit_signal=credit_signal,
         pooling=pooling,
         zones=zones,
         first_seed_index=first_seed_index,
@@ -159,7 +157,6 @@ def test_communication_with_no_room_for_a_sender_is_rejected():
             _config(communication=True),
             enc_config,
             (1,),
-            credit_signal="per_agent",
             pooling="none",
         )
 
@@ -177,7 +174,6 @@ def test_a_cap_too_small_for_a_vertex_and_its_neighbours_is_rejected():
             _config(),
             enc_config,
             (1,),
-            credit_signal="per_agent",
             pooling="none",
         )
 
@@ -195,7 +191,6 @@ def test_a_neighbour_outside_the_field_of_view_is_rejected_when_the_env_is_built
             _config(observation_depth=1),
             enc_config,
             (1,),
-            credit_signal="per_agent",
             pooling="none",
         )
 
@@ -443,12 +438,10 @@ def _random_rollout(env: WarehouseMAPDMultiAgentEnv, steps: int, seed: int):
     return record
 
 
-@pytest.mark.parametrize("credit_signal", ["per_agent", "team_mean"])
-def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_signal):
-    controller = "decentralised" if credit_signal == "per_agent" else "centralised"
+@pytest.mark.parametrize("controller", ["decentralised", "full_view", "centralised"])
+def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controller):
     env = _arm_env(
         controller,
-        credit_signal=credit_signal,
         arrival_rate=3.0,
         horizon=60,
         num_agents=4,
@@ -457,7 +450,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_s
     rollout = _random_rollout(env, 60, seed=3)
     log = env.core.log
     returned = {aid: sum(rewards[aid] for *_, rewards in rollout) for aid in env.agents}
-    if credit_signal == "per_agent":
+    if controller != "centralised":  # credited with its own reward
         for aid in env.agents:
             terms = (
                 log.return_shaping_by_agent[int(aid)]
@@ -491,11 +484,10 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(credit_s
     assert wait / -0.2 == pytest.approx(round(wait / -0.2), abs=1e-9)
 
 
-def test_team_mean_gives_every_robot_the_fleet_mean_under_the_centralised_arm():
-    own = _random_rollout(_arm_env("centralised", arrival_rate=3.0), 15, seed=1)
-    team = _random_rollout(
-        _arm_env("centralised", credit_signal="team_mean", arrival_rate=3.0), 15, seed=1
-    )
+def test_the_centralised_arm_credits_every_robot_with_the_fleet_mean():
+    # full_view has the same windows and credits each robot with its own reward
+    own = _random_rollout(_arm_env("full_view", arrival_rate=3.0), 15, seed=1)
+    team = _random_rollout(_arm_env("centralised", arrival_rate=3.0), 15, seed=1)
     assert any(len(set(rewards.values())) > 1 for _, _, rewards in own)
     for (_, actions, rewards), (_, team_actions, team_rewards) in zip(own, team):
         assert actions == team_actions
@@ -503,24 +495,23 @@ def test_team_mean_gives_every_robot_the_fleet_mean_under_the_centralised_arm():
         assert team_rewards == {aid: pytest.approx(mean) for aid in rewards}
 
 
-def test_team_mean_under_the_section_arm_averages_over_the_zone_at_the_start_of_the_step():
+def test_the_section_arm_credits_the_zone_mean_at_the_start_of_the_step():
     zones = _zones()
     owner = zone_of(zones)
-    kwargs = dict(zones=zones, num_agents=4, arrival_rate=3.0)
-    own_env = _arm_env("section", **kwargs)
-    team_env = _arm_env("section", credit_signal="team_mean", **kwargs)
-    rewards_by_env = []
-    for env in (own_env, team_env):
-        env.reset()
-        agent_id, slot, _ = _robot_at_a_zone_boundary(env, owner)
-        start = env.core.fleet.locations()
-        actions = {aid: 0 for aid in env.agents}
-        actions[str(agent_id)] = slot
-        _, rewards, *_ = env.step(actions)
-        rewards_by_env.append(rewards)
-    own, team = rewards_by_env
+    kwargs = dict(num_agents=4, arrival_rate=3.0)
+    # full_view credits each robot with its own reward, so it gives the unaveraged rewards
+    own_env = _arm_env("full_view", **kwargs)
+    team_env = _arm_env("section", zones=zones, **kwargs)
+    team_env.reset()
+    agent_id, slot, _ = _robot_at_a_zone_boundary(team_env, owner)
+    start = team_env.core.fleet.locations()
+    actions = {aid: 0 for aid in team_env.agents}
+    actions[str(agent_id)] = slot
+    _, team, *_ = team_env.step(actions)
+    own_env.reset()
+    _, own, *_ = own_env.step(actions)
 
-    end = own_env.core.fleet.locations()
+    end = team_env.core.fleet.locations()
     assert owner[end[agent_id]] != owner[start[agent_id]]  # the robot crossed a boundary
 
     def zone_means(locations):
@@ -537,9 +528,11 @@ def test_team_mean_under_the_section_arm_averages_over_the_zone_at_the_start_of_
     assert zone_means(end)[str(agent_id)] != pytest.approx(expected[str(agent_id)])
 
 
-def test_team_mean_with_the_decentralised_arm_is_rejected():
-    with pytest.raises(ValueError, match="team_mean"):
-        _arm_env("decentralised", credit_signal="team_mean")
+def test_the_full_view_setting_sees_every_movable_vertex_and_pools():
+    env = _arm_env("full_view", "mean")
+    env.reset()
+    movable = {v for v, vertex in env.graph.vertices.items() if vertex.role.movable}
+    assert all(set(env.window_of(a)) == movable for a in env.core.fleet.locations())
 
 
 def test_pooling_with_the_decentralised_arm_is_rejected():
