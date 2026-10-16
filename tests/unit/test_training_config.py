@@ -298,7 +298,8 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
     assert ppo_config.gamma == pytest.approx(0.99)
     assert ppo_config.lr == pytest.approx(3e-4)
     assert ppo_config.clip_param == pytest.approx(0.2)
-    assert ppo_config.rollout_fragment_length == _config().horizon
+    assert ppo_config.batch_mode == "complete_episodes"
+    assert ppo_config.rollout_fragment_length == "auto"
     assert ppo_config.seed == 42
 
 
@@ -328,10 +329,9 @@ def test_build_ppo_config_samples_one_episode_per_runner_per_iteration(num_env_r
         _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
         num_env_runners=num_env_runners,
     )
-    assert ppo_config.rollout_fragment_length == config.horizon
+    assert ppo_config.batch_mode == "complete_episodes"
+    assert ppo_config.train_batch_size_per_learner == max(num_env_runners, 1) * config.horizon
     assert ppo_config.total_train_batch_size == max(num_env_runners, 1) * config.horizon
-    # RLlib's own check of the batch against the fragment length, which rejects most
-    # other pairings.
     ppo_config.validate_train_batch_size_vs_rollout_fragment_length()
 
 
@@ -390,7 +390,7 @@ def test_one_ppo_iteration_runs_for_each_controller(controller, pooling):
     cap = 20 if controller == "decentralised" else _WIDE_MAX_LOCAL_NODES
     # The batch is one episode per runner, here 20 steps. A test makes it three episodes.
     ppo_config = _build_for_arm(controller, pooling, max_local_nodes=cap).training(
-        train_batch_size=60
+        train_batch_size_per_learner=60
     )
     algo = ppo_config.build_algo()
     try:
@@ -451,3 +451,22 @@ def test_first_seed_index_numbers_the_envs_of_all_runners_consecutively():
     assert [first_seed_index(w, v, envs_per_runner=2) for w in range(3) for v in range(2)] == [
         0, 1, 2, 3, 4, 5,
     ]
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section", "full_view"])
+def test_every_training_env_draws_the_same_seeds_in_cycle_order_whatever_rllib_passes(controller):
+    """The env_creator sets seed_from_cycle, so complete_episodes cannot pin one scenario."""
+    from ray.rllib.env.env_context import EnvContext
+    from ray.tune.registry import ENV_CREATOR, _global_registry
+
+    from slap_mapd_coupling.training.config import _ENV_NAME
+
+    pooling = "none" if controller == "decentralised" else "mean"
+    cap = 20 if controller == "decentralised" else _WIDE_MAX_LOCAL_NODES
+    _build_for_arm(controller, pooling, max_local_nodes=cap, train_seed_count=3)
+    env = _global_registry.get(ENV_CREATOR, _ENV_NAME)(EnvContext({}, worker_index=0))
+    seen = []
+    for rllib_seed in (42, 42, 42, 42):  # config.seed + worker_index, every sampling call
+        env.reset(seed=rllib_seed)
+        seen.append(env.last_seed)
+    assert seen == [100, 101, 102, 100]

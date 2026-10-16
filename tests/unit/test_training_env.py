@@ -89,6 +89,7 @@ def _env(
     zones=None,
     max_local_nodes=_MAX_LOCAL_NODES,
     first_seed_index=0,
+    seed_from_cycle=False,
     **config_overrides,
 ) -> WarehouseMAPDMultiAgentEnv:
     graph = _graph()
@@ -105,6 +106,7 @@ def _env(
         pooling=pooling,
         zones=zones,
         first_seed_index=first_seed_index,
+        seed_from_cycle=seed_from_cycle,
     )
 
 
@@ -250,6 +252,24 @@ def test_explicit_seed_overrides_the_training_cycle():
     assert env.last_seed == 999
     env.reset()  # back to the cycle, starting at index 0
     assert env.last_seed == 30
+
+
+def test_without_the_flag_reset_uses_the_seed_it_is_given():
+    # The evaluator and the tests pass explicit seeds and rely on them.
+    env = _env(train_seeds=(30, 31))
+    for seed in (5, 6, 5):
+        env.reset(seed=seed)
+        assert env.last_seed == seed
+
+
+def test_with_seed_from_cycle_reset_ignores_the_seed_it_is_given():
+    # complete_episodes makes RLlib reset with the same explicit seed at every sampling call.
+    env = _env(train_seeds=(30, 31, 32), seed_from_cycle=True)
+    seen = []
+    for _ in range(4):
+        env.reset(seed=999)
+        seen.append(env.last_seed)
+    assert seen == [30, 31, 32, 30]
 
 
 def test_the_cycle_starts_at_the_given_index_and_keeps_its_order():
@@ -804,3 +824,37 @@ def test_the_last_sub_step_returns_every_agent_with_no_claims(controller):
         assert not view["observations"]["node_features"][:, CLAIM_COLUMN].any()
         plain = (np.array(legality_mask(env.graph, locations[int(aid)], d_max)) == 0.0).astype(float)
         np.testing.assert_array_equal(view["action_mask"], plain)
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section", "full_view"])
+def test_every_controller_trains_on_the_same_seed_sequence_whatever_rllib_passes(controller):
+    pooling = "none" if controller == "decentralised" else "mean"
+    env = _arm_env(controller, pooling, train_seeds=(10, 11, 12), seed_from_cycle=True)
+    seen = []
+    for rllib_seed in (7, 7, 7, 7):
+        env.reset(seed=rllib_seed)
+        seen.append(env.last_seed)
+    assert seen == [10, 11, 12, 10]
+
+
+def test_one_evaluation_seed_gives_every_controller_the_same_instance_and_order_stream():
+    cores = []
+    for controller in ("decentralised", "centralised", "section", "full_view"):
+        pooling = "none" if controller == "decentralised" else "mean"
+        env = _arm_env(controller, pooling)
+        env.reset(seed=77)
+        cores.append(env.core)
+        for _ in range(5):  # a few timesteps of waiting, so the order stream is drawn
+            while not env.timestep_completed:
+                env.step({aid: 0 for aid in _acting(env)})
+            env.timestep_completed = False
+    first = cores[0]
+    for core in cores[1:]:
+        assert core.priority == first.priority
+        assert [(t.release_time, t.pickup_vertex, t.delivery_vertex) for t in core.tasks] == [
+            (t.release_time, t.pickup_vertex, t.delivery_vertex) for t in first.tasks
+        ]
+
+
+def _acting(env: WarehouseMAPDMultiAgentEnv) -> list[str]:
+    return [str(aid) for aid in env._turns[env._turn]]

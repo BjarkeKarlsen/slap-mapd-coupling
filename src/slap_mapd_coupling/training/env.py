@@ -62,6 +62,12 @@ the first seed they would all draw the same scenario at the same time, so a
 PPO batch would hold one scenario. The training config gives each runner a
 different start (`first_seed_index` of training/config.py). The default 0 is the
 single-process case, where the cycle starts at the first seed as before.
+
+With `seed_from_cycle` the adapter ignores the seed RLlib passes to `reset` and always
+draws the next one from the cycle. Training sets it, because RLlib resets with the same
+explicit seed at every sampling call under `complete_episodes`. Every controller then
+trains on the same sequence of seeds. The evaluator and the tests leave it off and pass
+explicit seeds.
 """
 
 from __future__ import annotations
@@ -215,6 +221,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         pooling: Pooling,
         zones: Optional[Zones] = None,
         first_seed_index: int = 0,
+        seed_from_cycle: bool = False,
     ) -> None:
         check_arm(config.controller, pooling, zones)
         assert config.controller is not None  # check_arm rejects a planner
@@ -234,6 +241,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         # Where in the training cycle this env starts. Taken modulo the
         # number of seeds, so more runners than seeds wrap around.
         self._next_train_seed_index = first_seed_index % len(self._train_seeds)
+        self._seed_from_cycle = seed_from_cycle
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
         base_observation_space = encoded_observation_space(
@@ -265,10 +273,10 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
     def reset(  # type: ignore[override]
         self, *, seed: Optional[int] = None, options: Optional[dict] = None
     ) -> tuple[dict[str, Any], dict[str, dict]]:
-        # RLlib calls reset(seed=None) at the start of every training
-        # episode, so the seed comes from the cycle. An explicit seed is
-        # honoured as it is.
-        if seed is None:
+        # With complete_episodes RLlib resets with an explicit seed at every sampling
+        # call, so a training env (seed_from_cycle) ignores it and draws from the cycle.
+        # Otherwise an explicit seed is honoured as it is.
+        if seed is None or self._seed_from_cycle:
             seed = self._train_seeds[self._next_train_seed_index % len(self._train_seeds)]
             self._next_train_seed_index += 1
         self.last_seed = seed

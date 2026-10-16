@@ -194,13 +194,17 @@ class StandingStillCounter:
 # on_train_result copies it here (see training/trainer.py::CheckpointSettings).
 EPISODE_RETURN_KEY = "episode_return_mean"
 
+# Warehouse timesteps of the finished episodes, summed over the runners and the run. Neither
+# RLlib step counter gives it, since both count sub-steps or observations, so this is what
+# the training budget is checked against (training/trainer.py).
+TIMESTEPS_KEY = "timesteps_sampled_lifetime"
+
 
 class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     """The invariant checks plus progress numbers in every iteration.
 
-    Every iteration ends at least one episode per runner when the rollout length equals the
-    horizon (training/config.py::build_ppo_config), so the episode keys exist in every
-    iteration. The values logged from the environment's own state at the end of every sampled
+    Every iteration ends exactly one episode per runner (training/config.py::build_ppo_config),
+    so the episode keys exist in every iteration. The values logged from the environment's own state at the end of every sampled
     fragment, under `result["env_runners"]`, are the snapshots `tasks_completed`,
     `tasks_released`, `backlog`, `steps_since_last_completion` and `episode_step`, averaged
     over the environments (see `progress_metrics`).
@@ -232,6 +236,9 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         value = result.get("env_runners", {}).get("episode_return_mean")
         if _is_number(value):
             result[EPISODE_RETURN_KEY] = float(value)
+        timesteps = result.get("env_runners", {}).get(TIMESTEPS_KEY)
+        if _is_number(timesteps):
+            result[TIMESTEPS_KEY] = int(timesteps)
 
     def on_sample_end(self, *, env_runner=None, metrics_logger=None, **kwargs: Any) -> None:
         if env_runner is None or metrics_logger is None or env_runner.env is None:
@@ -250,8 +257,10 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     ) -> None:
         if env is None or metrics_logger is None:
             return
-        for name, value in episode_metrics(_unwrap(env, env_index).core).items():
+        core = _unwrap(env, env_index).core
+        for name, value in episode_metrics(core).items():
             metrics_logger.log_value(name, value, reduce="mean")
+        metrics_logger.log_value(TIMESTEPS_KEY, core.t, reduce="lifetime_sum")
 
 
 _COUNT_KEYS = (

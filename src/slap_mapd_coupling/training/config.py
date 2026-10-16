@@ -47,16 +47,14 @@ class PPOHyperparameters(BaseModel):
     required, no defaults, see module docstring.
 
     Two PPO settings are not fields here, because both follow from the episode
-    length, the horizon of the experiment config. The thesis table lists a
-    "rollout length", and here it equals the horizon, so build_ppo_config sets
-    RLlib's rollout_fragment_length from it and one sampling call of a runner is
-    exactly one episode. This is a choice, flagged for the author, with no thesis
-    edit. The train batch is then one episode per runner, num_env_runners *
-    horizon steps (horizon steps with no env runner), so every iteration ends
-    one episode per runner. RLlib's own default batch of 4000 steps cannot be
-    used, because RLlib rejects a fragment length whose whole multiples over the
-    runners miss the batch by more than 10%, which fails for most horizons and
-    runner counts. RLlib also requires minibatch_size to be at most that batch.
+    length, the horizon of the experiment config. A sampling call of a runner is
+    one complete episode (`batch_mode="complete_episodes"`), since a timestep can
+    take several sub-steps and a fixed fragment length would cut an episode in the
+    middle. The train batch is `max(num_env_runners, 1) * horizon`. Every timestep
+    has at least one sub-step, so one round of sampling always reaches it and an
+    iteration is exactly one episode per runner. This is a choice, flagged for the
+    author, with no thesis edit. RLlib requires minibatch_size to be at most that
+    batch.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -68,10 +66,10 @@ class PPOHyperparameters(BaseModel):
     num_epochs: PositiveInt  # epochs/update
     entropy_coeff: NonNegativeFloat
     vf_loss_coeff: PositiveFloat
-    # The training budget of tab:trainparams, equal across the learned arms and counted
-    # in environment steps. build_ppo_config does not read it. A run stops on it with
-    # Tune's stop={"num_env_steps_sampled_lifetime": budget}, at the first iteration at
-    # or above it, so it overshoots by up to one iteration's samples (num_env_runners * horizon).
+    # The training budget of tab:trainparams, equal across the learned arms. One environment
+    # step is one timestep, however many agents choose within it. build_ppo_config does not
+    # read it. A run stops on it at the first iteration at or above it (training/trainer.py),
+    # so it overshoots by up to one iteration (num_env_runners * horizon timesteps).
     training_budget_env_steps: PositiveInt
 
 
@@ -213,6 +211,7 @@ def build_ppo_config(
                 getattr(env_context, "worker_index", 0),
                 getattr(env_context, "vector_index", 0),
             ),
+            seed_from_cycle=True,
         )
 
     register_env(_ENV_NAME, env_creator)
@@ -245,8 +244,9 @@ def build_ppo_config(
         )
         .env_runners(
             num_env_runners=num_env_runners,
-            # One sampling call of a runner is one episode, see PPOHyperparameters.
-            rollout_fragment_length=experiment_config.horizon,
+            # One sampling call of a runner is one complete episode, see PPOHyperparameters.
+            batch_mode="complete_episodes",
+            rollout_fragment_length="auto",
         )
         .debugging(seed=seed_split.base_seed)
         .learners(num_gpus_per_learner=1 if use_gpu else 0)
@@ -256,7 +256,7 @@ def build_ppo_config(
             clip_param=ppo_hyperparameters.clip_param,
             lambda_=ppo_hyperparameters.gae_lambda,
             # One episode per runner, see PPOHyperparameters.
-            train_batch_size=max(num_env_runners, 1) * experiment_config.horizon,
+            train_batch_size_per_learner=max(num_env_runners, 1) * experiment_config.horizon,
             minibatch_size=ppo_hyperparameters.minibatch_size,
             num_epochs=ppo_hyperparameters.num_epochs,
             entropy_coeff=ppo_hyperparameters.entropy_coeff,

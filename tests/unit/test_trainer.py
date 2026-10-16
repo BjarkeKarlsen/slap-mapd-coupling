@@ -92,3 +92,33 @@ def test_a_run_saves_periodic_checkpoints_and_returns_its_best(tmp_path):
     # Both open as modules without a Ray cluster.
     for checkpoint in (run.checkpoint, run.best_checkpoint):
         assert load_module(checkpoint).model_config["gnn_encoder_config"]["communication"] is False
+
+
+def test_a_centralised_run_counts_timesteps_and_stops_at_the_budget(tmp_path):
+    # Three robots choose in turn, so one episode is three sub-steps per timestep. The budget
+    # counts timesteps, so two iterations of one episode each reach exactly 2 * horizon.
+    horizon = 130
+    spec = override_spec(
+        load_spec(CONFIG.with_name("centralised.yaml")),
+        horizon=horizon,
+        budget_env_steps=2 * horizon,
+        checkpoint_every=0,
+    )
+    progress = tmp_path / "progress.jsonl"
+    run = train(
+        build_study_ppo_config(spec, build_study(spec)),
+        spec.ppo.training_budget_env_steps,
+        "tiny_centralised",
+        storage_path=tmp_path / "ray",
+        progress_path=progress,
+    )
+
+    assert len(progress.read_text().splitlines()) == 2
+    assert run.env_steps_sampled == 2 * horizon
+
+
+def test_the_timestep_count_is_copied_to_the_top_level_of_the_result():
+    callbacks = TrainingProgressCallbacks()
+    result = {"env_runners": {"timesteps_sampled_lifetime": 260.0}}
+    callbacks.on_train_result(result=result)
+    assert result["timesteps_sampled_lifetime"] == 260
