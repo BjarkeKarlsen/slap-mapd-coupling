@@ -1,11 +1,27 @@
 """The RLlib MultiAgentEnv around the simulator core, for all three learned
-controllers (sec:method:rl, sec:method:training).
+controllers and the full-view setting (sec:method:rl, sec:method:training).
 
 The core (environment/multi_agent_env.py, exposed as `core`) holds the state
-and runs the six stages. This adapter builds one observation per robot,
-passes the robots' slots to `core.step`, and reshapes the result for RLlib.
-Every arm has one RLlib agent per robot, with id str(robot_id) and the action
-space Discrete(d_max + 1).
+and runs the six stages. This adapter builds observations, collects the robots'
+slots and passes them to `core.step` once per timestep. Every arm has one RLlib
+agent per robot, with id str(robot_id) and the action space Discrete(d_max + 1).
+
+A timestep is split into turns. In one turn the adapter returns observations
+only for the agents that choose in that turn, so RLlib asks the module only
+for them. The decentralised router and the full-view setting have one turn
+with every agent. The centralised router has one turn per agent, in the
+priority order of the episode. The section-based router has turn k hold the
+k-th agent, in priority order, of every zone that has at least k agents. The
+zones are fixed at the start of the timestep by the zone of each agent's
+vertex. An agent in turn k sees the vertices the earlier agents of its unit
+have chosen (the claimed feature and the claim mask). The core steps once,
+after the last turn, and `timestep_completed` is true on that sub-step only.
+The sub-steps before it return no rewards, and RLlib adds the reward that
+arrives with the last one to the action each agent took earlier.
+
+When the episode ends, the last sub-step returns an observation for every
+agent, truncated, with no claims. These observations only feed the value
+bootstrap, since nobody has chosen at the cut-off.
 
 The controller decides the window a robot's observation covers and whose
 reward it is credited with.
@@ -34,8 +50,8 @@ window above max_local_nodes or a move that leads outside the window. A
 window is never truncated (#66).
 
 Each observation build that feeds a decision is timed and recorded on the
-core's log as routing time, so the mean decision runtime of a learned arm
-covers producing the joint action and not only decoding slots.
+core's log as routing time, one record per turn, so the mean decision runtime
+of a learned arm covers producing the joint action and not only decoding slots.
 
 Training episodes cycle through `train_seeds` in order, so every training
 seed is used equally often. The thesis fixes the split, not the order.
@@ -63,7 +79,7 @@ from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.observation import local_subgraph
-from slap_mapd_coupling.environment.spaces import action_space, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_for_slot, action_space, max_out_degree
 from slap_mapd_coupling.environment.zones import check_partition, halo
 from slap_mapd_coupling.models.gnn_encoder import Pooling
 from slap_mapd_coupling.models.local_subgraph_encoding import (
@@ -234,6 +250,8 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             graph, skus, initial_storage_counts, storage_capacities, config
         )
         self.last_seed: Optional[int] = None  # the seed the most recent reset() actually used
+        # True on the sub-step that ran the core, false on every other one.
+        self.timestep_completed = False
 
     def window_of(self, agent_id: AgentId) -> tuple[VertexId, ...]:
         """The window robot `agent_id`'s observation covers at the current t."""
@@ -256,27 +274,84 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self.last_seed = seed
         super().reset(seed=seed, options=options)
         self.core.reset(seed=seed)
-        return self._encode_all_observations(), {str(aid): {} for aid in self.agents}
+        self.timestep_completed = False
+        self._start_timestep()
+        acting = self._turns[0]
+        return self._encode(acting), {str(aid): {} for aid in acting}
 
     def step(  # type: ignore[override]
         self, action_dict: Mapping[str, int]
     ) -> tuple[dict[str, Any], dict[str, float], dict[str, bool], dict[str, bool], dict[str, dict]]:
-        actions: dict[AgentId, int] = {int(aid): int(slot) for aid, slot in action_dict.items()}
-        groups = self._groups()  # the credit groups at the start of the step
-        _, rewards, terminated, truncated, infos = self.core.step(actions)
+        """One sub-step. `action_dict` must hold exactly the agents of the current turn."""
+        turn = self._turns[self._turn]
+        if set(action_dict) != {str(aid) for aid in turn}:
+            raise ValueError(
+                f"the agents of this turn are {sorted(turn)}, but actions came for "
+                f"{sorted(action_dict)}."
+            )
+        locations = self.core.fleet.locations()
+        for aid, slot in action_dict.items():
+            agent_id = int(aid)
+            action = action_for_slot(self.graph, locations[agent_id], int(slot))
+            self._slots[agent_id] = int(slot)
+            if action.kind == "wait":
+                self._chosen[agent_id] = locations[agent_id]
+            else:
+                assert action.target is not None  # guaranteed by Action's own validator
+                self._chosen[agent_id] = action.target
+        self.timestep_completed = False
+
+        if self._turn + 1 < len(self._turns):
+            self._turn += 1
+            acting = self._turns[self._turn]
+            flags = {str(aid): False for aid in acting} | {"__all__": False}
+            infos = {str(aid): {} for aid in acting} | {"__all__": {}}
+            return self._encode(acting), {}, flags, dict(flags), infos
+
+        _, rewards, terminated, truncated, infos = self.core.step(dict(sorted(self._slots.items())))
         if self.controller in ("centralised", "section"):
-            rewards = team_mean(rewards, groups)
-
-        observations = self._encode_all_observations()
+            rewards = team_mean(rewards, self._groups_at_start)
+        self.timestep_completed = True
         str_rewards = {str(aid): value for aid, value in rewards.items()}
-        str_terminated = {str(aid): value for aid, value in terminated.items() if aid != "__all__"}
+        if truncated["__all__"] or terminated["__all__"]:
+            # Nobody has chosen at the cut-off, so the observations carry no claims.
+            acting = sorted(self.core.fleet.locations())
+            observations = self._encode(acting, claims=False)
+            str_terminated = {str(aid): bool(terminated[aid]) for aid in acting}
+            str_truncated = {str(aid): bool(truncated[aid]) for aid in acting}
+            str_infos = {str(aid): infos[aid] for aid in acting}
+        else:
+            self._start_timestep()
+            acting = self._turns[0]
+            observations = self._encode(acting)
+            str_terminated = {str(aid): False for aid in acting}
+            str_truncated = {str(aid): False for aid in acting}
+            str_infos = {str(aid): infos[aid] for aid in acting}
         str_terminated["__all__"] = bool(terminated["__all__"])
-        str_truncated = {str(aid): value for aid, value in truncated.items() if aid != "__all__"}
         str_truncated["__all__"] = bool(truncated["__all__"])
-        str_infos = {str(aid): value for aid, value in infos.items() if aid != "__all__"}
         str_infos["__all__"] = {}
-
         return observations, str_rewards, str_terminated, str_truncated, str_infos
+
+    def _start_timestep(self) -> None:
+        """Fixes the credit groups and the turns of the timestep the core is at."""
+        self._groups_at_start = self._groups()
+        self._turns = self._build_turns()
+        self._turn = 0
+        self._chosen: dict[AgentId, VertexId] = {}
+        self._slots: dict[AgentId, int] = {}
+
+    def _build_turns(self) -> list[list[AgentId]]:
+        agents = sorted(self.core.fleet.locations())
+        if self.controller in ("decentralised", "full_view"):
+            return [agents]
+        by_group: dict[int, list[AgentId]] = {}
+        for agent_id in self.core.priority:
+            by_group.setdefault(self._groups_at_start[agent_id], []).append(agent_id)
+        queues = [by_group[group] for group in sorted(by_group)]
+        return [
+            [queue[k] for queue in queues if len(queue) > k]
+            for k in range(max(len(queue) for queue in queues))
+        ]
 
     def _groups(self) -> dict[AgentId, int]:
         """The credit group of every robot, the zone that owns its vertex.
@@ -286,7 +361,10 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             return {agent_id: 0 for agent_id in locations}
         return {agent_id: self._arm.group[v] for agent_id, v in locations.items()}
 
-    def _encode_all_observations(self) -> dict[str, Any]:
+    def _encode(self, acting: Sequence[AgentId], claims: bool = True) -> dict[str, Any]:
+        """The observations of the agents in `acting`. With `claims`, an agent of the
+        centralised or section router also sees the choices of the earlier agents of its
+        unit. Those are the agents in the same group that have chosen in this timestep."""
         # One window and one pool for every robot, since the builder raises
         # if a robot is missing. The decentralised arm passes None, which is
         # the field of view.
@@ -298,6 +376,13 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             windows = {agent_id: self._arm.window[v] for agent_id, v in locations.items()}
             if self._pooling != "none":
                 pool_vertices = {agent_id: self._arm.pool[v] for agent_id, v in locations.items()}
+        chosen: Optional[dict[AgentId, dict[AgentId, VertexId]]] = None
+        if claims and self.controller in ("centralised", "section"):
+            groups = self._groups_at_start
+            chosen = {
+                agent_id: {j: v for j, v in self._chosen.items() if groups[j] == groups[agent_id]}
+                for agent_id in acting
+            }
         encoded = encode_all_observations(
             self.graph,
             self.core.fleet,
@@ -309,6 +394,8 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             windows=windows,
             pooling=self._pooling,
             pool_vertices=pool_vertices,
+            acting=acting,
+            chosen=chosen,
         )
         observations = {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}
         # The build is part of producing the joint action, so it counts as routing time

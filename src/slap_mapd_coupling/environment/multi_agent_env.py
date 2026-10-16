@@ -196,6 +196,11 @@ class WarehouseMAPDEnv:
         return MappingProxyType(self._congestion_by_agent)
 
     @property
+    def priority(self) -> tuple[AgentId, ...]:
+        """The agent order drawn at reset and held for the episode."""
+        return self._priority
+
+    @property
     def t(self) -> int:
         """Current timestep -- exposed read-only for callers building o_i(t)
         (environment/observation.py) alongside self.fleet/self.tasks
