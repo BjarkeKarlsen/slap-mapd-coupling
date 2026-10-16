@@ -12,6 +12,17 @@ DemandEstimate = dict[SkuId, float]  # rho_hat_t(k)
 TrafficEstimate = dict[EdgeKey, float]  # mu_hat_t(e) or w_hat_t(e); same shape, different meaning
 
 
+def no_orders_in_window(demand_estimate: DemandEstimate) -> bool:
+    """True when no order was released in the window the estimates look back over.
+
+    rho_hat_t(k) is the number of orders for k released in the window divided by
+    Delta (the estimates equation), so it is zero for every SKU exactly when no
+    order was released. F_dem and F_cng then have no evidence to act on and skip
+    the update, x_t = x_{t-Delta} (sec:method:storage).
+    """
+    return not any(demand_estimate.values())
+
+
 @runtime_checkable
 class StorageRule(Protocol):
     """F in the storage update, x_t = F(x_{t-Delta}, rho_hat_t, mu_hat_t, w_hat_t).

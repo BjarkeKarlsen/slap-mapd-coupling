@@ -15,6 +15,11 @@ Because `environment/multi_agent_env.py` only ever calls the active rule
 through the registry, adding a rule never touches the environment loop,
 the controllers, or evaluation.
 
+At an epoch the environment passes the three estimates of the estimates
+equation, counted per step over the last `Delta` steps only and reset after
+every epoch (`environment/storage_estimates.py`). A SKU or edge with no event
+in the window has no entry, so a rule reads it with `.get(key, 0.0)`.
+
 Usage:
 ```python
 from slap_mapd_coupling.storage.registry import get_storage_rule

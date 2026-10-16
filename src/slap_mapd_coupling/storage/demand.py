@@ -3,9 +3,9 @@
 Sorts K by rho_hat_t(k) descending, sorts V_str by
 min_{g in V_del} d_G(v,g) ascending, and places SKUs into vertices in
 that joint order, skipping a vertex once it is at capacity
-(eq:feasiblestorage). This is argmin_x D(x; rho_hat_t) from
-eq:storageobjective with beta=chi=0, solved greedily rather than exactly
--- ties in either sort are broken by id, since eq:storageupdate must be
+(the capacity constraint). This is argmin_x D(x; rho_hat_t) from
+the storage objective with beta=chi=0, solved greedily rather than exactly
+-- ties in either sort are broken by id, since the storage update must be
 a genuine function (sec:pf:storage), and the SKU-major/vertex-minor
 iteration order this produces is also the "descending marginal score"
 order storage/relocation.py's cap uses (see its own docstring for why
@@ -16,13 +16,18 @@ If the fleet's total capacity can't fit every unit of every SKU under
 this particular greedy ordering (a different ordering might have),
 whatever doesn't fit is simply not placed -- an accepted consequence of
 "solved greedily rather than exactly," not a bug to work around here.
+
+If no order was released in the window the estimates look back over, there is no
+evidence to act on and the update is skipped, x_t = x_{t-Delta}, so stock is not
+relocated on no evidence (sec:method:storage). The estimates are per step, so
+that is the case exactly when rho_hat_t(k) is zero for every SKU.
 """
 
 from __future__ import annotations
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
-from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate
+from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate, no_orders_in_window
 from slap_mapd_coupling.storage.registry import register_storage_rule
 from slap_mapd_coupling.storage.relocation import apply_relocation_cap
 
@@ -109,6 +114,8 @@ def f_dem(
             "storage_mode='demand' requires reassignment_cap (nu); "
             "ExperimentConfig already enforces this, so this indicates a caller bug."
         )
+    if no_orders_in_window(demand_estimate):
+        return x_prev  # no evidence to act on: x_t = x_{t-Delta}
     sku_order = sorted(x_prev.skus, key=lambda k: (-demand_estimate.get(k, 0.0), k))
     storage_order = ranked_storage_vertices(graph)
     vertex_order_by_sku = {sku_id: storage_order for sku_id in x_prev.skus}
