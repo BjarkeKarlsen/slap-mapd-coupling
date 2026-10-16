@@ -3,9 +3,9 @@ the padding caps of its windows (sec:method:rl).
 
 A window larger than `max_local_nodes` raises in the adapter, so the cap is set from the graph
 to the largest window the arm uses and no window is truncated. That is every movable vertex for
-the centralised arm, the largest field of view for the decentralised arm, and the largest zone
-with its halo for the section arm. Pooling is "mean" for the centralised and section arms and
-"none" for the decentralised arm.
+the centralised arm and the full-view setting, the largest field of view for the decentralised
+arm, and the largest zone with its halo for the section arm. Pooling is "mean" for every arm but
+the decentralised one, which has "none".
 """
 
 from __future__ import annotations
@@ -21,7 +21,12 @@ from slap_mapd_coupling.models.gnn_encoder import Pooling
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.env import Zones
 
-POOLING: Mapping[str, Pooling] = {"decentralised": "none", "centralised": "mean", "section": "mean"}
+POOLING: Mapping[str, Pooling] = {
+    "decentralised": "none",
+    "centralised": "mean",
+    "section": "mean",
+    "full_view": "mean",
+}
 
 
 # NamedTuple, not a dataclass, so a test can load an example by path without registering it.
@@ -43,7 +48,7 @@ def largest_window(
 ) -> int:
     """The vertices of the largest window the arm uses, so the cap truncates none."""
     movable = [v for v, vertex in graph.vertices.items() if vertex.role.movable]
-    if controller == "centralised":
+    if controller in ("centralised", "full_view"):
         return len(movable)
     if controller == "section":
         assert zones is not None

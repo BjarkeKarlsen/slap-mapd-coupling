@@ -11,8 +11,9 @@ and `02_centralised_fixed.py` and `03_section_based.py` are its variants.
 encoder and head configs, `PPOHyperparameters` and the seed split, and returns a
 `PPOConfig`. It rejects, before Ray starts, any setting the adapter would reject.
 
-- The credit signal (`PPOHyperparameters.credit_signal`) has no default. The YAML file
-  sets `per_agent`, an illustrative choice.
+- The credit is not a setting. It follows the controller. The centralised arm credits each
+  robot with the mean reward of the fleet, the section arm with the mean reward of the robots
+  in its zone, and the decentralised arm and the full-view setting with its own reward.
 - The training budget, `PPOHyperparameters.training_budget_env_steps`, has no default.
   It is counted in environment steps and is equal across arms. It is set in the YAML file.
 - `GNNEncoderConfig.pooling` has no default. Use `"mean"` for the centralised and

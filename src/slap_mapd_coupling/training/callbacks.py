@@ -140,7 +140,7 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
 
     The five `return_*` values are the terms of the reward summed over the robots and the
     steps of the episode (environment/reward_function.py::RewardTerms, each signed). They add
-    up to the episode return RLlib reports, also under a team-mean credit signal, which
+    up to the episode return RLlib reports, also when the credit is a group mean, which
     only moves reward between robots. `override_rate` is the share of robot-steps in which a
     robot was overridden by conflict resolution. `episode_max_agent_override_share` is the
     share of all the episode's overrides that fell on the single most overridden robot, and

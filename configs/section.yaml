@@ -72,7 +72,6 @@ ppo:
   entropy_coeff: 0.02
   vf_loss_coeff: 1.0
   training_budget_env_steps: 4200
-  credit_signal: per_agent  # the thesis leaves it open for the wider arms (#83)
 
 train_seed_count: 5
 eval_seed_count: 3

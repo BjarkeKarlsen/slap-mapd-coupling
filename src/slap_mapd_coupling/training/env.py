@@ -7,24 +7,27 @@ passes the robots' slots to `core.step`, and reshapes the result for RLlib.
 Every arm has one RLlib agent per robot, with id str(robot_id) and the action
 space Discrete(d_max + 1).
 
-The controller decides only the window a robot's observation covers.
+The controller decides the window a robot's observation covers and whose
+reward it is credited with.
 
 - decentralised, the field of view.
 - centralised, every movable vertex.
+- full_view, every movable vertex too. It is the decentralised router with the
+  whole graph in view and the pooled readout, not a controller in Pi.
 - section, the zone that owns the robot's vertex together with its halo.
   Ownership follows the vertex, so the window changes on the step a robot
   enters another zone.
 
 With pooling on, the pooled readout averages over the vertices the router
-owns. These are every movable vertex for the centralised router and the zone
-for the section-based router. The decentralised readout does not pool, so
-pooling with that arm raises.
+owns. These are every movable vertex for the centralised router and the
+full-view setting, and the zone for the section-based router. The decentralised
+readout does not pool, so pooling with that arm raises.
 
-The credit signal (tab:trainparams, #83) has no default. "per_agent" keeps
-each robot's own reward. "team_mean" gives each robot the mean reward of its
-group, the whole fleet for the centralised arm and the robots in the same
-zone at the start of the step for the section arm. The decentralised arm
-learns from each robot's own reward, so "team_mean" with it raises.
+The credit follows the agents that choose together (the credit). Each robot is
+credited with the mean reward of its group, the whole fleet for the centralised
+arm and the robots in the same zone at the start of the step for the section
+arm. The decentralised arm and the full-view setting credit each robot with its
+own reward.
 
 Every window is checked when the adapter is built, so a rollout never meets a
 window above max_local_nodes or a move that leads outside the window. A
@@ -49,7 +52,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
@@ -71,8 +74,6 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
     encoded_observation_space,
 )
 
-# tab:trainparams, open for the centralised and section-based arms (#83).
-CreditSignal = Literal["team_mean", "per_agent"]
 Zones = Sequence[frozenset[VertexId]]
 
 
@@ -80,7 +81,7 @@ Zones = Sequence[frozenset[VertexId]]
 class ArmWindows:
     """For every movable vertex, what a robot standing there sees under the
     centralised or section arm. `window` is the window in encoding order,
-    `pool` the vertices the router owns, and `group` the team_mean group."""
+    `pool` the vertices the router owns, and `group` the credit group."""
 
     window: Mapping[VertexId, tuple[VertexId, ...]]
     pool: Mapping[VertexId, frozenset[VertexId]]
@@ -89,21 +90,15 @@ class ArmWindows:
 
 def check_arm(
     controller: Optional[ControllerArchitecture],
-    credit_signal: CreditSignal,
     pooling: Pooling,
     zones: Optional[Zones],
 ) -> None:
-    """Raises ValueError unless the controller, the credit signal, the pooling
-    and the zones fit together. The adapter and build_ppo_config both call it,
+    """Raises ValueError unless the controller, the pooling and the zones fit
+    together. The adapter and build_ppo_config both call it,
     so the module and the observations never disagree on pooling."""
     if controller is None:
         raise ValueError("the adapter trains a learned controller, but the config names a planner.")
     if controller == "decentralised":
-        if credit_signal == "team_mean":
-            raise ValueError(
-                "credit_signal='team_mean' does not apply to the decentralised arm, which learns "
-                "from each robot's own reward. Use credit_signal='per_agent'."
-            )
         if pooling != "none":
             raise ValueError(
                 f"pooling={pooling!r} with the decentralised arm. Only the centralised and "
@@ -140,7 +135,7 @@ def arm_windows(
     encoding_config: LocalSubgraphEncodingConfig,
     zones: Optional[Zones],
 ) -> Optional[ArmWindows]:
-    """The windows of the centralised or section arm, checked against the
+    """The windows of the centralised, full_view or section arm, checked against the
     graph and the cap. None for the decentralised arm, whose window is the
     field of view, checked by check_slot_targets. The halo of each zone is
     computed once here."""
@@ -148,7 +143,7 @@ def arm_windows(
         check_slot_targets(graph, observation_depth, encoding_config)
         return None
     movable = _movable(graph)
-    if controller == "centralised":
+    if controller in ("centralised", "full_view"):
         everything = tuple(sorted(movable))
         arm = ArmWindows(
             window={v: everything for v in movable},
@@ -201,12 +196,11 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         encoding_config: LocalSubgraphEncodingConfig,
         train_seeds: Sequence[int],
         *,
-        credit_signal: CreditSignal,
         pooling: Pooling,
         zones: Optional[Zones] = None,
         first_seed_index: int = 0,
     ) -> None:
-        check_arm(config.controller, credit_signal, pooling, zones)
+        check_arm(config.controller, pooling, zones)
         assert config.controller is not None  # check_arm rejects a planner
         if not train_seeds:
             raise ValueError("train_seeds must hold at least one seed of the training split.")
@@ -218,7 +212,6 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self.controller: ControllerArchitecture = config.controller
         self._config = config
         self._encoding_config = encoding_config
-        self._credit_signal = credit_signal
         self._pooling = pooling
         self._d_max = max_out_degree(graph)
         self._train_seeds = tuple(train_seeds)
@@ -269,9 +262,9 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self, action_dict: Mapping[str, int]
     ) -> tuple[dict[str, Any], dict[str, float], dict[str, bool], dict[str, bool], dict[str, dict]]:
         actions: dict[AgentId, int] = {int(aid): int(slot) for aid, slot in action_dict.items()}
-        groups = self._groups()  # the team_mean groups at the start of the step
+        groups = self._groups()  # the credit groups at the start of the step
         _, rewards, terminated, truncated, infos = self.core.step(actions)
-        if self._credit_signal == "team_mean":
+        if self.controller in ("centralised", "section"):
             rewards = team_mean(rewards, groups)
 
         observations = self._encode_all_observations()
@@ -286,7 +279,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         return observations, str_rewards, str_terminated, str_truncated, str_infos
 
     def _groups(self) -> dict[AgentId, int]:
-        """The team_mean group of every robot, the zone that owns its vertex.
+        """The credit group of every robot, the zone that owns its vertex.
         The centralised arm has one group."""
         locations = self.core.fleet.locations()
         if self._arm is None:

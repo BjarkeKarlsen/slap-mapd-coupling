@@ -2,9 +2,8 @@
 
 A thin variant of 04_decentralised_training.py. The centralised arm sees every
 movable vertex, so the padding cap is the number of movable vertices, and its
-readout pools over all of them (pooling "mean"). The credit signal is
-"per_agent", an illustrative choice because the thesis leaves it open for this
-arm. Options and output are those of 04_decentralised_training.py, for example
+readout pools over all of them (pooling "mean"). Each robot is credited with the
+mean reward of the fleet. Options and output are those of 04_decentralised_training.py, for example
     python examples/02_centralised_fixed.py --budget-env-steps=600
 """
 

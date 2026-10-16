@@ -11,8 +11,6 @@ episode. This file trains the decentralised arm. 02_centralised_fixed.py and
 Values that are illustrative, not the thesis's (tab:trainparams and
 tab:modelparams leave them TBD, or this script has no reason to fix them):
 - every PPO hyperparameter, the training budget and the seed counts,
-- credit_signal="per_agent" for every arm, because the thesis leaves the
-  credit signal of the centralised and section arms open,
 - the number of zones of the section arm (NUM_ZONES, zones follow the aisles).
 
 Window caps. A window larger than max_local_nodes raises, so the cap is set
@@ -99,7 +97,6 @@ from slap_mapd_coupling.training.config import (
     build_ppo_config,
     split_seeds,
 )
-from slap_mapd_coupling.training.env import CreditSignal
 from slap_mapd_coupling.training.policy import ModulePolicy
 from slap_mapd_coupling.training.spec import (
     TrainingSpec,
@@ -150,8 +147,6 @@ def spec_for(controller: ControllerArchitecture) -> TrainingSpec:
 
 _SPEC = spec_for("decentralised")
 ILLUSTRATIVE_BUDGET_ENV_STEPS = _SPEC.ppo.training_budget_env_steps
-# Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
-CREDIT_SIGNAL: CreditSignal = _SPEC.ppo.credit_signal
 # Illustrative. The number of zones is a sweep parameter (tab:modelparams).
 NUM_ZONES = 3
 # The storage rule a policy is evaluated under. "matched" training uses it too.
@@ -464,7 +459,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
     print(
         f"{controller} arm on {len(instance.graph.vertices)} vertices, "
         f"max_local_nodes={arm.encoding.max_local_nodes}, pooling={arm.pooling}, "
-        f"credit_signal={CREDIT_SIGNAL}, arrival_rate={config.arrival_rate}, "
+        f"arrival_rate={config.arrival_rate}, "
         f"horizon={config.horizon}, communication={config.communication}"
     )
 

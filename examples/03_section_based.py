@@ -5,7 +5,7 @@ its vertex together with the zone's halo, so the padding cap is the largest zone
 with its halo, and its readout pools over the zone (pooling "mean"). Zones follow
 the aisles (zones_by_aisle), and the number of zones, NUM_ZONES in
 04_decentralised_training.py, is illustrative because the thesis makes it a sweep
-parameter. The credit signal is "per_agent", also illustrative. Options and output
+parameter. Each robot is credited with the mean reward of its zone. Options and output
 are those of 04_decentralised_training.py, for example
     python examples/03_section_based.py --budget-env-steps=600
 """

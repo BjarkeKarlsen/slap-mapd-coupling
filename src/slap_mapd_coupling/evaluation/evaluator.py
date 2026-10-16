@@ -56,10 +56,8 @@ def run_episode(
     runs through the adapter that trains the arm (training/env.py), built with
     the one evaluation seed `config.seed` and reset with it, so the policy sees
     the observations it saw in training. `encoding_config` and `pooling` must be
-    those the module was trained with. The adapter requires a credit signal, and
-    the loop never reads the rewards, so "per_agent" is passed because every arm
-    accepts it. The policy is reset with the episode seed, so its sampling replays
-    bit for bit. The policy samples a legal slot with a seeded stream per robot,
+    those the module was trained with. The policy is reset with the episode seed, so its
+    sampling replays bit for bit. The policy samples a legal slot with a seeded stream per robot,
     and whether evaluation should take the most likely slot instead is still open.
 
     With `trace_path` the episode also writes a per-step trace there
@@ -141,7 +139,6 @@ def _controller_run(
         config,
         encoding_config,
         (config.seed,),
-        credit_signal="per_agent",
         pooling=pooling,
         zones=zones,
     )
