@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from slap_mapd_coupling.training.spec import (
     build_experiment_config,
+    build_storage,
     build_study,
     load_spec,
     override_spec,
@@ -36,22 +37,35 @@ def spec():
     return load_spec(CONFIG)
 
 
-def test_the_shipped_file_builds_a_study(spec):
-    study = build_study(spec)
-    assert study.config.controller == "decentralised"
-    assert study.arm.pooling == "none"
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
+def test_every_arm_has_a_file_that_builds_a_study(controller):
+    arm_spec = load_spec(ROOT / "configs" / f"{controller}.yaml")
+    study = build_study(arm_spec)
+    assert arm_spec.controller == study.config.controller == controller
+    assert study.arm.pooling == ("none" if controller == "decentralised" else "mean")
 
 
-def test_the_example_reads_its_hyperparameters_from_the_file(example_04, spec):
-    assert example_04.build_hyperparameters(900) == with_budget(spec, 900).ppo
-    assert example_04.ILLUSTRATIVE_BUDGET_ENV_STEPS == spec.ppo.training_budget_env_steps
+def test_the_files_of_the_arms_differ_only_in_the_controller(spec):
+    for controller in ("centralised", "section"):
+        other = load_spec(ROOT / "configs" / f"{controller}.yaml")
+        assert other == override_spec(spec, controller=controller)
+
+
+@pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
+def test_the_example_reads_its_hyperparameters_from_the_file_of_its_arm(example_04, controller):
+    arm_spec = load_spec(ROOT / "configs" / f"{controller}.yaml")
+    assert example_04.build_hyperparameters(900, controller) == with_budget(arm_spec, 900).ppo
+    assert example_04.spec_for(controller) == arm_spec
+    assert example_04.ILLUSTRATIVE_BUDGET_ENV_STEPS == (
+        example_04.spec_for("decentralised").ppo.training_budget_env_steps
+    )
 
 
 @pytest.mark.parametrize("controller", ["decentralised", "centralised", "section"])
 def test_the_file_and_the_example_build_the_same_study(example_04, spec, controller):
     # The example keeps its own study constants (the campaign script pins some of them), so
     # this is what stops the two from drifting apart.
-    study = build_study(override_spec(spec, controller=controller))
+    study = build_study(load_spec(ROOT / "configs" / f"{controller}.yaml"))
     instance = example_04.build_generated_instance()
     skus, capacities, counts = example_04.build_storage(instance.graph)
     config = example_04.build_config("fixed_only", seed=0, controller=controller)
@@ -101,3 +115,29 @@ def test_a_file_that_is_not_a_mapping_is_rejected(tmp_path):
     path.write_text("- 1\n- 2\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mapping"):
         load_spec(path)
+
+
+def test_the_storage_has_many_skus_of_different_sizes_spread_over_the_storage_vertices(spec):
+    study = build_study(spec)
+    storage_vertices = {
+        v for v, vertex in study.instance.graph.vertices.items() if vertex.role.storage
+    }
+    assert len(study.skus) == spec.storage.num_skus >= 20
+    assert {sku.unit_capacity for sku in study.skus.values()} == set(spec.storage.unit_capacities)
+    assert set(study.capacities) == storage_vertices
+    assert set(study.capacities.values()) == {100.0}
+    stocked = {v for per_vertex in study.counts.values() for v in per_vertex}
+    assert stocked == storage_vertices
+    # eq:feasiblestorage holds at the start.
+    for v in storage_vertices:
+        used = sum(
+            study.skus[k].unit_capacity * per_vertex.get(v, 0)
+            for k, per_vertex in study.counts.items()
+        )
+        assert used <= study.capacities[v]
+
+
+def test_initial_counts_that_do_not_fit_the_capacity_are_rejected(spec):
+    crowded = spec.storage.model_copy(update={"initial_units": 50})
+    with pytest.raises(ValueError, match="do not fit"):
+        build_storage(crowded, build_study(spec).instance.graph)

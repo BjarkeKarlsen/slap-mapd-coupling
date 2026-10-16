@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, NonNegativeFloat, PositiveFloat, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, PositiveFloat, PositiveInt
 from ray.rllib.algorithms.ppo import PPOConfig
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -48,16 +48,22 @@ from slap_mapd_coupling.training.trainer import CheckpointSettings
 
 
 class StorageSettings(BaseModel):
-    """One SKU, the same capacity at every storage vertex and the initial units spread over the
-    first `initial_vertices` storage vertices."""
+    """The SKUs and where they start.
+
+    There are `num_skus` SKUs named sku_00, sku_01 and so on. Their unit capacities b_k cycle
+    through `unit_capacities`, so the SKUs differ in size. Every storage vertex has the capacity
+    `vertex_capacity`. SKU number i starts with `initial_units` units at storage vertex number
+    i mod |V_str|, with the storage vertices in increasing vertex number, so the SKUs spread over
+    all storage vertices. A new task picks a uniformly random (SKU, vertex) pair that is in stock,
+    so more SKUs mean more distinct pickups.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    sku_id: str
-    unit_capacity: PositiveFloat
+    num_skus: PositiveInt
+    unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
     vertex_capacity: PositiveFloat
     initial_units: PositiveInt
-    initial_vertices: PositiveInt
 
 
 class ExperimentSettings(BaseModel):
@@ -205,23 +211,29 @@ def build_instance(spec: TrainingSpec) -> GeneratedInstance:
 
 
 def build_storage(
-    spec: TrainingSpec, instance: GeneratedInstance
+    storage: StorageSettings, graph: WarehouseGraph
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
-    storage = spec.storage
-    storage_vertices = [v for v, vertex in instance.graph.vertices.items() if vertex.role.storage]
-    if len(storage_vertices) < storage.initial_vertices:
+    """The SKUs, the capacity of every storage vertex and the initial counts, as described by
+    `StorageSettings`. Raises if the initial counts do not fit the capacity (eq:feasiblestorage)."""
+    storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
+    skus: dict[SkuId, SkuType] = {}
+    counts: dict[SkuId, dict[VertexId, int]] = {}
+    used = dict.fromkeys(storage_vertices, 0.0)
+    for i in range(storage.num_skus):
+        sku_id = f"sku_{i:02d}"
+        unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
+        vertex = storage_vertices[i % len(storage_vertices)]
+        skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
+        counts[sku_id] = {vertex: storage.initial_units}
+        used[vertex] += unit_capacity * storage.initial_units
+    over = {v: u for v, u in used.items() if u > storage.vertex_capacity}
+    if over:
         raise ValueError(
-            f"storage.initial_vertices={storage.initial_vertices} but the instance has "
-            f"{len(storage_vertices)} storage vertices"
+            f"The initial counts do not fit vertex_capacity={storage.vertex_capacity}: "
+            f"used capacity by vertex {over}. Lower num_skus or initial_units, or raise "
+            "vertex_capacity."
         )
-    skus = {storage.sku_id: SkuType(sku_id=storage.sku_id, unit_capacity=storage.unit_capacity)}
-    capacities = {v: storage.vertex_capacity for v in storage_vertices}
-    counts = {
-        storage.sku_id: {
-            v: storage.initial_units for v in storage_vertices[: storage.initial_vertices]
-        }
-    }
-    return skus, capacities, counts
+    return skus, {v: storage.vertex_capacity for v in storage_vertices}, counts
 
 
 def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> ExperimentConfig:
@@ -250,7 +262,7 @@ def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> Expe
 
 def build_study(spec: TrainingSpec) -> Study:
     instance = build_instance(spec)
-    skus, capacities, counts = build_storage(spec, instance)
+    skus, capacities, counts = build_storage(spec.storage, instance.graph)
     config = build_experiment_config(spec)
     max_messages = spec.arm.max_messages or max(spec.experiment.num_agents - 1, 1)
     arm = build_arm(

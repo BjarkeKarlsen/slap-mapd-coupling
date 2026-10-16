@@ -8,7 +8,7 @@ config first.
 Checkpoints are Tune's own (`tune.CheckpointConfig`). A run writes one every
 `CheckpointSettings.frequency` iterations and one at the end, keeps the `num_to_keep` best by
 `score_attribute` (and always the latest), and `TrainingRun.best_checkpoint` is the best one by
-that score. The score is the training return by default, which is the number PPO reports. It is
+that score. The score is the mean training return by default, which is the number PPO reports. It is
 not the evaluation result, so a high score is no promise of completed tasks (see the note on
 `deliver_reward` in examples/04_decentralised_training.py).
 """
@@ -20,11 +20,12 @@ import math
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, field_validator
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
 
 from slap_mapd_coupling.training.callbacks import (
+    EPISODE_RETURN_KEY,
     TrainingProgressCallbacks,
     format_iteration,
     iteration_record,
@@ -32,7 +33,7 @@ from slap_mapd_coupling.training.callbacks import (
 from slap_mapd_coupling.training.config import DEFAULT_POLICY_ID
 
 BUDGET_METRIC = "num_env_steps_sampled_lifetime"
-DEFAULT_SCORE_ATTRIBUTE = "env_runners/episode_return_mean"
+DEFAULT_SCORE_ATTRIBUTE = EPISODE_RETURN_KEY
 
 
 class CheckpointSettings(BaseModel):
@@ -41,6 +42,11 @@ class CheckpointSettings(BaseModel):
     Illustrative values, since the thesis leaves the checkpointing of a run open. A frequency of
     0 saves only the checkpoint at the end of the run. `num_to_keep` of None keeps every
     checkpoint. With a number, Tune deletes the lowest scoring ones, but never the latest.
+
+    `score_attribute` must be a top-level key of the training result. Tune ranks by a nested key
+    such as "env_runners/episode_return_mean" only when it reads the best checkpoint back, and
+    deletes by recency, so it would keep the newest checkpoints and not the best. The default is
+    the return that TrainingProgressCallbacks copies to the top level.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -49,6 +55,17 @@ class CheckpointSettings(BaseModel):
     num_to_keep: PositiveInt | None = 3
     score_attribute: str = DEFAULT_SCORE_ATTRIBUTE
     score_order: Literal["max", "min"] = "max"
+
+    @field_validator("score_attribute")
+    @classmethod
+    def _top_level(cls, name: str) -> str:
+        if "/" in name:
+            raise ValueError(
+                f"score_attribute={name!r} is nested. Tune would keep the newest checkpoints "
+                "and not the best ones, so use a top-level key of the result, for example "
+                f"{EPISODE_RETURN_KEY!r}."
+            )
+        return name
 
 
 class TrainingRun(NamedTuple):

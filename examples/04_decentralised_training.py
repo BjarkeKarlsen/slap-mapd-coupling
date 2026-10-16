@@ -60,7 +60,7 @@ Run it with the smallest settings, for example
     python examples/04_decentralised_training.py --budget-env-steps=600
 Ray writes its results under ~/ray_results, with a checkpoint every few iterations, the best ones by
 episode return and the one at the end. The PPO hyperparameters, the budget and the model sizes are in
-configs/decentralised.yaml.
+configs/<arm>.yaml.
 """
 
 from __future__ import annotations
@@ -101,7 +101,12 @@ from slap_mapd_coupling.training.config import (
 )
 from slap_mapd_coupling.training.env import CreditSignal
 from slap_mapd_coupling.training.policy import ModulePolicy
-from slap_mapd_coupling.training.spec import load_spec, with_budget
+from slap_mapd_coupling.training.spec import (
+    TrainingSpec,
+    build_storage as build_storage_from,
+    load_spec,
+    with_budget,
+)
 from slap_mapd_coupling.training.trainer import (
     CheckpointSettings,
     TrainingRun,
@@ -132,8 +137,18 @@ DEFAULT_HORIZON = 630
 # Illustrative. The thesis leaves the training budget TBD (tab:trainparams).
 # The PPO hyperparameters, the budget, the model sizes and the checkpointing are in the YAML file
 # that `slap-mapd train` reads, so there is one place to change them.
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "decentralised.yaml"
-_SPEC = load_spec(CONFIG_PATH)
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+_SPECS: dict[str, TrainingSpec] = {}
+
+
+def spec_for(controller: ControllerArchitecture) -> TrainingSpec:
+    """The spec of `controller` in configs/<controller>.yaml, which 02 and 03 train with too."""
+    if controller not in _SPECS:
+        _SPECS[controller] = load_spec(CONFIG_DIR / f"{controller}.yaml")
+    return _SPECS[controller]
+
+
+_SPEC = spec_for("decentralised")
 ILLUSTRATIVE_BUDGET_ENV_STEPS = _SPEC.ppo.training_budget_env_steps
 # Illustrative. The thesis leaves the credit signal of the wider arms open (#83).
 CREDIT_SIGNAL: CreditSignal = _SPEC.ppo.credit_signal
@@ -186,11 +201,8 @@ def build_instance() -> WarehouseGraph:
 def build_storage(
     graph: WarehouseGraph,
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
-    storage_vertices = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
-    skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
-    capacities = {v: 20.0 for v in storage_vertices}
-    counts = {"tea": {storage_vertices[0]: 8, storage_vertices[1]: 8}}
-    return skus, capacities, counts
+    """The SKUs, vertex capacities and initial counts of configs/<arm>.yaml (storage section)."""
+    return build_storage_from(spec_for("decentralised").storage, graph)
 
 
 def build_config(
@@ -246,9 +258,11 @@ def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfi
     return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
 
 
-def build_hyperparameters(budget_env_steps: int) -> PPOHyperparameters:
-    """The PPO hyperparameters of the YAML file, with the training budget given."""
-    return with_budget(_SPEC, budget_env_steps).ppo
+def build_hyperparameters(
+    budget_env_steps: int, controller: ControllerArchitecture = "decentralised"
+) -> PPOHyperparameters:
+    """The PPO hyperparameters of the YAML file of `controller`, with the budget given."""
+    return with_budget(spec_for(controller), budget_env_steps).ppo
 
 
 def build_arm(
@@ -265,8 +279,8 @@ def build_arm(
 
 def build_gnn_config(config: ExperimentConfig, arm: Arm) -> GNNEncoderConfig:
     return GNNEncoderConfig(
-        num_rounds=_SPEC.model.num_rounds,
-        hidden_width=_SPEC.model.hidden_width,
+        num_rounds=spec_for(arm.controller).model.num_rounds,
+        hidden_width=spec_for(arm.controller).model.hidden_width,
         communication=config.communication,
         pooling=arm.pooling,
     )
@@ -297,7 +311,7 @@ def train(
         config,
         arm.encoding,
         build_gnn_config(config, arm),
-        PolicyValueHeadConfig(hidden_width=_SPEC.model.head_hidden_width),
+        PolicyValueHeadConfig(hidden_width=spec_for(arm.controller).model.head_hidden_width),
         hyperparameters,
         seed_split,
         zones=arm.zones,
@@ -309,7 +323,7 @@ def train(
         hyperparameters.training_budget_env_steps,
         run_name,
         arm_label=arm.controller,
-        settings=checkpoint_settings or _SPEC.checkpoint,
+        settings=checkpoint_settings or spec_for(arm.controller).checkpoint,
         progress_path=progress_path,
     )
 
@@ -462,7 +476,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         counts,
         config,
         arm,
-        build_hyperparameters(args.budget_env_steps),
+        build_hyperparameters(args.budget_env_steps, controller),
         seed_split,
         run_name=f"{controller}_{regime}",
         num_env_runners=args.env_runners,
@@ -470,7 +484,9 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         progress_path=OUTPUT_DIR / f"{controller}_training_progress.jsonl",
     )
     print(f"\nCheckpoint saved to {run.checkpoint}")
-    print(f"Best checkpoint by {_SPEC.checkpoint.score_attribute} saved to {run.best_checkpoint}")
+    print(
+        f"Best checkpoint by {spec_for(controller).checkpoint.score_attribute} saved to {run.best_checkpoint}"
+    )
     overshoot = run.env_steps_sampled - args.budget_env_steps
     print(
         f"Sampled {run.env_steps_sampled} environment steps for a budget of "

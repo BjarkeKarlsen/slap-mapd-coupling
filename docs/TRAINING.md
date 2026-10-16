@@ -55,8 +55,11 @@ Checkpointing is Tune's own (`tune.CheckpointConfig`), set by `CheckpointSetting
   the end of the run, which is always written.
 - `num_to_keep` keeps that many checkpoints, the best by `score_attribute`, and always the latest.
   None keeps all of them.
-- `score_attribute` is `env_runners/episode_return_mean` and `score_order` is `max`, so the best
-  checkpoint is the one with the highest training return.
+- `score_attribute` is `episode_return_mean` and `score_order` is `max`, so the best
+  checkpoint is the one with the highest training return. The score must be a top-level key of the
+  result, so `TrainingProgressCallbacks` copies `env_runners/episode_return_mean` there. Tune ranks
+  by a nested key only when it reads the best one back and deletes by recency, which keeps the newest
+  checkpoints and not the best, so `CheckpointSettings` rejects a name with a `/`.
 
 `TrainingRun.checkpoint` is the checkpoint at the end of the run and `TrainingRun.best_checkpoint`
 the best one that was kept. They are the same folder when the last iteration scored best. The
@@ -67,8 +70,9 @@ with `04b_evaluate_checkpoint.py` before trusting it.
 ### The config file and `slap-mapd train`
 
 One YAML file describes a run: the instance, storage, experiment settings, model sizes, the PPO
-hyperparameters, the budget and the checkpointing. `configs/decentralised.yaml` is the file of
-example 04, and its values are illustrative because the thesis leaves them TBD.
+hyperparameters, the budget and the checkpointing. `configs/decentralised.yaml`, `centralised.yaml` and `section.yaml` are the files of examples 04, 02
+and 03. They differ only in `controller`, and their values are illustrative because the thesis
+leaves them TBD. Edit all three to change a value for every arm.
 `training/spec.py` loads it and builds everything `train` needs.
 
 ```bash

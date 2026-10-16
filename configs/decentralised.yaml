@@ -1,4 +1,5 @@
 # The training run of examples/04_decentralised_training.py, read by `slap-mapd train`.
+# configs/centralised.yaml and configs/section.yaml differ only in `controller`.
 #
 # Every number is illustrative. tab:trainparams and tab:modelparams leave the PPO
 # hyperparameters, the budget, the seed counts and the model sizes TBD, and the load levels
@@ -45,12 +46,14 @@ instance:
   min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
   seed: 42
 
+# 20 SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), spread over the storage
+# vertices, each vertex holding up to 100. Illustrative. A new task picks a random (SKU, vertex)
+# pair that is in stock, so more SKUs mean more distinct pickups. See StorageSettings.
 storage:
-  sku_id: tea
-  unit_capacity: 1.0
-  vertex_capacity: 20.0
+  num_skus: 20
+  unit_capacities: [0.5, 1.0, 2.0]
+  vertex_capacity: 100.0
   initial_units: 8
-  initial_vertices: 2
 
 arm:
   num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)
@@ -78,5 +81,5 @@ eval_seed_count: 3
 checkpoint:
   frequency: 10             # iterations between checkpoints, 0 keeps only the one at the end
   num_to_keep: 3
-  score_attribute: env_runners/episode_return_mean
+  score_attribute: episode_return_mean   # a top-level key of the result
   score_order: max

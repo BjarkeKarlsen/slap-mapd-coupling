@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from slap_mapd_coupling.training.callbacks import TrainingProgressCallbacks
 from slap_mapd_coupling.training.spec import (
     build_study,
     build_study_ppo_config,
@@ -37,8 +38,24 @@ def test_the_checkpoint_settings_become_tunes_checkpoint_config():
 
 def test_the_default_score_is_the_episode_return_and_the_best_is_the_highest():
     settings = CheckpointSettings()
-    assert settings.score_attribute == DEFAULT_SCORE_ATTRIBUTE == "env_runners/episode_return_mean"
+    assert settings.score_attribute == DEFAULT_SCORE_ATTRIBUTE == "episode_return_mean"
     assert settings.score_order == "max"
+
+
+def test_a_nested_score_is_rejected_because_tune_would_keep_the_newest_instead():
+    with pytest.raises(ValidationError, match="top-level"):
+        CheckpointSettings(score_attribute="env_runners/episode_return_mean")
+
+
+def test_the_return_is_copied_to_the_top_level_of_the_result():
+    callbacks = TrainingProgressCallbacks()
+    result = {"env_runners": {"episode_return_mean": 12.5}}
+    callbacks.on_train_result(result=result)
+    assert result["episode_return_mean"] == 12.5
+    # An iteration with no finished episode has no return, and nothing is invented.
+    empty = {"env_runners": {"episode_return_mean": float("nan")}}
+    callbacks.on_train_result(result=empty)
+    assert "episode_return_mean" not in empty
 
 
 def test_a_misspelt_checkpoint_setting_is_rejected():

@@ -110,11 +110,13 @@ def test_it_never_needs_conflict_resolution_on_the_example_04_instance(tmp_path)
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
     graph = example.build_instance()
-    _, capacities, counts = example.build_storage(graph)
+    skus, capacities, counts = example.build_storage(graph)
     config = example.build_config("fixed_only", seed=0).model_copy(
         update={"controller": None, "planner": "token_passing"}
     )
-    _check_run(_env(graph, counts, capacities, config), tmp_path, 500)
+    planner = TokenPassingPlanner()
+    env = WarehouseMAPDEnv(graph, skus, counts, capacities, config, assigner=planner)
+    _check_run((env, planner), tmp_path, 500)
 
 
 def test_it_never_needs_conflict_resolution_on_generated_well_formed_instances(tmp_path):
