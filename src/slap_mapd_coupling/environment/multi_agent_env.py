@@ -5,11 +5,11 @@ Q_t; (2) task assignment (shared across all controllers) matches free
 agents to tasks in Q_t; (3) routing produces one intended action u_i(t)
 per agent, using whichever information the active architecture permits;
 (4) the conflict-resolution operator revises the joint intended action
-into one satisfying eq:vertexconflict/eq:swapconflict, flagging
+into one satisfying the vertex rule and the swap rule, flagging
 overridden agents; (5) the environment applies the resolved joint action,
-advancing l_i(t), the lifecycle sets (eq:lifecycle), and the log; (6) if
+advancing l_i(t), the lifecycle sets (the task stages), and the log; (6) if
 t is a storage epoch, the storage rule additionally applies
-eq:storageupdate. A controller swap touches only stage 3 (routing) and a
+the storage update. A controller swap touches only stage 3 (routing) and a
 storage-rule swap touches only stage 6 -- both go through their
 respective registries (docs/controller_integration.md,
 docs/storage_rule_integration.md), so this loop never changes when either
@@ -44,7 +44,7 @@ silent on both:
 
 Observations returned by reset/step are a placeholder for M2: each
 agent's own current vertex. The full o_i(t) feature vector
-(eq:observation/eq:features) is environment/observation.py, M5 -- not
+(the decentralised observation and the vertex features) is environment/observation.py, M5 -- not
 needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
@@ -112,7 +112,7 @@ class EpisodeLog:
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
     # every controller and planner (observation_depth is required for all of them).
     crowding_sum_by_t: list[float] = field(default_factory=list)
-    # nu_t, units relocated at each storage update (eq:relocation).
+    # nu_t, units relocated at each storage update (relocations per update).
     relocated_units_by_update: list[int] = field(default_factory=list)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
@@ -380,37 +380,51 @@ class WarehouseMAPDEnv:
             ]
 
     def _generate_tasks(self) -> list[Task]:
-        """Stage 1: P_ord -> new tasks (eq:task), entering Q_t.
+        """Stage 1: P_ord -> new tasks (the task definition), entering Q_t.
 
         Flagged design choice (module docstring covers the seeding half):
         the thesis fixes only "expected tasks per timestep = lambda_task"
-        and eq:coupling's stock requirement. Implemented as Poisson(lambda)
+        and the stock condition. Implemented as Poisson(lambda)
         arrivals -- the standard queueing/MAPD convention that matches
-        "expected number per timestep" exactly -- with (SKU, pickup
-        vertex) drawn uniformly among pairs currently in stock (which
-        satisfies eq:coupling by construction) and delivery vertex drawn
-        uniformly from V_del.
+        "expected number per timestep" exactly -- with the SKU drawn
+        uniformly among the SKUs in stock, the pickup vertex uniformly among
+        the vertices holding that SKU (which satisfies the stock condition by
+        construction) and the delivery vertex uniformly from V_del.
+
+        What the generator consumes does not depend on the storage
+        configuration (sec:impl:instances: the same order stream replays
+        under every controller and storage rule). Every step draws the
+        arrival count and then three uniform numbers in [0, 1) per task, one
+        each for the SKU, the pickup vertex and the delivery vertex, whatever
+        is in stock. The numbers are mapped onto the current stock
+        afterwards, so the stock only decides where an order points, never
+        how many numbers are drawn. Choosing the SKU first, rather than a
+        (SKU, vertex) pair, also keeps the demand for a SKU the same under
+        every placement. A pair draw would favour a SKU that is spread over
+        more vertices.
         """
         num_new = int(self._order_rng.poisson(self.config.arrival_rate))
         if num_new == 0:
             return []
+        draws = self._order_rng.random((num_new, 3))
 
-        candidates = [
-            (sku_id, vertex)
-            for sku_id, per_vertex in self.storage.counts.items()
-            for vertex, count in per_vertex.items()
-            if count > 0
-        ]
+        vertices_by_sku = {
+            sku_id: sorted(vertex for vertex, count in per_vertex.items() if count > 0)
+            for sku_id, per_vertex in sorted(self.storage.counts.items())
+        }
+        in_stock = [sku_id for sku_id, vertices in vertices_by_sku.items() if vertices]
         delivery_vertices = sorted(
             v for v, vertex in self.graph.vertices.items() if vertex.role.delivery
         )
-        if not candidates or not delivery_vertices:
+        if not in_stock or not delivery_vertices:
             return []
 
         new_tasks: list[Task] = []
-        for _ in range(num_new):
-            sku_id, pickup_vertex = candidates[self._order_rng.integers(len(candidates))]
-            delivery_vertex = delivery_vertices[self._order_rng.integers(len(delivery_vertices))]
+        for u_sku, u_pickup, u_delivery in draws:
+            sku_id = in_stock[int(u_sku * len(in_stock))]
+            pickup_candidates = vertices_by_sku[sku_id]
+            pickup_vertex = pickup_candidates[int(u_pickup * len(pickup_candidates))]
+            delivery_vertex = delivery_vertices[int(u_delivery * len(delivery_vertices))]
             new_tasks.append(
                 Task(
                     task_id=self._next_task_id,
@@ -459,7 +473,7 @@ class WarehouseMAPDEnv:
         self.log.crowding_sum_by_t.append(sum(self._congestion_by_agent.values()))
 
     def _backlog(self, t: int) -> int:
-        """B_t = |Q_t| + |B_t|, the backlog the keep-up check plots (eq:throughput)."""
+        """B_t = |Q_t| + |B_t|, the backlog that the keep-up check plots."""
         return sum(1 for task in self.tasks if task.status(t) in ("waiting", "active"))
 
     def _compute_rewards(
@@ -521,7 +535,7 @@ class WarehouseMAPDEnv:
 
 
 def _relocated_units(before: StorageState, after: StorageState) -> int:
-    """nu_t (eq:relocation): units that arrive at a (SKU, vertex) cell they
+    """nu_t (relocations per update): units that arrive at a (SKU, vertex) cell they
     were not at before. Counted the same way storage/relocation.py's cap
     counts a relocation, so nu_t <= nu by construction."""
     moved = 0
