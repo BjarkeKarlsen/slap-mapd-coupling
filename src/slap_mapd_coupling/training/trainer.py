@@ -26,13 +26,14 @@ from ray.rllib.algorithms.ppo import PPOConfig
 
 from slap_mapd_coupling.training.callbacks import (
     EPISODE_RETURN_KEY,
+    TIMESTEPS_KEY,
     TrainingProgressCallbacks,
     format_iteration,
     iteration_record,
 )
 from slap_mapd_coupling.training.config import DEFAULT_POLICY_ID
 
-BUDGET_METRIC = "num_env_steps_sampled_lifetime"
+BUDGET_METRIC = TIMESTEPS_KEY  # one environment step is one timestep (sec:method:training)
 DEFAULT_SCORE_ATTRIBUTE = EPISODE_RETURN_KEY
 
 
@@ -75,7 +76,7 @@ class TrainingRun(NamedTuple):
 
     checkpoint: Path
     best_checkpoint: Path
-    env_steps_sampled: int
+    env_steps_sampled: int  # timesteps, since one environment step is one timestep
     trial_dir: Path
 
 
@@ -119,15 +120,16 @@ def train(
     storage_path: Path | None = None,
     progress_path: Path | None = None,
 ) -> TrainingRun:
-    """Trains with Ray Tune, stops at the first iteration at or above the training budget, and
-    returns the checkpoint of the end of the run and the best one.
+    """Trains with Ray Tune, stops at the first iteration at or above the training budget in
+    timesteps, and returns the checkpoint of the end of the run and the best one.
 
     `ppo_config` is the PPOConfig object, not `to_dict()`. `storage_path` is where Tune writes
     the run (Ray's default, ~/ray_results, when None). An iteration samples one episode per
-    runner, so the run overshoots the budget by up to one iteration's samples.
+    runner, so the run overshoots the budget by up to one iteration's timesteps.
     """
     settings = settings or CheckpointSettings()
-    # An iteration samples one episode per runner, so this is the number of iterations.
+    # An iteration samples one episode per runner, which is total_train_batch_size timesteps
+    # (the horizon per runner), so this is the number of iterations.
     expected_iterations = math.ceil(budget_env_steps / ppo_config.total_train_batch_size)
     print(
         f"=== Training the {arm_label + ' ' if arm_label else ''}GNN+PPO controller "
