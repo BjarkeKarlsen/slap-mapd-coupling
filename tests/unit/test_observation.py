@@ -112,6 +112,26 @@ def test_build_observation_visible_vertices_and_features():
     assert obs.features[1].occupied is False
 
 
+def test_build_observation_marks_claimed_vertices_on_the_visible_ones_only():
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2, 2: 3})
+    config = _config(observation_depth=1)
+    obs = build_observation(graph, fleet, [], agent_id=1, t=0, config=config, claimed={1, 5})
+
+    assert obs.features[1].claimed is True
+    assert obs.features[2].claimed is False
+    assert 5 not in obs.features  # outside the window, so nothing to mark
+
+
+def test_build_observation_claims_nothing_by_default():
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2, 2: 3})
+    obs = build_observation(
+        graph, fleet, [], agent_id=1, t=0, config=_config(observation_depth=1)
+    )
+    assert not any(f.claimed for f in obs.features.values())
+
+
 def test_build_observation_eta_uses_current_goal_before_pickup():
     graph = _line_graph(5)
     fleet = _fleet({1: 0})

@@ -20,7 +20,7 @@ true when none of the other three apply.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Collection, Sequence
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -32,8 +32,9 @@ from slap_mapd_coupling.environment.reward_function import current_target
 @dataclass(frozen=True)
 class VertexFeatures:
     """f(v,t), the vertex features: the multi-hot role, the
-    distance label eta_i(v,t), and whether another agent
-    occupies v."""
+    distance label eta_i(v,t), whether another agent occupies v, and
+    whether v is in V_{<i}(t), the vertices the earlier agents of the same
+    decision have chosen to end the timestep on."""
 
     storage: bool
     delivery: bool
@@ -41,6 +42,7 @@ class VertexFeatures:
     transit: bool  # true iff none of the above -- see module docstring
     eta: float
     occupied: bool
+    claimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,10 +119,12 @@ def build_observation(
     t: int,
     config: ExperimentConfig,
     window: Sequence[VertexId] | None = None,
+    claimed: Collection[VertexId] = (),
 ) -> Observation:
     """o_i(t) for one agent at one timestep. `window` is the set of
     visible vertices, in the order given. None means the field of view.
-    The congestion feature is always taken over the field of view."""
+    The congestion feature is always taken over the field of view.
+    `claimed` is V_{<i}(t), empty for the decentralised router."""
     if config.observation_depth is None:
         raise ValueError(
             "build_observation requires config.observation_depth (d_obs); "
@@ -137,11 +141,13 @@ def build_observation(
     if len(set(visible)) != len(visible):
         raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
     occupied_vertices = {loc for aid, loc in locations.items() if aid != agent_id}
+    claimed_vertices = set(claimed)
     features = {
         v: VertexFeatures(
             *role_flags(graph.vertices[v].role),
             eta=eta(graph, v, target),
             occupied=v in occupied_vertices,
+            claimed=v in claimed_vertices,
         )
         for v in visible
     }

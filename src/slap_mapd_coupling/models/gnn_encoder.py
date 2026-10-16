@@ -47,7 +47,8 @@ from torch import nn
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.environment.observation import Observation, VertexFeatures
 
-NODE_FEATURE_DIM = 6  # storage, delivery, endpoint, transit, eta, occupied (the vertex features)
+# storage, delivery, endpoint, transit, eta, occupied, claimed (the vertex features)
+NODE_FEATURE_DIM = 7
 
 # The keys of the senders' padded views in an encoded observation. They are
 # present exactly when GNNEncoderConfig.communication is on.
@@ -90,6 +91,7 @@ def _node_feature_vector(features: VertexFeatures) -> list[float]:
         float(features.transit),
         features.eta,
         float(features.occupied),
+        float(features.claimed),
     ]
 
 

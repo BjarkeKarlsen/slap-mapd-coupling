@@ -97,9 +97,31 @@ def test_encode_observation_own_index_points_at_agent_vertex():
             float(own_features.transit),
             own_features.eta,
             float(own_features.occupied),
+            float(own_features.claimed),
         ],
     )
     assert encoded.node_mask[encoded.own_index] == 1.0
+
+
+def test_encode_observation_writes_the_claim_column():
+    graph = _line_graph(5)
+    fleet = _fleet({1: 2})
+    config = _config(observation_depth=3)
+    observation = build_observation(
+        graph, fleet, [], agent_id=1, t=0, config=config, claimed={3}
+    )
+    d_max = max_out_degree(graph)
+    encoded = encode_observation(
+        graph,
+        2,
+        observation,
+        legality_mask(graph, vertex=2, d_max=d_max),
+        d_max,
+        LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1),
+    )
+    index = {v: i for i, v in enumerate(observation.visible_vertices)}
+    assert encoded.node_features[index[3], -1] == 1.0
+    assert encoded.node_features[index[2], -1] == 0.0
 
 
 def test_encode_observation_node_mask_marks_padding():
@@ -532,8 +554,8 @@ def test_the_padded_arrays_follow_the_window(name):
         n = len(window)
         assert item.node_mask.tolist() == [1.0] * n + [0.0] * (8 - n)
         # a transit vertex, eta is the distance to the robot's own vertex (no task), and
-        # occupied marks the other robot
-        expected = [[0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other)] for v in window]
+        # occupied marks the other robot, and nothing is claimed
+        expected = [[0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other), 0.0] for v in window]
         np.testing.assert_array_equal(item.node_features[:n], expected)
         assert not item.node_features[n:].any()
         assert item.own_index == window.index(location)
