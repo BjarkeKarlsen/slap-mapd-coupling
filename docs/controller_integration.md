@@ -42,13 +42,18 @@ step_with_planner(env, planner)
 
 ### A learned arm, the policy function
 
-The three learned arms (centralised, section-based, decentralised) run through one
-RLlib adapter, `training/env.py::WarehouseMAPDMultiAgentEnv`, with one agent per
-robot. The arm only decides the window a robot observes and what the readout pools
-over. Training and evaluation both build the observations there. The decision
-itself is the policy function, `training/policy.py::ModulePolicy`. It takes an
-`RLModule`, calls it once for all robots and samples one legal slot per robot from
-a seeded stream. It does not know how the module was loaded.
+The three learned arms (centralised, section-based, decentralised) and the full-view
+setting run through one RLlib adapter, `training/env.py::WarehouseMAPDMultiAgentEnv`,
+with one agent per robot. The arm decides the window a robot observes, what the readout
+pools over, and who chooses together. A timestep is split into turns. The decentralised
+arm and the full-view setting have one turn with every robot. The centralised arm has one
+turn per robot in priority order, and the section arm runs the zones in parallel, so turn
+k holds the k-th robot of every zone. A robot sees the earlier choices of its unit, and the
+claim mask keeps it off a vertex they took. Training and evaluation both build the
+observations there. The decision itself is the policy function,
+`training/policy.py::ModulePolicy`. It takes an `RLModule`, calls it once per turn for the
+robots of that turn and samples one legal slot per robot from a seeded stream. It does not
+know how the module was loaded.
 
 To evaluate a trained module:
 
@@ -60,12 +65,13 @@ metrics = run_episode(
     graph, skus, counts, capacities, config, trace_path,
     policy=ModulePolicy(module),
     encoding_config=encoding_config,   # the caps the module was trained with
-    pooling="none",                    # "mean" for the centralised and section arms
+    pooling="none",                    # "mean" for the centralised, section and full_view
     zones=None,                        # the zones, for the section arm only
 )
 ```
 
 `examples/04_decentralised_training.py` shows the whole route, and `02` and `03` are
-its variants for the other two arms. Whichever piece is added, conflict resolution
+its variants for the other two arms. `run_episode` steps the adapter through the turns,
+so one step of its loop is still one timestep. Whichever piece is added, conflict resolution
 (`resolution/conflict_resolution.py`) runs identically on the resolved joint action,
 so a new router never touches the storage rules or the metrics.

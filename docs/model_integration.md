@@ -3,7 +3,7 @@
 To add a new model (e.g., `EnhancedModel`) for the decentralised controller:
 
 1. Create `src/slap_mapd_coupling/models/enhanced_model.py`
-2. Inherit from `BaseModel` or `TorchModelV2`
+2. Inherit from `BaseModel`, or build an `RLModule` as `GNNActionMaskingRLModule` does
 3. Register in `src/slap_mapd_coupling/models/registry.py`
 4. Add a unit test under `tests/unit/`
 5. Add/point an `examples/04_decentralised_training.py` variant at it

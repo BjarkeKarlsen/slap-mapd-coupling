@@ -42,7 +42,7 @@ from slap_mapd_coupling.evaluation.metrics import RunMetrics  # noqa: E402
 from slap_mapd_coupling.planners.registry import PlannerName  # noqa: E402
 from slap_mapd_coupling.training.policy import ModulePolicy  # noqa: E402
 
-ARMS = ("centralised", "section", "decentralised")
+ARMS = ("centralised", "section", "decentralised", "full_view")
 PLANNERS = ("token_passing", "prioritised_astar")
 ILLUSTRATIVE_ARRIVAL_RATES = (0.15, 0.25, 0.3, 0.4)  # Illustrative. The load levels are TBD (#85).
 SWEEP_FILE = "load_sweep.jsonl"

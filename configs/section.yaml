@@ -5,14 +5,14 @@
 # (arrival_rate, horizon) are open too. Change a value here instead of in the code.
 # See training/spec.py for what each section means.
 
-controller: section   # decentralised | centralised | section
+controller: section   # decentralised | centralised | section | full_view
 regime: fixed_only          # fixed_only | matched
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 
 # About 80% of what Token Passing completes on this instance (about 0.3 tasks per step), so
-# the arms are loaded but can keep up. The horizon is also the rollout length of PPO, so one
-# sampling call of a runner is one episode.
+# the arms are loaded but can keep up. A sampling call of a runner is one complete episode, and
+# the budget below counts timesteps, one per timestep however many robots choose within it.
 arrival_rate: 0.25
 horizon: 630
 
