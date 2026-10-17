@@ -209,8 +209,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    # The evaluation half of 04's seed split, so the seeds are disjoint from the training ones.
-    seeds = tuple(example_04.split_seeds(example_04.build_seed_split(0, args.eval_seeds))[1])
+    # The test seeds of 04's seed split, disjoint from the training ones.
+    seeds = example_04.split_seeds(example_04.build_seed_split(0, args.eval_seeds)).test
     rows = sweep(
         args.checkpoint,
         args.planner,

@@ -1,11 +1,13 @@
 """Command-line interface for slap_mapd_coupling.
 
-Three verbs, following the experimental design of sec:pd-aim-and-scope.
+Four verbs, following the experimental design of sec:pd-aim-and-scope.
 
   simulate  runs one configuration, a storage rule with a controller or the
             reference planner, at one load.
   train     trains a learned controller with PPO. The reference planner is
             not learned.
+  evaluate  chooses a trained run's checkpoint on the validation seeds and
+            plays it on the test seeds.
   sweep     runs the experimental grid from a config file and writes one
             results table.
 """
@@ -125,7 +127,13 @@ def simulate(
 @click.option(
     "--budget-env-steps", type=int, default=None, help="Training budget in environment steps."
 )
-@click.option("--seed", type=int, default=None, help="Base seed of the train/eval seed split.")
+@click.option(
+    "--seed",
+    type=int,
+    default=None,
+    help="Training seed, RLlib's seed and the first training scenario. The validation and "
+    "test seeds do not move with it.",
+)
 @click.option("--env-runners", default=0, type=int, help="Number of RLlib env runners.")
 @click.option("--gpu", is_flag=True, help="Use one GPU for the learner.")
 @click.option(
@@ -209,6 +217,35 @@ def train(
     click.echo(
         f"Best checkpoint by {spec.checkpoint.score_attribute} saved to {run.best_checkpoint}"
     )
+
+
+@cli.command()
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--output",
+    type=click.Path(),
+    default=None,
+    help="Where validation.jsonl and test.jsonl go, RUN_DIR/evaluation by default.",
+)
+def evaluate(run_dir, output):
+    """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
+    validation seeds, the one with the most completed tasks is chosen, and it and the last
+    checkpoint play the test seeds."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.evaluate_run import evaluate_run
+
+    run = Path(run_dir)
+    out = Path(output) if output is not None else run / "evaluation"
+    try:
+        result = evaluate_run(run, out)
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
+    for role, checkpoint in (("chosen", result.chosen), ("last", result.last)):
+        rows = [row for row in result.test_rows if row["role"] == role]
+        throughput = sum(row["throughput"] for row in rows) / len(rows)
+        click.echo(f"{role} {checkpoint.name}: throughput {throughput:.3f} on {len(rows)} seeds")
+    click.echo(f"Rows written to {out}")
 
 
 @cli.command()

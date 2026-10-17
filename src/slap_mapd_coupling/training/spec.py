@@ -124,8 +124,10 @@ class TrainingSpec(BaseModel):
     arm: ArmSettings = ArmSettings()
     model: ModelSettings
     ppo: PPOHyperparameters
+    # The seed split, with experiment.seed as the training seed (training/config.py::split_seeds).
     train_seed_count: PositiveInt
-    eval_seed_count: PositiveInt
+    validation_seed_count: PositiveInt
+    test_seed_count: PositiveInt
     checkpoint: CheckpointSettings = CheckpointSettings()
 
 
@@ -287,9 +289,10 @@ def build_study(spec: TrainingSpec) -> Study:
         ),
         head=PolicyValueHeadConfig(hidden_width=spec.model.head_hidden_width),
         seed_split=SeedSplitConfig(
-            base_seed=config.seed,
+            training_seed=config.seed,
             train_seed_count=spec.train_seed_count,
-            eval_seed_count=spec.eval_seed_count,
+            validation_seed_count=spec.validation_seed_count,
+            test_seed_count=spec.test_seed_count,
         ),
     )
 

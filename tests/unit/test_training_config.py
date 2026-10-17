@@ -17,6 +17,8 @@ from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
 from slap_mapd_coupling.training.config import (
     PPOHyperparameters,
+    TEST_SEED_START,
+    VALIDATION_SEED_START,
     SeedSplitConfig,
     build_ppo_config,
     split_seeds,
@@ -97,17 +99,37 @@ def _ppo_hp(**overrides) -> PPOHyperparameters:
 
 
 def _seed_split(**overrides) -> SeedSplitConfig:
-    defaults = dict(base_seed=100, train_seed_count=5, eval_seed_count=3)
+    defaults = dict(
+        training_seed=100, train_seed_count=5, validation_seed_count=2, test_seed_count=3
+    )
     defaults.update(overrides)
     return SeedSplitConfig(**defaults)
 
 
 def test_split_seeds_produces_disjoint_contiguous_ranges():
-    config = SeedSplitConfig(base_seed=100, train_seed_count=5, eval_seed_count=3)
-    train_seeds, eval_seeds = split_seeds(config)
-    assert train_seeds == (100, 101, 102, 103, 104)
-    assert eval_seeds == (105, 106, 107)
-    assert set(train_seeds).isdisjoint(eval_seeds)
+    seeds = split_seeds(_seed_split())
+    assert seeds.train == (100, 101, 102, 103, 104)
+    assert seeds.validation == (VALIDATION_SEED_START, VALIDATION_SEED_START + 1)
+    assert seeds.test == (TEST_SEED_START, TEST_SEED_START + 1, TEST_SEED_START + 2)
+    assert not set(seeds.train) & set(seeds.validation)
+    assert not set(seeds.train) & set(seeds.test)
+    assert not set(seeds.validation) & set(seeds.test)
+
+
+def test_the_validation_and_test_seeds_do_not_move_with_the_training_seed():
+    # Two training seeds are scored on the same scenarios.
+    first = split_seeds(_seed_split(training_seed=0))
+    second = split_seeds(_seed_split(training_seed=1000))
+    assert first.train != second.train
+    assert (first.validation, first.test) == (second.validation, second.test)
+
+
+def test_training_seeds_that_reach_the_validation_seeds_are_rejected():
+    _seed_split(training_seed=VALIDATION_SEED_START - 5, train_seed_count=5)
+    with pytest.raises(ValueError, match="reach the validation seeds"):
+        _seed_split(training_seed=VALIDATION_SEED_START - 4, train_seed_count=5)
+    with pytest.raises(ValueError, match="reaches the test seeds"):
+        _seed_split(validation_seed_count=TEST_SEED_START)
 
 
 def test_ppo_hyperparameters_requires_every_field_no_defaults():
@@ -291,7 +313,7 @@ def test_build_ppo_config_builds_a_valid_ppo_config():
         gnn_config,
         head_config,
         _ppo_hp(),
-        _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
+        _seed_split(training_seed=42, train_seed_count=3),
         num_env_runners=0,
     )
 
@@ -326,7 +348,7 @@ def test_build_ppo_config_samples_one_episode_per_runner_per_iteration(num_env_r
         GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none"),
         PolicyValueHeadConfig(hidden_width=8),
         _ppo_hp(),
-        _seed_split(base_seed=42, train_seed_count=3, eval_seed_count=2),
+        _seed_split(training_seed=42, train_seed_count=3),
         num_env_runners=num_env_runners,
     )
     assert ppo_config.batch_mode == "complete_episodes"

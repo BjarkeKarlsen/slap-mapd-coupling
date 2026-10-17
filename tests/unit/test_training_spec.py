@@ -75,7 +75,7 @@ def test_the_file_and_the_example_build_the_same_study(example_04, spec, control
     assert study.config == config
     assert study.arm == example_04.build_arm(instance, controller, config.observation_depth)
     assert study.gnn_encoder == example_04.build_gnn_config(config, study.arm)
-    assert study.seed_split == example_04.build_seed_split(0, spec.eval_seed_count)
+    assert study.seed_split == example_04.build_seed_split(0, spec.test_seed_count)
 
 
 def test_the_regime_decides_the_storage_mode_of_training(spec):
