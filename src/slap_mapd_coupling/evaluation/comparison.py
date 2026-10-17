@@ -47,6 +47,7 @@ _SCORED_QUANTITIES = (
     "throughput",
     "mean_crowding",
     "mean_relocated_units",
+    "mean_relocation_distance",
     "mean_decision_runtime_seconds",
 )
 # The service time and its three parts exist only for runs that finished a

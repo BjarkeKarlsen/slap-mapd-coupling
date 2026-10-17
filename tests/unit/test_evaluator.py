@@ -9,7 +9,7 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, StorageState
-from slap_mapd_coupling.environment.multi_agent_env import _relocated_units
+from slap_mapd_coupling.environment.multi_agent_env import _relocated_units, _relocation_distance
 from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 
@@ -124,6 +124,7 @@ def test_fixed_storage_has_no_update_and_relocates_nothing():
     metrics = _run(_graph(), _config(horizon=20))
     assert metrics.num_storage_updates == 0
     assert metrics.mean_relocated_units == 0.0
+    assert metrics.mean_relocation_distance == 0.0
 
 
 def test_adaptive_storage_updates_every_epoch_within_the_cap():
@@ -198,3 +199,53 @@ assert "ray" not in sys.modules, "a planner episode imported ray"
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+class _LineGraph:
+    """Vertices on a line, d_G(v, w) = |v - w|, enough for the relocation measure."""
+
+    @staticmethod
+    def distance(v: int, w: int) -> float:
+        return float(abs(v - w))
+
+
+def _state(counts: dict[str, dict[int, int]]) -> StorageState:
+    skus = {name: SkuType(sku_id=name, unit_capacity=1.0) for name in counts}
+    capacities = {v: 50.0 for v in range(0, 11)}
+    return StorageState(skus=skus, capacities=capacities, counts=counts)
+
+
+def test_relocation_distance_of_a_hand_made_update():
+    # Tea: 5 units leave vertex 0, 3 arrive at 1 and 2 at 6. Cost 3*1 + 2*6 = 15.
+    # Mug: vertices 2 and 8 each lose 1 unit, vertices 4 and 6 each gain 1. Cheapest pair
+    # first is (2, 4) at 2, then (8, 6) at 2, total 4 (the greedy match, not 2->6 + 8->4).
+    before = _state({"tea": {0: 5}, "mug": {2: 1, 8: 1}})
+    after = _state({"tea": {1: 3, 6: 2}, "mug": {4: 1, 6: 1}})
+    assert _relocation_distance(before, after, _LineGraph()) == 15.0 + 4.0
+
+
+def test_relocation_distance_breaks_ties_by_vertex_ids():
+    # Vertex 5 lost 1 unit and vertex 3 lost 1 unit, vertex 4 gained 1. Both pairs are at
+    # distance 1, and the lower from id (3) is matched first. The unit at 5 is then
+    # unmatched, so exactly one unit is counted, at distance 1.
+    before = _state({"tea": {3: 1, 5: 1}})
+    after = _state({"tea": {4: 1}})
+    assert _relocation_distance(before, after, _LineGraph()) == 1.0
+    # Ties on the from id are broken by the lower to id: 4 loses 2, 3 and 5 gain 1 each.
+    before = _state({"tea": {4: 2}})
+    after = _state({"tea": {3: 1, 5: 1}})
+    assert _relocation_distance(before, after, _LineGraph()) == 2.0
+
+
+def test_relocation_distance_is_zero_when_nothing_moved():
+    state = _state({"tea": {1: 4, 2: 1}})
+    assert _relocation_distance(state, state, _LineGraph()) == 0.0
+
+
+def test_relocation_distance_is_logged_per_update_under_demand_storage():
+    config = _config(storage_mode="demand", storage_epoch_length=5, reassignment_cap=3, horizon=60)
+    metrics = _run(_graph(), config)
+    assert metrics.num_storage_updates == 60 // 5
+    assert metrics.mean_relocation_distance >= 0.0
+    if metrics.mean_relocated_units > 0:
+        assert metrics.mean_relocation_distance > 0.0
