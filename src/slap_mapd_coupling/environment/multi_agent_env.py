@@ -219,6 +219,7 @@ class WarehouseMAPDEnv:
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
         self._assigner = assigner
         self._storage_rule = get_storage_rule(config.storage_mode)
+        self._edge_cost = {(edge.source, edge.target): edge.cost for edge in graph.edges}
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -361,18 +362,19 @@ class WarehouseMAPDEnv:
             if realised_locations[agent_id] == action.target:
                 self.log.record_edge(edge)
                 self._estimator.record_traversal(edge)
-            elif realised_locations[agent_id] == before_locations[agent_id]:
-                # An overridden move: the robot stood still instead of moving along the
-                # edge, a wait attributed to that edge (storage_estimates.py).
-                self._estimator.record_wait(edge)
 
         self.fleet = result.fleet
         next_t = self._t + 1
         self.tasks = self._advance_task_lifecycle(next_t)
 
+        # A robot serving a task that stood still, by its own choice or overridden, is a
+        # blocked tick of its task and one wait on the next edge of its shortest route to
+        # its goal (storage_estimates.py). Recorded here, before stage 6 closes the window.
+        tasks_by_id = {task.task_id: task for task in self.tasks}
         for agent_id, task in active_by_agent.items():
             if before_locations[agent_id] == realised_locations[agent_id]:
                 self.log.record_blocked_tick(task.task_id)  # omega_j(t): realised wait
+                self._record_wait(realised_locations[agent_id], tasks_by_id[task.task_id])
 
         self.log.backlog_by_t.append(self._backlog(next_t))
 
@@ -522,6 +524,24 @@ class WarehouseMAPDEnv:
             )
             self._next_task_id += 1
         return new_tasks
+
+    def _record_wait(self, at: VertexId, task: Task) -> None:
+        """Charges one wait of the robot standing at `at` while serving `task` to the edge
+        (at, w*) it is waiting to enter, the next edge of its shortest route to its goal.
+
+        `task` is read after the lifecycle update, so the goal is the delivery vertex once
+        the task is picked up and its pickup vertex before. w* is the out-neighbour w of
+        `at` with the least c(at, w) + d_G(w, goal), ties broken by the lower vertex id. A
+        robot already at its goal waits for no edge, so nothing is charged.
+        """
+        goal = task.current_goal
+        if at == goal:
+            return
+        next_vertex = min(
+            self.graph.out_neighbours(at),
+            key=lambda w: (self._edge_cost[(at, w)] + self.graph.distance(w, goal), w),
+        )
+        self._estimator.record_wait((at, next_vertex))
 
     def _advance_task_lifecycle(self, next_t: int) -> list[Task]:
         """Marks pickup_time/finish_time (t_j^pickup/t_j^finish) against
