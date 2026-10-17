@@ -8,13 +8,18 @@ import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.core.graph import Action, WarehouseGraph
+from slap_mapd_coupling.core.graph import Action, Edge, Vertex, VertexRole, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType
+from slap_mapd_coupling.core.tasks import Task, active_tasks_by_agent
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.spaces import slot_for_action
 from slap_mapd_coupling.environment.storage_estimates import WindowEstimator
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
-from slap_mapd_coupling.planners import PrioritisedAStarPlanner
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    generate_and_validate,
+    generate_warehouse_graph,
+)
+from slap_mapd_coupling.planners import PrioritisedAStarPlanner, TokenPassingPlanner
 from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate
 from slap_mapd_coupling.storage.demand import ranked_storage_vertices
@@ -148,17 +153,19 @@ def test_the_rule_receives_the_per_step_counts_of_each_window_and_only_that_wind
     for _ in range(35):
         step = env.t
         before = env.fleet.locations()
+        serving = active_tasks_by_agent(env.tasks, step)
         edges_before = dict(env.log.edge_traversals)
         step_with_planner(env, planner)
         after = env.fleet.locations()
         for agent_id, action in env.last_proposed.items():
-            if action.kind != "move":
-                continue
-            edge = (before[agent_id], action.target)
-            if after[agent_id] == action.target:
-                traversals.append((step, edge))
-            elif after[agent_id] == before[agent_id]:
-                waits.append((step, edge))
+            if action.kind == "move" and after[agent_id] == action.target:
+                traversals.append((step, (before[agent_id], action.target)))
+        # A robot serving a task that stood still waits for the next edge of its route.
+        tasks_now = {task.task_id: task for task in env.tasks}
+        for agent_id, task in serving.items():
+            goal = tasks_now[task.task_id].current_goal
+            if after[agent_id] == before[agent_id] != goal:
+                waits.append((step, _next_edge(env.graph, before[agent_id], goal)))
         # The log of realised traversals agrees with what was recomputed above.
         logged = {
             e: n - edges_before.get(e, 0)
@@ -230,29 +237,179 @@ def test_reset_starts_a_fresh_window():
     assert sum(demand.values()) * 10 == pytest.approx(released)  # nothing left from before
 
 
-def test_an_overridden_move_is_a_wait_on_that_edge_and_a_chosen_wait_is_none():
-    graph = _graph()
-    env = _env(_config(num_agents=2, storage_epoch_length=10, horizon=12), graph)
-    target = next(v for v in graph.vertices if len(graph.out_neighbours(v)) >= 2)
-    a, b = graph.out_neighbours(target)[:2]
-    env.fleet = FleetState(
-        agents={1: AgentState(agent_id=1, location=a), 2: AgentState(agent_id=2, location=b)}
+# --- which edge a wait is charged to --------------------------------------------------
+
+
+def _diamond() -> WarehouseGraph:
+    """Two routes of equal cost, 0 - 1 - 3 and 0 - 2 - 3, from a hub (0) to the storage
+    vertex (3). The delivery vertex (4) and three parking endpoints (5, 6, 7) hang off the
+    hub. Every edge costs 1 and goes both ways."""
+    roles = {
+        0: VertexRole(),
+        1: VertexRole(),
+        2: VertexRole(),
+        3: VertexRole(storage=True),
+        4: VertexRole(delivery=True),
+        5: VertexRole(endpoint=True),
+        6: VertexRole(endpoint=True),
+        7: VertexRole(endpoint=True),
+    }
+    pairs = [(0, 1), (0, 2), (1, 3), (2, 3), (0, 4), (0, 5), (0, 6), (0, 7)]
+    edges = tuple(Edge(source=a, target=b, cost=1.0) for a, b in pairs) + tuple(
+        Edge(source=b, target=a, cost=1.0) for a, b in pairs
     )
-    move_a = slot_for_action(graph, a, Action(kind="move", target=target))
-    move_b = slot_for_action(graph, b, Action(kind="move", target=target))
+    vertices = {v: Vertex(id=v, role=role) for v, role in roles.items()}
+    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
 
-    env.step({1: move_a, 2: move_b})  # both claim the same vertex, one is overridden
 
-    traversed = env._estimator.traversals
-    waited = env._estimator.waits
-    assert sum(traversed.values()) == 1 and sum(waited.values()) == 1
-    (winner_edge,) = traversed
-    (loser_edge,) = waited
-    assert {winner_edge, loser_edge} == {(a, target), (b, target)}
+def _diamond_env(
+    locations: dict[int, int], tasks: list[Task], **overrides
+) -> tuple[WarehouseMAPDEnv, _Calls]:
+    """An env on the diamond with the robots at `locations` and only `tasks`, released and
+    assigned at t = 0. No order arrives during the run, and the storage rule is a `_Calls`."""
+    graph = _diamond()
+    settings = dict(num_agents=len(locations), arrival_rate=1e-9, storage_epoch_length=10)
+    settings.update(overrides)
+    env = WarehouseMAPDEnv(
+        graph,
+        {"tea": SkuType(sku_id="tea", unit_capacity=1.0)},
+        {"tea": {3: 5}},
+        {3: 10.0},
+        _config(**settings),
+    )
+    env.fleet = FleetState(
+        agents={aid: AgentState(agent_id=aid, location=v) for aid, v in locations.items()}
+    )
+    env.tasks = tasks
+    rule = _Calls()
+    env._storage_rule = rule
+    return env, rule
+
+
+def _task(task_id: int, agent_id: int, picked_up: bool = False) -> Task:
+    """A task for tea from the storage vertex (3) to the delivery vertex (4), assigned to
+    `agent_id` at t = 0 and, if `picked_up`, picked up at t = 0 too."""
+    return Task(
+        task_id=task_id,
+        release_time=0,
+        pickup_vertex=3,
+        delivery_vertex=4,
+        sku="tea",
+        assigned_agent=agent_id,
+        assignment_time=0,
+        pickup_time=0 if picked_up else None,
+    )
+
+
+def _move(env: WarehouseMAPDEnv, agent_id: int, target: int) -> int:
+    at = env.fleet.locations()[agent_id]
+    return slot_for_action(env.graph, at, Action(kind="move", target=target))
+
+
+def test_a_chosen_wait_is_charged_to_the_next_edge_of_the_shortest_route():
+    # Before pickup the goal is the storage vertex. Both 1 and 2 start a shortest route
+    # from the hub, so the tie goes to the lower id.
+    env, _ = _diamond_env({1: 0}, [_task(1, 1)])
+    env.step({1: 0})
+    assert env._estimator.waits == {(0, 1): 1}
+    assert env.log.blocked_ticks_by_task == {1: 1}
+
+
+def test_after_pickup_the_wait_is_charged_towards_the_delivery_vertex():
+    env, _ = _diamond_env({1: 0}, [_task(1, 1, picked_up=True)])
+    env.step({1: 0})
+    assert env._estimator.waits == {(0, 4): 1}
+
+
+def test_a_robot_that_picks_up_while_standing_still_waits_towards_the_delivery_vertex():
+    # The robot stands on the storage vertex and picks up in this step's lifecycle update,
+    # so its goal is already the delivery vertex. From 3 both 1 and 2 lead there, 1 wins.
+    env, _ = _diamond_env({1: 3}, [_task(1, 1)])
+    env.step({1: 0})
+    assert env.tasks[0].pickup_time == 1
+    assert env._estimator.waits == {(3, 1): 1}
+
+
+def test_a_robot_standing_at_its_goal_is_not_charged():
+    # Picked up and standing on the delivery vertex, so its goal is where it is.
+    env, _ = _diamond_env({1: 4}, [_task(1, 1, picked_up=True)])
+    env.step({1: 0})
+    assert env.tasks[0].finish_time == 1
+    assert env._estimator.waits == {}
+
+
+def test_an_idle_robot_is_not_charged_whether_it_chose_to_wait_or_was_overridden():
+    # Neither robot serves a task. Both claim the hub, one is overridden, then both wait.
+    env, _ = _diamond_env({1: 1, 2: 2}, [])
+    env.step({1: _move(env, 1, 0), 2: _move(env, 2, 0)})
     assert len(env.last_overridden) == 1
+    env.step({1: 0, 2: 0})
+    assert env._estimator.waits == {}
 
-    env.step({1: 0, 2: 0})  # both choose to wait, so they are attributed to no edge
-    assert sum(env._estimator.waits.values()) == 1
+
+def test_an_overridden_robot_is_charged_by_the_route_rule_not_on_its_intended_edge():
+    # Robot 1 at the hub, heading for storage, tries the detour through 2. Robot 2 on the
+    # storage vertex, heading for delivery, also claims 2 and goes first. Robot 1 is
+    # overridden and waits for (0, 1), the first edge of its shortest route, not for (0, 2).
+    env, _ = _diamond_env({1: 0, 2: 3}, [_task(1, 1), _task(2, 2, picked_up=True)])
+    env._priority = (2, 1)
+    env.step({1: _move(env, 1, 2), 2: _move(env, 2, 2)})
+    assert env.last_overridden == frozenset({1})
+    assert env._estimator.waits == {(0, 1): 1}
+
+
+def test_a_wait_lands_in_the_window_of_the_step_it_happens_in():
+    # Delta = 2. The robot moves at step 0 and waits at step 1, the last step of the first
+    # window, so the wait belongs to that window. Steps 2 and 3 are moves, so the second
+    # window has none.
+    env, rule = _diamond_env({1: 5}, [_task(1, 1)], storage_epoch_length=2)
+    env.step({1: _move(env, 1, 0)})
+    env.step({1: 0})
+    env.step({1: _move(env, 1, 1)})
+    env.step({1: _move(env, 1, 3)})
+    (_, _, first), (_, _, second) = rule.calls
+    assert first == {(0, 1): 0.5}
+    assert second == {}
+
+
+def test_token_passing_is_never_overridden_yet_its_waits_reach_the_estimate():
+    # Token Passing makes robots wait on purpose, so conflict resolution never steps in and
+    # charging only overrides would leave the wait estimate at zero. Charged by the route
+    # rule, its waits show in the estimate.
+    params = GeneratorParams(
+        max_num_aisles=6,
+        max_aisle_length=6,
+        max_num_cross_aisles=5,
+        one_way_fraction=0.0,
+        wait_cost=0.0,
+        num_storage_vertices=6,
+        num_delivery_vertices=3,
+        num_endpoints=4,
+        seed=1,
+    )
+    graph, report = generate_and_validate(params, fleet_size=4, require_well_formed=True)
+    assert report.accepted
+    storage = [v for v, vertex in graph.vertices.items() if vertex.role.storage]
+    planner = TokenPassingPlanner()
+    config = _config(
+        planner="token_passing", arrival_rate=0.6, seed=1, horizon=100, storage_epoch_length=25
+    )
+    env = WarehouseMAPDEnv(
+        graph,
+        {"tea": SkuType(sku_id="tea", unit_capacity=1.0)},
+        {"tea": {storage[0]: 20, storage[1]: 20}},
+        {v: 50.0 for v in storage},
+        config,
+        assigner=planner,
+    )
+    rule = _Calls()
+    env._storage_rule = rule
+    for _ in range(100):
+        step_with_planner(env, planner)
+        assert not env.last_overridden
+    assert sum(env.log.blocked_ticks_by_task.values()) > 0  # the robots did delay
+    assert len(rule.calls) == 4
+    assert any(sum(waiting.values()) > 0 for _, _, waiting in rule.calls)
 
 
 def test_a_run_under_fixed_storage_runs_no_storage_update():
@@ -325,6 +482,13 @@ def test_an_epoch_with_orders_still_runs_the_rule(storage_mode):
 
 
 # --- helpers -------------------------------------------------------------------------
+
+
+def _next_edge(graph: WarehouseGraph, at: int, goal: int) -> tuple[int, int]:
+    """The first edge of a shortest route from `at` to `goal`, ties by the lower vertex id."""
+    cost = {(e.source, e.target): e.cost for e in graph.edges}
+    best = min(graph.out_neighbours(at), key=lambda w: (cost[(at, w)] + graph.distance(w, goal), w))
+    return (at, best)
 
 
 def _counts(edges) -> dict[tuple[int, int], int]:

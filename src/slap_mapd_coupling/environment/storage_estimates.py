@@ -21,15 +21,17 @@ last step of the window.
 A (SKU) or (edge) with no event in the window has no entry, which reads as an
 estimate of zero (the storage rules use `.get(key, 0.0)`).
 
-"Waits attributed to e" is not pinned down by the thesis, which says only that
-w_hat_t(e) estimates "waiting attributed to an edge or its downstream
-contention point". The reading taken here is one wait for every step in which a
-robot intended to move along e = (u, v) and stood still at u instead, because
-conflict resolution overrode the move (another robot claimed v, or the two
-would have swapped along e). That is a wait caused by contention at the
-downstream end of e. A wait the robot chose itself is not attributed to any
-edge, since it was not heading along one, and a robot with no task counts like
-any other. This is a choice made here, flagged for the thesis text.
+A wait is charged to the edge the robot is waiting to enter (sec:method:storage).
+Whenever a robot serving a task stands still at u, one wait is counted on the edge
+e = (u, w*) that starts its shortest route to its current goal, w* the
+out-neighbour w of u with the least c(u, w) + d_G(w, goal), ties broken by the
+lower vertex id. The goal is the task's delivery vertex once it is picked up and
+its pickup vertex before. A wait counts the same whether the robot chose it or
+conflict resolution overrode its move, so a controller that never collides but
+waits on purpose, such as Token Passing, still shows where robots queue. No wait
+is counted for a robot without a task or one already at its goal. These are
+exactly the steps that count towards the task's blocked ticks, and the
+environment charges them at stage 5 (WarehouseMAPDEnv._record_wait).
 """
 
 from __future__ import annotations
@@ -70,7 +72,7 @@ class WindowEstimator:
         self.traversals[edge] = self.traversals.get(edge, 0) + 1
 
     def record_wait(self, edge: EdgeKey) -> None:
-        """A robot that intended to move along `edge` stood still, overridden."""
+        """A robot serving a task stood still, waiting to enter `edge`."""
         self.waits[edge] = self.waits.get(edge, 0) + 1
 
     def close_window(self, window_length: int) -> WindowEstimates:
