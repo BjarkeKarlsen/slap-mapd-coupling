@@ -14,8 +14,9 @@ study parameter.
 
 from __future__ import annotations
 
+import statistics
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import (
@@ -37,6 +38,7 @@ from slap_mapd_coupling.core.experiment_config import (
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
+from slap_mapd_coupling.environment.multi_agent_env import popularity_ranking
 from slap_mapd_coupling.instances.generator import (
     GeneratedInstance,
     GeneratorParams,
@@ -61,10 +63,19 @@ class StorageSettings(BaseModel):
     There are `num_skus` SKUs named sku_000, sku_001 and so on. Three digits keep the id order
     the numeric order up to 1000 SKUs, which the popularity ranking of `DemandSettings` relies
     on. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
-    Every storage vertex has the capacity `vertex_capacity`. SKU number i starts with
-    `initial_units` units at storage vertex number i mod |V_str|, with the storage vertices in
-    increasing vertex number, so the SKUs spread over all storage vertices. A new task picks a
-    SKU in stock, then a vertex holding it, so more SKUs mean more distinct pickups.
+    Every storage vertex has the capacity `vertex_capacity`. Every SKU starts with
+    `initial_units` units, all at one storage vertex, chosen by `initial_placement`:
+
+    - "by_number": SKU number i at storage vertex number i mod |V_str|, with the storage
+      vertices in increasing vertex number, so the SKUs spread over all storage vertices.
+    - "demand_blocks": the starting stock x_0 of sec:impl:instances. The storage vertices are
+      ordered by their mean d_G(v, g) over the delivery vertices g, ties by vertex number, since
+      an order picks its delivery vertex uniformly. The SKUs are ranked by popularity at t = 0,
+      and the SKU at rank r goes to vertex number r // ceil(|K| / |V_str|) in that order, so the
+      most popular SKUs fill the vertex nearest the delivery vertices first.
+
+    A new task picks a SKU in stock, then a vertex holding it, so more SKUs mean more distinct
+    pickups.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -73,6 +84,7 @@ class StorageSettings(BaseModel):
     unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
     vertex_capacity: PositiveFloat
     initial_units: PositiveInt
+    initial_placement: Literal["by_number", "demand_blocks"] = "by_number"
 
 
 class DemandSettings(BaseModel):
@@ -247,21 +259,29 @@ def build_instance(spec: TrainingSpec) -> GeneratedInstance:
 
 
 def build_storage(
-    storage: StorageSettings, graph: WarehouseGraph
+    storage: StorageSettings, graph: WarehouseGraph, demand: DemandSettings | None = None
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
     """The SKUs, the capacity of every storage vertex and the initial counts, as described by
-    `StorageSettings`. Raises if the initial counts do not fit the capacity (eq:feasiblestorage)."""
+    `StorageSettings`. `demand` gives the popularity ranking "demand_blocks" places by, and
+    None ranks the SKUs in id order, as the uniform draw has no ranking. Raises if the initial
+    counts break the capacity constraint."""
     storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
     skus: dict[SkuId, SkuType] = {}
-    counts: dict[SkuId, dict[VertexId, int]] = {}
-    used = dict.fromkeys(storage_vertices, 0.0)
     for i in range(storage.num_skus):
         sku_id = f"sku_{i:03d}"
         unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
-        vertex = storage_vertices[i % len(storage_vertices)]
         skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
-        counts[sku_id] = {vertex: storage.initial_units}
-        used[vertex] += unit_capacity * storage.initial_units
+    if storage.initial_placement == "demand_blocks":
+        home = _demand_blocks(list(skus), graph, storage_vertices, demand)
+    else:
+        home = {
+            sku_id: storage_vertices[i % len(storage_vertices)] for i, sku_id in enumerate(skus)
+        }
+    counts: dict[SkuId, dict[VertexId, int]] = {}
+    used = dict.fromkeys(storage_vertices, 0.0)
+    for sku_id, sku in skus.items():
+        counts[sku_id] = {home[sku_id]: storage.initial_units}
+        used[home[sku_id]] += sku.unit_capacity * storage.initial_units
     over = {v: u for v, u in used.items() if u > storage.vertex_capacity}
     if over:
         raise ValueError(
@@ -270,6 +290,31 @@ def build_storage(
             "vertex_capacity."
         )
     return skus, {v: storage.vertex_capacity for v in storage_vertices}, counts
+
+
+def _demand_blocks(
+    sku_ids: list[SkuId],
+    graph: WarehouseGraph,
+    storage_vertices: list[VertexId],
+    demand: DemandSettings | None,
+) -> dict[SkuId, VertexId]:
+    """The storage vertex of every SKU under "demand_blocks" (see `StorageSettings`).
+
+    `statistics.mean` sums the distances exactly and rounds only the result, so two vertices
+    whose distances have the same mean always tie and fall back to the vertex number."""
+    delivery = [v for v, vertex in graph.vertices.items() if vertex.role.delivery]
+    nearest_first = sorted(
+        storage_vertices,
+        key=lambda v: (statistics.mean(graph.distance(v, g) for g in delivery), v),
+    )
+    ranked = popularity_ranking(
+        sku_ids,
+        0,
+        None if demand is None else demand.rotation_period,
+        None if demand is None else demand.rotation_shift,
+    )
+    block = -(-len(ranked) // len(nearest_first))  # the ceiling, in integers
+    return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(ranked)}
 
 
 def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> ExperimentConfig:
@@ -302,7 +347,9 @@ def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> Expe
 
 def build_study(spec: TrainingSpec) -> Study:
     instance = build_instance(spec)
-    skus, capacities, counts = build_storage(spec.storage, instance.graph)
+    # x_0 depends on the instance, the storage settings and the demand only, so every storage
+    # rule, in training and at evaluation, starts from the same stock (sec:impl:instances).
+    skus, capacities, counts = build_storage(spec.storage, instance.graph, spec.demand)
     config = build_experiment_config(spec)
     max_messages = spec.arm.max_messages or max(spec.experiment.num_agents - 1, 1)
     arm = build_arm(
