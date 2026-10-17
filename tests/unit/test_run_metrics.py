@@ -25,6 +25,7 @@ def _base(**overrides) -> dict:
         backlog=0,
         num_storage_updates=0,
         mean_relocated_units=0.0,
+        mean_relocation_distance=0.0,
         mean_decision_runtime_seconds=0.01,
         mean_crowding=0.0,
     )
@@ -80,6 +81,12 @@ def test_crowding_is_a_fraction():
 def test_no_storage_update_relocates_nothing():
     with pytest.raises(ValidationError):
         RunMetrics(**_base(num_storage_updates=0, mean_relocated_units=2.0))
+
+
+def test_no_storage_update_has_no_relocation_distance():
+    with pytest.raises(ValidationError):
+        RunMetrics(**_base(num_storage_updates=0, mean_relocation_distance=1.0))
+    RunMetrics(**_base(num_storage_updates=2, mean_relocation_distance=4.5))
 
 
 def test_backlog_must_equal_sum_of_waiting_and_active():

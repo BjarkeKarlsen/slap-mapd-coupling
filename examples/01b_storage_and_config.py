@@ -111,6 +111,7 @@ def show_run_metrics_shape() -> None:
         backlog=3,
         num_storage_updates=0,
         mean_relocated_units=0.0,
+        mean_relocation_distance=0.0,
         mean_decision_runtime_seconds=0.004,
         mean_crowding=0.0,
     )

@@ -72,6 +72,11 @@ class RunMetrics(BaseModel):
     # --- slow-loop cost, eq:relocation ---
     num_storage_updates: NonNegativeInt  # floor(T / Delta); 0 under F_fix
     mean_relocated_units: NonNegativeFloat  # bar_nu_T; 0.0 when there was no update
+    # The relocation measure, averaged over updates: the travel the moved units would
+    # cost (units x d_G). Relocation is free in the simulator. 0.0 without an update.
+    # Defaults to 0.0 so a RunMetrics built without it (no update) stays valid. The evaluator
+    # always fills it.
+    mean_relocation_distance: NonNegativeFloat = 0.0
 
     # --- controller cost, eq:runtime ---
     mean_decision_runtime_seconds: NonNegativeFloat  # kappa_T
@@ -125,5 +130,10 @@ class RunMetrics(BaseModel):
             raise ValueError(
                 "mean_relocated_units must be 0.0 when num_storage_updates == 0 "
                 "(F_fix always scores 0, eq:relocation)."
+            )
+        if self.num_storage_updates == 0 and self.mean_relocation_distance != 0.0:
+            raise ValueError(
+                "mean_relocation_distance must be 0.0 when num_storage_updates == 0 "
+                "(F_fix always scores 0)."
             )
         return self

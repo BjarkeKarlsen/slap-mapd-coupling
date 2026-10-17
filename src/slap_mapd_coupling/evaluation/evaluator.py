@@ -206,6 +206,8 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     # Relocations per storage update, eq:relocation.
     relocations = env.log.relocated_units_by_update
     mean_relocated = sum(relocations) / len(relocations) if relocations else 0.0
+    distances = env.log.relocation_distance_by_update
+    mean_relocation_distance = sum(distances) / len(distances) if distances else 0.0
 
     # Routing time is whatever produced the actions: planning for a planner, and the
     # observation build, forward pass and sampling for a learned arm.
@@ -236,5 +238,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         mean_crowding=mean_crowding,
         num_storage_updates=len(relocations),
         mean_relocated_units=mean_relocated,
+        mean_relocation_distance=mean_relocation_distance,
         mean_decision_runtime_seconds=mean_decision_runtime,
     )

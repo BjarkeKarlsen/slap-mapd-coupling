@@ -163,6 +163,9 @@ class EpisodeLog:
     crowding_sum_by_t: list[float] = field(default_factory=list)
     # nu_t, units relocated at each storage update (relocations per update).
     relocated_units_by_update: list[int] = field(default_factory=list)
+    # The relocation measure of each storage update: the travel the moved units would
+    # cost, in units x d_G. Relocation itself stays instant and free in the simulator.
+    relocation_distance_by_update: list[float] = field(default_factory=list)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
     # five sums of an agent add up to its summed reward). overrides_by_agent counts the
@@ -399,6 +402,9 @@ class WarehouseMAPDEnv:
             )
             self.log.relocated_units_by_update.append(
                 _relocated_units(before_storage, self.storage)
+            )
+            self.log.relocation_distance_by_update.append(
+                _relocation_distance(before_storage, self.storage, self.graph)
             )
 
         rewards = self._compute_rewards(
@@ -650,3 +656,27 @@ def _relocated_units(before: StorageState, after: StorageState) -> int:
         for vertex, count in per_vertex.items():
             moved += max(0, count - previous.get(vertex, 0))
     return moved
+
+
+def _relocation_distance(before: StorageState, after: StorageState, graph: WarehouseGraph) -> float:
+    """The relocation measure of one storage update: the travel it would cost.
+
+    Per SKU, the units that left a vertex are matched to the units that arrived at
+    another, cheapest pair first by d_G(from, to) and ties by (from id, to id). The
+    cost is the sum over matched units of units x d_G(from, to). Under fixed storage,
+    or when nothing moved, it is 0.0.
+    """
+    total = 0.0
+    for sku_id in before.counts.keys() | after.counts.keys():
+        old = before.counts.get(sku_id, {})
+        new = after.counts.get(sku_id, {})
+        left = {v: old[v] - new.get(v, 0) for v in old if old[v] > new.get(v, 0)}
+        arrived = {v: new[v] - old.get(v, 0) for v in new if new[v] > old.get(v, 0)}
+        pairs = sorted((graph.distance(v, w), v, w) for v in left for w in arrived)
+        for distance, v, w in pairs:
+            units = min(left[v], arrived[w])
+            if units > 0:
+                total += units * distance
+                left[v] -= units
+                arrived[w] -= units
+    return total
