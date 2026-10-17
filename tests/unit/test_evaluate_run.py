@@ -1,6 +1,9 @@
 """training/evaluate_run.py: the checkpoint is chosen on the validation seeds and scored on the
 test seeds. Episodes are replaced by a fake, so these check the choice and the rows, not a run."""
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 import slap_mapd_coupling.training.evaluate_run as evaluate_run_module
+from slap_mapd_coupling.evaluation.metrics import RunMetrics
 from slap_mapd_coupling.main import cli
 from slap_mapd_coupling.training.config import (
     TEST_SEED_START,
@@ -15,6 +19,7 @@ from slap_mapd_coupling.training.config import (
     SeedSplitConfig,
 )
 from slap_mapd_coupling.training.evaluate_run import checkpoints_of, evaluate_run
+from slap_mapd_coupling.training.spec import TrainingSpec
 
 CONFIG = Path(__file__).resolve().parents[2] / "configs" / "decentralised.yaml"
 
@@ -49,7 +54,7 @@ def fake_episodes(monkeypatch):
     )
 
     def install(completed):
-        def play(study, spec, checkpoint, seed):
+        def play(study, spec, checkpoint, seed, storage_mode=None):
             index = int(checkpoint.name.split("_")[-1])
             played.append((checkpoint.name, seed))
             return FakeMetrics(
@@ -93,7 +98,121 @@ def test_a_tie_goes_to_the_later_checkpoint(tmp_path, fake_episodes):
     assert result.chosen.name == "checkpoint_000001"
 
 
+def _real_metrics(seed, storage_mode, service_time):
+    """A run that keeps up, so the paired comparison has a gain to report."""
+    return RunMetrics(
+        storage_mode=storage_mode,
+        controller="decentralised",
+        congestion_sensitive=False,
+        communication=False,
+        num_agents=3,
+        arrival_rate=0.25,
+        seed=seed,
+        horizon=100,
+        observation_depth=5,
+        num_completed_tasks=20,
+        throughput=0.2,
+        keep_up_ratio=0.8,
+        keeps_up=True,
+        num_waiting_tasks=0,
+        num_active_tasks=0,
+        backlog=0,
+        mean_service_time=service_time,
+        mean_wait_for_agent=service_time / 2,
+        mean_travel_time=service_time / 4,
+        mean_blocked_time=service_time / 4,
+        mean_crowding=0.1,
+        num_storage_updates=0 if storage_mode == "fixed" else 1,
+        mean_relocated_units=0.0 if storage_mode == "fixed" else 4.0,
+        mean_decision_runtime_seconds=0.001,
+    )
+
+
+def _spec_with_rule(run, **rule):
+    from slap_mapd_coupling.training.spec import load_spec
+
+    path = next(run.glob("*_spec.json"))
+    data = load_spec(CONFIG).model_dump()
+    if rule:
+        data["storage_rule"] = rule
+    path.write_text(TrainingSpec.model_validate(data).model_dump_json(), encoding="utf-8")
+
+
+def test_the_test_seeds_are_played_under_every_mode_and_summarised(
+    tmp_path, fake_episodes, monkeypatch
+):
+    fake_episodes([3, 9, 5])
+    modes_played = []
+
+    def play(study, spec, checkpoint, seed, storage_mode=None):
+        modes_played.append(storage_mode)
+        if storage_mode is None:
+            return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
+        return _real_metrics(
+            seed, storage_mode, 10.0 if storage_mode == "fixed" else 8.0 + seed % 3
+        )
+
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    run = _run_dir(tmp_path, 3)
+    _spec_with_rule(run, epoch_length=100, reassignment_cap=48, congestion_weight=3.0)
+    modes = ["fixed", "demand", "congestion"]
+    result = evaluate_run(run, tmp_path / "out", modes)
+    # 3 seeds, 3 modes, 2 checkpoints. Validation plays without a mode, as the run trained.
+    assert len(result.test_rows) == 18
+    assert modes_played[:6] == [None] * 6
+    assert {(row["role"], row["storage_mode"]) for row in result.test_rows} == {
+        (role, mode) for role in ("chosen", "last") for mode in modes
+    }
+    rows = [json.loads(line) for line in (tmp_path / "out" / "test.jsonl").read_text().splitlines()]
+    assert [row["storage_mode"] for row in rows[:9]] == ["fixed"] * 3 + ["demand"] * 3 + [
+        "congestion"
+    ] * 3
+    summary = (tmp_path / "out" / "summary.md").read_text()
+    lines = [line for line in summary.splitlines() if line.startswith("| chosen")]
+    assert len(lines) == 2 and "demand" in lines[0] and "congestion" in lines[1]
+    assert len([line for line in summary.splitlines() if line.startswith("| last")]) == 2
+
+
+def test_the_default_is_the_training_mode_and_has_no_comparison(tmp_path, fake_episodes):
+    fake_episodes([3, 9, 5])
+    result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out")
+    assert {row["storage_mode"] for row in result.test_rows} == {"fixed"}
+    assert "No comparison" in (tmp_path / "out" / "summary.md").read_text()
+
+
+def test_a_mode_without_its_settings_fails_before_any_episode(tmp_path, fake_episodes):
+    played = fake_episodes([3, 9, 5])
+    run = _run_dir(tmp_path, 3)
+    with pytest.raises(ValueError, match="storage_rule section"):
+        evaluate_run(run, tmp_path / "out", ["fixed", "demand"])
+    assert played == []
+    _spec_with_rule(run, epoch_length=100, reassignment_cap=48)
+    with pytest.raises(ValueError, match="congestion_weight"):
+        evaluate_run(run, tmp_path / "out", ["congestion"])
+    assert played == []
+
+
+def test_the_command_reports_a_missing_setting_as_a_usage_error(tmp_path, fake_episodes):
+    fake_episodes([3])
+    result = CliRunner().invoke(
+        cli, ["evaluate", str(_run_dir(tmp_path, 1)), "--storage-modes", "demand"]
+    )
+    assert result.exit_code == 2 and "storage_rule section" in result.output
+
+
 def test_evaluate_rejects_a_folder_without_a_spec(tmp_path):
     result = CliRunner().invoke(cli, ["evaluate", str(tmp_path)])
     assert result.exit_code != 0
     assert "_spec.json" in result.output
+
+
+def test_evaluation_registers_every_storage_rule_it_can_play():
+    # In a fresh process, so rules imported by other tests cannot hide a missing import.
+    code = (
+        "import slap_mapd_coupling.training.evaluate_run\n"
+        "from slap_mapd_coupling.storage.registry import get_storage_rule\n"
+        "for mode in ('fixed', 'demand', 'congestion'):\n"
+        "    get_storage_rule(mode)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

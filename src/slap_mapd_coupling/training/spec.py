@@ -110,6 +110,22 @@ class DemandSettings(BaseModel):
         return self
 
 
+class StorageRuleSettings(BaseModel):
+    """The slow loop of an adaptive storage rule (sec:pf:storage), which F_fix does not have.
+
+    `epoch_length` is the storage update interval Delta in steps and `reassignment_cap` is nu,
+    the most units one update may relocate. `congestion_weight` is beta, which only the
+    congestion rule uses. None of them has a default, because the thesis leaves them open
+    (tab:evalparams).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    epoch_length: PositiveInt
+    reassignment_cap: PositiveInt
+    congestion_weight: NonNegativeFloat | None = None
+
+
 class ExperimentSettings(BaseModel):
     """The ExperimentConfig fields a run shares across its episodes. The controller, the storage
     mode, the arrival rate, the horizon and the communication flag are run settings of
@@ -167,6 +183,9 @@ class TrainingSpec(BaseModel):
     storage: StorageSettings
     # The order distribution. None is the uniform draw of the shipped configs.
     demand: DemandSettings | None = None
+    # Delta, nu and beta of the adaptive storage rules. None is enough for a run that only
+    # ever plays F_fix.
+    storage_rule: StorageRuleSettings | None = None
     arm: ArmSettings = ArmSettings()
     model: ModelSettings
     ppo: PPOHyperparameters
@@ -175,6 +194,14 @@ class TrainingSpec(BaseModel):
     validation_seed_count: PositiveInt
     test_seed_count: PositiveInt
     checkpoint: CheckpointSettings = CheckpointSettings()
+
+    @model_validator(mode="after")
+    def _matched_training_has_its_storage_rule(self) -> "TrainingSpec":
+        """ "matched" trains under the evaluation storage rule, so that rule's settings must be
+        there at load time and not when the first episode is built."""
+        if self.regime == "matched":
+            check_storage_rule(self, self.evaluation_storage_mode)
+        return self
 
 
 class Study(NamedTuple):
@@ -317,12 +344,43 @@ def _demand_blocks(
     return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(ranked)}
 
 
-def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> ExperimentConfig:
-    """The configuration a run trains under. "fixed_only" trains under F_fix and "matched" under
+def training_storage_mode(spec: TrainingSpec) -> StorageMode:
+    """The storage rule a run trains under. "fixed_only" trains under F_fix and "matched" under
     the storage rule used at evaluation (sec:method:training)."""
+    return "fixed" if spec.regime == "fixed_only" else spec.evaluation_storage_mode
+
+
+def check_storage_rule(spec: TrainingSpec, storage_mode: StorageMode) -> None:
+    """Raises a ValueError naming what `spec` lacks to play `storage_mode`. F_fix needs nothing,
+    the adaptive rules need the `storage_rule` section, and the congestion rule needs beta in
+    it as well."""
+    if storage_mode == "fixed":
+        return
+    rule = spec.storage_rule
+    if rule is None:
+        raise ValueError(
+            f"storage mode {storage_mode!r} needs a storage_rule section with epoch_length and "
+            "reassignment_cap, and there is none."
+        )
+    if storage_mode == "congestion" and rule.congestion_weight is None:
+        raise ValueError(
+            "storage mode 'congestion' needs congestion_weight in the storage_rule section, "
+            "and there is none."
+        )
+
+
+def build_experiment_config(
+    spec: TrainingSpec, seed: int | None = None, storage_mode: StorageMode | None = None
+) -> ExperimentConfig:
+    """The configuration a run trains under, or plays under `storage_mode` when that is given.
+    An adaptive mode takes Delta, nu and, for the congestion rule, beta from the spec's
+    `storage_rule` section, and F_fix ignores the section."""
     experiment = spec.experiment
     demand = spec.demand
-    storage_mode = "fixed" if spec.regime == "fixed_only" else spec.evaluation_storage_mode
+    if storage_mode is None:
+        storage_mode = training_storage_mode(spec)
+    check_storage_rule(spec, storage_mode)
+    rule = None if storage_mode == "fixed" else spec.storage_rule
     return ExperimentConfig(
         storage_mode=storage_mode,
         controller=spec.controller,
@@ -342,6 +400,11 @@ def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> Expe
         demand_skew=None if demand is None else demand.skew,
         demand_rotation_period=None if demand is None else demand.rotation_period,
         demand_rotation_shift=None if demand is None else demand.rotation_shift,
+        storage_epoch_length=None if rule is None else rule.epoch_length,
+        reassignment_cap=None if rule is None else rule.reassignment_cap,
+        congestion_weight=(
+            rule.congestion_weight if rule is not None and storage_mode == "congestion" else None
+        ),
     )
 
 

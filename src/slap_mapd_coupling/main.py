@@ -225,12 +225,21 @@ def train(
     "--output",
     type=click.Path(),
     default=None,
-    help="Where validation.jsonl and test.jsonl go, RUN_DIR/evaluation by default.",
+    help="Where validation.jsonl, test.jsonl and summary.md go, RUN_DIR/evaluation by default.",
 )
-def evaluate(run_dir, output):
+@click.option(
+    "--storage-modes",
+    type=click.Choice(STORAGE_RULES),
+    multiple=True,
+    help="Storage rules the test seeds are played under, e.g. --storage-modes fixed demand. "
+    "Default: the rule the run trained with. An adaptive rule takes its epoch length, "
+    "relocation cap and congestion weight from the storage_rule section of the run's spec.",
+)
+def evaluate(run_dir, output, storage_modes):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
-    validation seeds, the one with the most completed tasks is chosen, and it and the last
-    checkpoint play the test seeds."""
+    validation seeds under the rule the run trained with, the one with the most completed tasks
+    is chosen, and it and the last checkpoint play the test seeds under every storage rule
+    given. summary.md compares each adaptive rule with fixed storage."""
     from pathlib import Path
 
     from slap_mapd_coupling.training.evaluate_run import evaluate_run
@@ -238,13 +247,21 @@ def evaluate(run_dir, output):
     run = Path(run_dir)
     out = Path(output) if output is not None else run / "evaluation"
     try:
-        result = evaluate_run(run, out)
+        result = evaluate_run(run, out, list(storage_modes) or None)
     except ValueError as error:
         raise click.UsageError(str(error)) from error
     for role, checkpoint in (("chosen", result.chosen), ("last", result.last)):
-        rows = [row for row in result.test_rows if row["role"] == role]
-        throughput = sum(row["throughput"] for row in rows) / len(rows)
-        click.echo(f"{role} {checkpoint.name}: throughput {throughput:.3f} on {len(rows)} seeds")
+        for mode in dict.fromkeys(row["storage_mode"] for row in result.test_rows):
+            rows = [
+                row
+                for row in result.test_rows
+                if row["role"] == role and row["storage_mode"] == mode
+            ]
+            throughput = sum(row["throughput"] for row in rows) / len(rows)
+            click.echo(
+                f"{role} {checkpoint.name} ({mode}): throughput {throughput:.3f} "
+                f"on {len(rows)} seeds"
+            )
     click.echo(f"Rows written to {out}")
 
 
