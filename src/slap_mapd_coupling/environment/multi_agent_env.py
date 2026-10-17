@@ -58,6 +58,7 @@ The shared assignment rule of stage 2 can be replaced by an `Assigner`
 
 from __future__ import annotations
 
+import bisect
 import random
 import time
 from dataclasses import dataclass, field
@@ -88,6 +89,53 @@ from slap_mapd_coupling.storage.registry import get_storage_rule
 # config.seed, gives an independent-enough reproducible stream without a
 # dedicated ExperimentConfig field (see module docstring).
 _ORDER_SEED_OFFSET = 1_000_000_007
+
+
+def popularity_ranking(
+    sku_ids: list[SkuId], t: int, period: int | None, shift: int | None
+) -> list[SkuId]:
+    """The SKUs from most to least popular at step t, for the order distribution with a skew.
+
+    Rank 0 is the most popular. The ranking starts as the SKUs in id order and rotates left by
+    `shift` places every `period` steps, so at step t the SKU in position
+    ((t // period) * shift) mod |K| of the id order is the most popular. Without a period the
+    ranking never rotates.
+    """
+    ranked = sorted(sku_ids)
+    if period is None or not ranked:
+        return ranked
+    assert shift is not None  # ExperimentConfig requires a shift with a period
+    offset = ((t // period) * shift) % len(ranked)
+    return ranked[offset:] + ranked[:offset]
+
+
+def zipf_weights(count: int, skew: float) -> list[float]:
+    """The popularity of ranks 0 to count - 1, the rank r weighing 1 / (r + 1)^skew, normalised
+    to sum to 1. A skew of 0 gives every rank the same weight."""
+    raw = [1.0 / (rank + 1) ** skew for rank in range(count)]
+    total = sum(raw)
+    return [w / total for w in raw]
+
+
+def popularity_cumulative(
+    ranked: list[SkuId], skew: float, vertices_by_sku: Mapping[SkuId, list[VertexId]]
+) -> tuple[list[SkuId], list[float]]:
+    """The SKUs in stock, in rank order, and their cumulative popularity.
+
+    Every SKU of `ranked` gets its Zipf weight from its rank. A SKU out of stock keeps its rank
+    but loses its weight, as the stock condition requires, and the weights of the rest are
+    renormalised. An order's SKU number u then picks the first SKU whose cumulative weight
+    exceeds u.
+    """
+    weights = zipf_weights(len(ranked), skew)
+    in_stock = [(sku_id, w) for sku_id, w in zip(ranked, weights) if vertices_by_sku[sku_id]]
+    total = sum(w for _, w in in_stock)
+    cumulative: list[float] = []
+    running = 0.0
+    for _, w in in_stock:
+        running += w / total
+        cumulative.append(running)
+    return [sku_id for sku_id, _ in in_stock], cumulative
 
 
 @dataclass
@@ -418,6 +466,12 @@ class WarehouseMAPDEnv:
         (SKU, vertex) pair, also keeps the demand for a SKU the same under
         every placement. A pair draw would favour a SKU that is spread over
         more vertices.
+
+        With config.demand_skew set, the SKU is drawn by popularity instead
+        (popularity_ranking, popularity_cumulative). The same numbers are
+        drawn, and only the mapping of the SKU number changes, so the order
+        stream of a seed still does not depend on the storage rule. Without a
+        skew the uniform mapping above runs unchanged.
         """
         num_new = int(self._order_rng.poisson(self.config.arrival_rate))
         if num_new == 0:
@@ -428,7 +482,19 @@ class WarehouseMAPDEnv:
             sku_id: sorted(vertex for vertex, count in per_vertex.items() if count > 0)
             for sku_id, per_vertex in sorted(self.storage.counts.items())
         }
-        in_stock = [sku_id for sku_id, vertices in vertices_by_sku.items() if vertices]
+        cumulative: list[float] | None = None
+        if self.config.demand_skew is None:
+            in_stock = [sku_id for sku_id, vertices in vertices_by_sku.items() if vertices]
+        else:
+            ranked = popularity_ranking(
+                list(vertices_by_sku),
+                self._t,
+                self.config.demand_rotation_period,
+                self.config.demand_rotation_shift,
+            )
+            in_stock, cumulative = popularity_cumulative(
+                ranked, self.config.demand_skew, vertices_by_sku
+            )
         delivery_vertices = sorted(
             v for v, vertex in self.graph.vertices.items() if vertex.role.delivery
         )
@@ -437,7 +503,11 @@ class WarehouseMAPDEnv:
 
         new_tasks: list[Task] = []
         for u_sku, u_pickup, u_delivery in draws:
-            sku_id = in_stock[int(u_sku * len(in_stock))]
+            if cumulative is None:
+                sku_id = in_stock[int(u_sku * len(in_stock))]
+            else:
+                index = min(bisect.bisect_right(cumulative, u_sku), len(in_stock) - 1)
+                sku_id = in_stock[index]
             pickup_candidates = vertices_by_sku[sku_id]
             pickup_vertex = pickup_candidates[int(u_pickup * len(pickup_candidates))]
             delivery_vertex = delivery_vertices[int(u_delivery * len(delivery_vertices))]
