@@ -52,9 +52,14 @@ class PPOHyperparameters(BaseModel):
     take several sub-steps and a fixed fragment length would cut an episode in the
     middle. The train batch is `max(num_env_runners, 1) * horizon`. Every timestep
     has at least one sub-step, so one round of sampling always reaches it and an
-    iteration is exactly one episode per runner. This is a choice, flagged for the
-    author, with no thesis edit. RLlib requires minibatch_size to be at most that
-    batch.
+    iteration is exactly one episode per runner. That holds only if the round waits
+    for every runner, so `sample_timeout_s` is None. RLlib's default of 60 seconds
+    drops the episode of a runner that takes longer, which a centralised episode on
+    the 8-agent warehouse does (one policy call per agent turn), and the iteration
+    then trains on the episodes that arrived in time. TrainingProgressCallbacks stops
+    a run whose iteration has fewer episodes than runners. This is a choice, flagged
+    for the author, with no thesis edit. RLlib requires minibatch_size to be at most
+    that batch.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -247,6 +252,8 @@ def build_ppo_config(
             # One sampling call of a runner is one complete episode, see PPOHyperparameters.
             batch_mode="complete_episodes",
             rollout_fragment_length="auto",
+            # Wait for every runner, so an iteration is one episode per runner on every arm.
+            sample_timeout_s=None,
         )
         .debugging(seed=seed_split.base_seed)
         .learners(num_gpus_per_learner=1 if use_gpu else 0)

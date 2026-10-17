@@ -43,6 +43,9 @@ class CheckpointSettings(BaseModel):
     Illustrative values, since the thesis leaves the checkpointing of a run open. A frequency of
     0 saves only the checkpoint at the end of the run. `num_to_keep` of None keeps every
     checkpoint. With a number, Tune deletes the lowest scoring ones, but never the latest.
+    The default keeps every checkpoint, one per 3 iterations, because a checkpoint is chosen
+    by completed tasks on validation seeds after the run and not by the training return. A
+    500 000 timestep run of 36 iterations then keeps 12, each under 1 MB.
 
     `score_attribute` must be a top-level key of the training result. Tune ranks by a nested key
     such as "env_runners/episode_return_mean" only when it reads the best checkpoint back, and
@@ -52,8 +55,8 @@ class CheckpointSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    frequency: NonNegativeInt = 10  # iterations between checkpoints
-    num_to_keep: PositiveInt | None = 3
+    frequency: NonNegativeInt = 3  # iterations between checkpoints
+    num_to_keep: PositiveInt | None = None
     score_attribute: str = DEFAULT_SCORE_ATTRIBUTE
     score_order: Literal["max", "min"] = "max"
 

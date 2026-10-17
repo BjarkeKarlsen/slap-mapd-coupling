@@ -332,6 +332,8 @@ def test_build_ppo_config_samples_one_episode_per_runner_per_iteration(num_env_r
     assert ppo_config.batch_mode == "complete_episodes"
     assert ppo_config.train_batch_size_per_learner == max(num_env_runners, 1) * config.horizon
     assert ppo_config.total_train_batch_size == max(num_env_runners, 1) * config.horizon
+    # No sample timeout, so a slow runner's episode is waited for and not dropped.
+    assert ppo_config.sample_timeout_s is None
     ppo_config.validate_train_batch_size_vs_rollout_fragment_length()
 
 
