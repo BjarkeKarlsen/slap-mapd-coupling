@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -40,6 +41,27 @@ def test_the_default_score_is_the_episode_return_and_the_best_is_the_highest():
     settings = CheckpointSettings()
     assert settings.score_attribute == DEFAULT_SCORE_ATTRIBUTE == "episode_return_mean"
     assert settings.score_order == "max"
+
+
+def test_the_default_keeps_every_checkpoint_one_per_three_iterations():
+    # A checkpoint is chosen on validation seeds after the run, so none may be deleted.
+    settings = CheckpointSettings()
+    assert settings.frequency == 3
+    assert settings.num_to_keep is None
+
+
+def test_an_iteration_with_fewer_episodes_than_runners_stops_the_run():
+    callbacks = TrainingProgressCallbacks()
+    algorithm = SimpleNamespace(config=SimpleNamespace(num_env_runners=7))
+    callbacks.on_train_result(algorithm=algorithm, result={"env_runners": {"num_episodes": 7}})
+    with pytest.raises(RuntimeError, match="1 episodes, but there are 7 runners"):
+        callbacks.on_train_result(algorithm=algorithm, result={"env_runners": {"num_episodes": 1}})
+    # No finished episode at all is the same failure.
+    with pytest.raises(RuntimeError, match="0 episodes"):
+        callbacks.on_train_result(algorithm=algorithm, result={"env_runners": {}})
+    # With no remote runner the local runner samples one episode.
+    local = SimpleNamespace(config=SimpleNamespace(num_env_runners=0))
+    callbacks.on_train_result(algorithm=local, result={"env_runners": {"num_episodes": 1}})
 
 
 def test_a_nested_score_is_rejected_because_tune_would_keep_the_newest_instead():

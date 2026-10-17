@@ -232,7 +232,21 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         self, *, algorithm=None, metrics_logger=None, result: dict, **kwargs: Any
     ) -> None:
         """Copies the mean episode return to the top level of the result, which is where Tune
-        looks for the score of a checkpoint. An iteration without a finished episode has none."""
+        looks for the score of a checkpoint. An iteration without a finished episode has none.
+
+        Also stops the run if the iteration has fewer episodes than runners. That happens when
+        RLlib's sample timeout drops a slow runner's episode, and the arms would then train on
+        different batches (training/config.py::build_ppo_config)."""
+        if algorithm is not None:
+            expected = max(algorithm.config.num_env_runners, 1)
+            episodes = result.get("env_runners", {}).get("num_episodes")
+            episodes = int(episodes) if _is_number(episodes) else 0
+            if episodes < expected:
+                raise RuntimeError(
+                    f"This iteration has {episodes} episodes, but there are {expected} runners. "
+                    "An iteration must be one complete episode per runner, so set "
+                    "sample_timeout_s=None (build_ppo_config does)."
+                )
         value = result.get("env_runners", {}).get("episode_return_mean")
         if _is_number(value):
             result[EPISODE_RETURN_KEY] = float(value)

@@ -78,7 +78,7 @@ train_seed_count: 5
 eval_seed_count: 3
 
 checkpoint:
-  frequency: 10             # iterations between checkpoints, 0 keeps only the one at the end
-  num_to_keep: 3
+  frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end
+  num_to_keep: null         # keep every one, a checkpoint is chosen on validation seeds
   score_attribute: episode_return_mean   # a top-level key of the result
   score_order: max
