@@ -68,6 +68,15 @@ class ExperimentConfig(BaseModel):
     override_penalty: NonNegativeFloat | None = None  # n_blocked, reward
     congestion_reward_weight: NonNegativeFloat | None = None  # n_cng, reward
 
+    # The order distribution P_ord (sec:pf:tasks). Without a skew the SKU of an order is drawn
+    # uniformly among the SKUs in stock. With one it is drawn by popularity, the SKU at rank r
+    # weighing 1 / (r + 1)^demand_skew, and the ranking rotates left by demand_rotation_shift
+    # places every demand_rotation_period steps. These are study parameters (tab:evalparams),
+    # so None, today's uniform draw, is the only default.
+    demand_skew: NonNegativeFloat | None = None
+    demand_rotation_period: PositiveInt | None = None  # None means no rotation
+    demand_rotation_shift: PositiveInt | None = None
+
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
         if self.storage_mode == "fixed":
@@ -82,6 +91,19 @@ class ExperimentConfig(BaseModel):
                     raise ValueError(f"storage_mode={self.storage_mode!r} requires {name}.")
             if self.storage_mode == "congestion" and self.congestion_weight is None:
                 raise ValueError("storage_mode='congestion' requires congestion_weight (beta).")
+        return self
+
+    @model_validator(mode="after")
+    def _demand_parameters(self) -> "ExperimentConfig":
+        """A rotation reorders a popularity ranking, so it needs a skew, and a period and a
+        shift only mean something together."""
+        if self.demand_rotation_period is not None:
+            if self.demand_skew is None:
+                raise ValueError("demand_rotation_period requires demand_skew.")
+            if self.demand_rotation_shift is None:
+                raise ValueError("demand_rotation_period requires demand_rotation_shift.")
+        elif self.demand_rotation_shift is not None:
+            raise ValueError("demand_rotation_shift requires demand_rotation_period.")
         return self
 
     @model_validator(mode="after")

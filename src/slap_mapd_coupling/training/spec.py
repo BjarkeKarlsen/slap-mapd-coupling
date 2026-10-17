@@ -18,7 +18,15 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, PositiveFloat, PositiveInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 from ray.rllib.algorithms.ppo import PPOConfig
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -27,7 +35,7 @@ from slap_mapd_coupling.core.experiment_config import (
     ExperimentConfig,
     StorageMode,
 )
-from slap_mapd_coupling.core.graph import VertexId
+from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.instances.generator import (
     GeneratedInstance,
@@ -50,12 +58,13 @@ from slap_mapd_coupling.training.trainer import CheckpointSettings
 class StorageSettings(BaseModel):
     """The SKUs and where they start.
 
-    There are `num_skus` SKUs named sku_00, sku_01 and so on. Their unit capacities b_k cycle
-    through `unit_capacities`, so the SKUs differ in size. Every storage vertex has the capacity
-    `vertex_capacity`. SKU number i starts with `initial_units` units at storage vertex number
-    i mod |V_str|, with the storage vertices in increasing vertex number, so the SKUs spread over
-    all storage vertices. A new task picks a uniformly random (SKU, vertex) pair that is in stock,
-    so more SKUs mean more distinct pickups.
+    There are `num_skus` SKUs named sku_000, sku_001 and so on. Three digits keep the id order
+    the numeric order up to 1000 SKUs, which the popularity ranking of `DemandSettings` relies
+    on. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
+    Every storage vertex has the capacity `vertex_capacity`. SKU number i starts with
+    `initial_units` units at storage vertex number i mod |V_str|, with the storage vertices in
+    increasing vertex number, so the SKUs spread over all storage vertices. A new task picks a
+    SKU in stock, then a vertex holding it, so more SKUs mean more distinct pickups.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -64,6 +73,29 @@ class StorageSettings(BaseModel):
     unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
     vertex_capacity: PositiveFloat
     initial_units: PositiveInt
+
+
+class DemandSettings(BaseModel):
+    """The order distribution P_ord (sec:pf:tasks) when SKUs differ in popularity.
+
+    The SKU at rank r weighs 1 / (r + 1)^skew, rank 0 being the most popular. The ranking starts
+    as the SKUs in id order and rotates left by `rotation_shift` places every `rotation_period`
+    steps, or never without a period. A spec without this section draws the SKU uniformly among
+    the SKUs in stock.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    skew: NonNegativeFloat
+    rotation_period: PositiveInt | None = None
+    rotation_shift: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def _rotation_parameters(self) -> "DemandSettings":
+        """A period and a shift only mean something together."""
+        if (self.rotation_period is None) != (self.rotation_shift is None):
+            raise ValueError("Set both rotation_period and rotation_shift, or neither.")
+        return self
 
 
 class ExperimentSettings(BaseModel):
@@ -121,6 +153,8 @@ class TrainingSpec(BaseModel):
     # The GeneratorParams without wait_cost and num_endpoints, which follow the experiment.
     instance: dict[str, Any]
     storage: StorageSettings
+    # The order distribution. None is the uniform draw of the shipped configs.
+    demand: DemandSettings | None = None
     arm: ArmSettings = ArmSettings()
     model: ModelSettings
     ppo: PPOHyperparameters
@@ -222,7 +256,7 @@ def build_storage(
     counts: dict[SkuId, dict[VertexId, int]] = {}
     used = dict.fromkeys(storage_vertices, 0.0)
     for i in range(storage.num_skus):
-        sku_id = f"sku_{i:02d}"
+        sku_id = f"sku_{i:03d}"
         unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
         vertex = storage_vertices[i % len(storage_vertices)]
         skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
@@ -242,6 +276,7 @@ def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> Expe
     """The configuration a run trains under. "fixed_only" trains under F_fix and "matched" under
     the storage rule used at evaluation (sec:method:training)."""
     experiment = spec.experiment
+    demand = spec.demand
     storage_mode = "fixed" if spec.regime == "fixed_only" else spec.evaluation_storage_mode
     return ExperimentConfig(
         storage_mode=storage_mode,
@@ -259,6 +294,9 @@ def build_experiment_config(spec: TrainingSpec, seed: int | None = None) -> Expe
         deliver_reward=experiment.deliver_reward,
         override_penalty=experiment.override_penalty,
         congestion_reward_weight=experiment.congestion_reward_weight,
+        demand_skew=None if demand is None else demand.skew,
+        demand_rotation_period=None if demand is None else demand.rotation_period,
+        demand_rotation_shift=None if demand is None else demand.rotation_shift,
     )
 
 
