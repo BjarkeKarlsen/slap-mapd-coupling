@@ -73,8 +73,11 @@ ppo:
   vf_loss_coeff: 1.0
   training_budget_env_steps: 4200
 
+# experiment.seed is the training seed. The validation and test seeds are fixed ranges, the
+# same for every run (training/config.py::split_seeds).
 train_seed_count: 5
-eval_seed_count: 3
+validation_seed_count: 2
+test_seed_count: 6
 
 checkpoint:
   frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end

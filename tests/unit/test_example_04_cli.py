@@ -37,10 +37,10 @@ def test_eval_seed_count_defaults_to_three_and_must_be_positive(example_04):
         example_04.parse_args(["--eval-seeds=0"])
 
 
-def test_evaluation_seeds_are_the_eval_half_of_the_split(example_04):
-    train_seeds, eval_seeds = split_seeds(example_04.build_seed_split(0, 8))
-    assert len(eval_seeds) == 8
-    assert not set(train_seeds) & set(eval_seeds)
+def test_evaluation_seeds_are_the_test_seeds_of_the_split(example_04):
+    seeds = split_seeds(example_04.build_seed_split(0, 8))
+    assert len(seeds.test) == 8
+    assert not set(seeds.train) & set(seeds.test)
 
 
 def test_budget_is_read_and_must_be_positive(example_04):

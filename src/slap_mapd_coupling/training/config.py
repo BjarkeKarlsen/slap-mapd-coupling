@@ -1,5 +1,5 @@
 """PPO configuration for the learned controllers, with full parameter
-sharing and disjoint training and evaluation seeds (sec:method:training,
+sharing and disjoint training, validation and test seeds (sec:method:training,
 tab:trainparams, #30).
 
 Every PPO hyperparameter of tab:trainparams is TBD, so PPOHyperparameters
@@ -13,9 +13,17 @@ the storage mode and records which regime a run is.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, NamedTuple, Optional
 
-from pydantic import BaseModel, ConfigDict, NonNegativeFloat, PositiveFloat, PositiveInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.tune.registry import register_env
@@ -78,29 +86,64 @@ class PPOHyperparameters(BaseModel):
     training_budget_env_steps: PositiveInt
 
 
+# Where the validation and test seeds start. They are the same for every run, whatever its
+# training seed, so two training seeds are always scored on the same scenarios. The training
+# seeds of a run must stay below VALIDATION_SEED_START, so the three sets never meet.
+VALIDATION_SEED_START = 100_000
+TEST_SEED_START = 200_000
+
+
 class SeedSplitConfig(BaseModel):
-    """train/eval seed counts (tab:trainparams: "disjoint split", TBD).
-    Required, no defaults -- same convention as PPOHyperparameters."""
+    """The training, validation and test seeds of a run (tab:trainparams: "disjoint split", TBD).
+    The counts are required with no defaults, the same convention as PPOHyperparameters.
+
+    `training_seed` is the seed a run is started with. It seeds RLlib (the network's starting
+    weights and the action sampling of training) and is the first of the run's
+    `train_seed_count` training scenarios. The validation and test seeds do not depend on it,
+    see VALIDATION_SEED_START."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    base_seed: int
+    training_seed: NonNegativeInt
     train_seed_count: PositiveInt
-    eval_seed_count: PositiveInt
+    validation_seed_count: PositiveInt
+    test_seed_count: PositiveInt
+
+    @model_validator(mode="after")
+    def _disjoint(self) -> "SeedSplitConfig":
+        if self.training_seed + self.train_seed_count > VALIDATION_SEED_START:
+            raise ValueError(
+                f"The training seeds {self.training_seed} to "
+                f"{self.training_seed + self.train_seed_count - 1} reach the validation seeds, "
+                f"which start at {VALIDATION_SEED_START}. Use a smaller training seed or fewer "
+                "training seeds."
+            )
+        if VALIDATION_SEED_START + self.validation_seed_count > TEST_SEED_START:
+            raise ValueError(
+                f"validation_seed_count={self.validation_seed_count} reaches the test seeds, "
+                f"which start at {TEST_SEED_START}."
+            )
+        return self
 
 
-def split_seeds(config: SeedSplitConfig) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """(train_seeds, eval_seeds), disjoint by construction: two
-    contiguous, non-overlapping ranges starting at base_seed. The
-    thesis pins disjointness, not a specific splitting scheme -- a
-    contiguous partition is the simplest one that guarantees it
-    trivially (no coordination needed beyond the two counts), matching
-    the same "simplest choice that satisfies the stated constraint"
-    convention used for _ORDER_SEED_OFFSET elsewhere in this repo."""
-    train_seeds = tuple(range(config.base_seed, config.base_seed + config.train_seed_count))
-    eval_start = config.base_seed + config.train_seed_count
-    eval_seeds = tuple(range(eval_start, eval_start + config.eval_seed_count))
-    return train_seeds, eval_seeds
+class SeedSplit(NamedTuple):
+    train: tuple[int, ...]
+    validation: tuple[int, ...]
+    test: tuple[int, ...]
+
+
+def split_seeds(config: SeedSplitConfig) -> SeedSplit:
+    """The training, validation and test seeds, three contiguous ranges that are disjoint by
+    construction (SeedSplitConfig checks it). Training cycles through the training seeds. The
+    validation seeds choose a run's checkpoint and the test seeds score the chosen one, so the
+    reported result is never measured on the seeds that chose it."""
+    return SeedSplit(
+        train=tuple(range(config.training_seed, config.training_seed + config.train_seed_count)),
+        validation=tuple(
+            range(VALIDATION_SEED_START, VALIDATION_SEED_START + config.validation_seed_count)
+        ),
+        test=tuple(range(TEST_SEED_START, TEST_SEED_START + config.test_seed_count)),
+    )
 
 
 def first_seed_index(worker_index: int, vector_index: int = 0, envs_per_runner: int = 1) -> int:
@@ -153,7 +196,7 @@ def build_ppo_config(
     pooling with the decentralised arm and a window above max_local_nodes.
 
     `seed_split` gives the adapter its training seeds and sets RLlib's own
-    seed to `seed_split.base_seed`. `policy_id`, `num_env_runners` and
+    seed to `seed_split.training_seed`. `policy_id`, `num_env_runners` and
     `use_gpu` (one GPU for the local learner) are execution details, not
     study parameters, so they have defaults.
     """
@@ -186,7 +229,7 @@ def build_ppo_config(
         zones,
     )
 
-    train_seeds, _ = split_seeds(seed_split)
+    train_seeds = split_seeds(seed_split).train
 
     def env_creator(env_context: dict) -> WarehouseMAPDMultiAgentEnv:
         # Registers the storage rules in WHICHEVER process actually calls
@@ -255,7 +298,7 @@ def build_ppo_config(
             # Wait for every runner, so an iteration is one episode per runner on every arm.
             sample_timeout_s=None,
         )
-        .debugging(seed=seed_split.base_seed)
+        .debugging(seed=seed_split.training_seed)
         .learners(num_gpus_per_learner=1 if use_gpu else 0)
         .training(
             gamma=experiment_config.discount,

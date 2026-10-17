@@ -95,7 +95,9 @@ def _tiny_algo():
         GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none"),
         PolicyValueHeadConfig(hidden_width=8),
         hyperparameters,
-        SeedSplitConfig(base_seed=100, train_seed_count=2, eval_seed_count=1),
+        SeedSplitConfig(
+            training_seed=100, train_seed_count=2, validation_seed_count=1, test_seed_count=1
+        ),
     )
     return ppo_config.build_algo()
 

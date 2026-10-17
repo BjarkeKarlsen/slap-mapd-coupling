@@ -250,9 +250,14 @@ def evaluation_config(
     return build_config("matched", seed, controller, arrival_rate, horizon, communication)
 
 
-def build_seed_split(base_seed: int, eval_seed_count: int = 3) -> SeedSplitConfig:
-    # Illustrative. The train and eval seed counts are TBD (tab:trainparams, #85).
-    return SeedSplitConfig(base_seed=base_seed, train_seed_count=5, eval_seed_count=eval_seed_count)
+def build_seed_split(training_seed: int, test_seed_count: int = 3) -> SeedSplitConfig:
+    # Illustrative. The seed counts are TBD (tab:trainparams, #85).
+    return SeedSplitConfig(
+        training_seed=training_seed,
+        train_seed_count=5,
+        validation_seed_count=2,
+        test_seed_count=test_seed_count,
+    )
 
 
 def build_hyperparameters(
@@ -354,8 +359,8 @@ def evaluate(
     communication: bool = False,
 ) -> None:
     """Runs `module` for one episode per evaluation seed through the evaluator, so
-    the observations are the ones it saw in training. The seeds are the evaluation half
-    of split_seeds, disjoint from the training seeds. Each episode writes a trace, and
+    the observations are the ones it saw in training. The seeds are the test seeds of
+    split_seeds, disjoint from the training seeds. Each episode writes a trace, and
     the vertex rule and the swap rule are checked on it."""
     print(f"\n=== Evaluating the trained policy over {len(eval_seeds)} evaluation seeds ===")
     policy = ModulePolicy(module)
@@ -490,7 +495,7 @@ def main(controller: ControllerArchitecture = "decentralised") -> None:
         f"{args.budget_env_steps}, over the budget by {overshoot}."
     )
 
-    _, eval_seeds = split_seeds(seed_split)
+    eval_seeds = split_seeds(seed_split).test
     module = load_module(run.checkpoint)
     evaluate(
         module,

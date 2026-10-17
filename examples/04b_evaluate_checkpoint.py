@@ -216,7 +216,7 @@ def main() -> None:
         )
     else:
         seed_split = example_04.build_seed_split(config.seed, args.eval_seeds)
-        _, eval_seeds = example_04.split_seeds(seed_split)
+        eval_seeds = example_04.split_seeds(seed_split).test
         example_04.evaluate(
             module,
             instance,
