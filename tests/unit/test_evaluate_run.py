@@ -19,7 +19,7 @@ from slap_mapd_coupling.training.config import (
     SeedSplitConfig,
 )
 from slap_mapd_coupling.training.evaluate_run import checkpoints_of, evaluate_run
-from slap_mapd_coupling.training.spec import TrainingSpec
+from slap_mapd_coupling.training.spec import TrainingSpec, load_spec
 
 CONFIG = Path(__file__).resolve().parents[2] / "configs" / "decentralised.yaml"
 
@@ -216,3 +216,29 @@ def test_evaluation_registers_every_storage_rule_it_can_play():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_another_load_plays_the_test_seeds_but_the_choice_stays_at_the_training_load(
+    tmp_path, fake_episodes, monkeypatch
+):
+    rates = []
+
+    def play(study, spec, checkpoint, seed, storage_mode=None):
+        rates.append((seed >= TEST_SEED_START, spec.arrival_rate))
+        return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
+
+    fake_episodes([1, 1])
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    run = _run_dir(tmp_path, 2)
+    training_rate = load_spec(CONFIG).arrival_rate
+    evaluate_run(run, tmp_path / "out", arrival_rate=0.3)
+    assert {rate for is_test, rate in rates if not is_test} == {training_rate}
+    assert {rate for is_test, rate in rates if is_test} == {0.3}
+
+
+def test_the_command_names_the_output_after_the_load(tmp_path, fake_episodes):
+    fake_episodes([1, 1])
+    run = _run_dir(tmp_path, 2)
+    result = CliRunner().invoke(cli, ["evaluate", str(run), "--arrival-rate", "0.3"])
+    assert result.exit_code == 0, result.output
+    assert (run / "evaluation_rate0.3" / "test.jsonl").exists()

@@ -225,7 +225,8 @@ def train(
     "--output",
     type=click.Path(),
     default=None,
-    help="Where validation.jsonl, test.jsonl and summary.md go, RUN_DIR/evaluation by default.",
+    help="Where validation.jsonl, test.jsonl and summary.md go. Default: RUN_DIR/evaluation, "
+    "or RUN_DIR/evaluation_rate<rate> with --arrival-rate.",
 )
 @click.option(
     "--storage-modes",
@@ -235,7 +236,14 @@ def train(
     "Default: the rule the run trained with. An adaptive rule takes its epoch length, "
     "relocation cap and congestion weight from the storage_rule section of the run's spec.",
 )
-def evaluate(run_dir, output, storage_modes):
+@click.option(
+    "--arrival-rate",
+    type=float,
+    default=None,
+    help="Load the test seeds are played at, in tasks per step. Default: the training load. "
+    "The checkpoint is still chosen at the training load.",
+)
+def evaluate(run_dir, output, storage_modes, arrival_rate):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with, the one with the most completed tasks
     is chosen, and it and the last checkpoint play the test seeds under every storage rule
@@ -245,9 +253,10 @@ def evaluate(run_dir, output, storage_modes):
     from slap_mapd_coupling.training.evaluate_run import evaluate_run
 
     run = Path(run_dir)
-    out = Path(output) if output is not None else run / "evaluation"
+    default_name = "evaluation" if arrival_rate is None else f"evaluation_rate{arrival_rate:g}"
+    out = Path(output) if output is not None else run / default_name
     try:
-        result = evaluate_run(run, out, list(storage_modes) or None)
+        result = evaluate_run(run, out, list(storage_modes) or None, arrival_rate)
     except ValueError as error:
         raise click.UsageError(str(error)) from error
     for role, checkpoint in (("chosen", result.chosen), ("last", result.last)):

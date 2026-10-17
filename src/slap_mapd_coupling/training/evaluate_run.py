@@ -44,6 +44,7 @@ from slap_mapd_coupling.training.spec import (
     build_experiment_config,
     build_study,
     check_storage_rule,
+    override_spec,
     training_storage_mode,
 )
 from slap_mapd_coupling.training.trainer import load_module
@@ -93,14 +94,22 @@ def play(
 
 
 def evaluate_run(
-    run_dir: Path, out_dir: Path, storage_modes: Sequence[StorageMode] | None = None
+    run_dir: Path,
+    out_dir: Path,
+    storage_modes: Sequence[StorageMode] | None = None,
+    arrival_rate: float | None = None,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds and plays it and
     the last checkpoint on the test seeds under each of `storage_modes`, by default only the
     storage rule the run trained with. Writes `validation.jsonl`, `test.jsonl` and `summary.md`
     to `out_dir`, replacing earlier ones. The two row files get one row per episode as it
-    finishes. Raises before any episode when a mode needs settings the spec lacks."""
+    finishes. Raises before any episode when a mode needs settings the spec lacks.
+
+    `arrival_rate` plays the test seeds at another load than the run trained at, for example a
+    load where the fleet keeps up, so service time counts. The checkpoint is still chosen at
+    the training load, so the same checkpoint is measured at every load."""
     spec = load_run_spec(run_dir)
+    test_spec = spec if arrival_rate is None else override_spec(spec, arrival_rate=arrival_rate)
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
         raise ValueError(f"{run_dir} holds no checkpoints.")
@@ -133,7 +142,7 @@ def evaluate_run(
     for role, checkpoint in (("chosen", chosen), ("last", last)):
         for mode in modes:
             for seed in seeds.test:
-                metrics = play(study, spec, checkpoint, seed, mode)
+                metrics = play(study, test_spec, checkpoint, seed, mode)
                 played.setdefault((role, mode), []).append(metrics)
                 row = {
                     "role": role,
