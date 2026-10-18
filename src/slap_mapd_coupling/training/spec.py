@@ -14,6 +14,7 @@ study parameter.
 
 from __future__ import annotations
 
+import math
 import statistics
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -34,11 +35,12 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import (
     ControllerArchitecture,
     ExperimentConfig,
+    ReceivingVertices,
     StorageMode,
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
-from slap_mapd_coupling.environment.multi_agent_env import popularity_ranking
+from slap_mapd_coupling.environment.multi_agent_env import popularity_ranking, zipf_weights
 from slap_mapd_coupling.instances.generator import (
     GeneratedInstance,
     GeneratorParams,
@@ -73,6 +75,11 @@ class StorageSettings(BaseModel):
       an order picks its delivery vertex uniformly. The SKUs are ranked by popularity at t = 0,
       and the SKU at rank r goes to vertex number r // ceil(|K| / |V_str|) in that order, so the
       most popular SKUs fill the vertex nearest the delivery vertices first.
+    - "demand_sized_blocks": the blocks of "demand_blocks", with each SKU's units sized to its
+      expected orders over one arrival period, for the arrival stock model. The SKU at rank r
+      starts with max(initial_units, ceil((1 + epsilon) * lambda_task * Delta * w_r)) units,
+      w_r being its popularity at t = 0, so every SKU holds at least `initial_units`. It needs
+      the `arrival` section for epsilon and the `storage_rule` section for Delta.
 
     A new task picks a SKU in stock, then a vertex holding it, so more SKUs mean more distinct
     pickups.
@@ -84,7 +91,7 @@ class StorageSettings(BaseModel):
     unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
     vertex_capacity: PositiveFloat
     initial_units: PositiveInt
-    initial_placement: Literal["by_number", "demand_blocks"] = "by_number"
+    initial_placement: Literal["by_number", "demand_blocks", "demand_sized_blocks"] = "by_number"
 
 
 class DemandSettings(BaseModel):
@@ -111,10 +118,12 @@ class DemandSettings(BaseModel):
 
 
 class StorageRuleSettings(BaseModel):
-    """The slow loop of an adaptive storage rule (sec:pf:storage), which F_fix does not have.
+    """The slow loop of the storage rules (sec:pf:storage).
 
-    `epoch_length` is the storage update interval Delta in steps and `reassignment_cap` is nu,
-    the most units one update may relocate. `congestion_weight` is beta, which only the
+    `epoch_length` is the storage update interval Delta in steps, and under the arrival stock
+    model the arrival period of every rule, F_fix included. `reassignment_cap` is nu, the most
+    units one update may relocate. The adaptive rules of the template model need it, and the
+    arrival model relocates nothing and takes none. `congestion_weight` is beta, which only the
     congestion rule uses. None of them has a default, because the thesis leaves them open
     (tab:evalparams).
     """
@@ -122,8 +131,33 @@ class StorageRuleSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     epoch_length: PositiveInt
-    reassignment_cap: PositiveInt
+    reassignment_cap: PositiveInt | None = None
     congestion_weight: NonNegativeFloat | None = None
+
+
+class ArrivalSettings(BaseModel):
+    """The arrival stock model (thesis wording pending). A spec without this section uses the
+    template model, where stock never runs out.
+
+    Every Delta steps stock arrives at the `receiving` vertices, and the storage rule decides
+    which shelves it goes to. Each SKU is filled up to
+    max(initial_units, ceil((1 + margin) * its orders in the last period)), so `initial_units`
+    of the `storage` section is the floor. `margin` is epsilon. Neither has a default, because
+    both are study parameters.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    margin: NonNegativeFloat
+    receiving: ReceivingVertices
+
+
+class StockSizing(NamedTuple):
+    """What "demand_sized_blocks" sizes the starting stock by: lambda_task, Delta and epsilon."""
+
+    arrival_rate: float
+    epoch_length: int
+    margin: float
 
 
 class ExperimentSettings(BaseModel):
@@ -183,9 +217,11 @@ class TrainingSpec(BaseModel):
     storage: StorageSettings
     # The order distribution. None is the uniform draw of the shipped configs.
     demand: DemandSettings | None = None
-    # Delta, nu and beta of the adaptive storage rules. None is enough for a run that only
+    # Delta, nu and beta of the storage rules. None is enough for a template run that only
     # ever plays F_fix.
     storage_rule: StorageRuleSettings | None = None
+    # The arrival stock model. None is the template model of the shipped configs.
+    arrival: ArrivalSettings | None = None
     arm: ArmSettings = ArmSettings()
     model: ModelSettings
     ppo: PPOHyperparameters
@@ -194,6 +230,28 @@ class TrainingSpec(BaseModel):
     validation_seed_count: PositiveInt
     test_seed_count: PositiveInt
     checkpoint: CheckpointSettings = CheckpointSettings()
+
+    @model_validator(mode="after")
+    def _arrival_settings(self) -> "TrainingSpec":
+        """The arrival model needs Delta, its arrival period, under every storage rule and
+        relocates nothing, so it takes no nu. The sized starting stock is the arrival model's,
+        sized by its margin and Delta."""
+        if self.arrival is not None:
+            if self.storage_rule is None:
+                raise ValueError(
+                    "the arrival section needs a storage_rule section with epoch_length, the "
+                    "arrival period, and there is none."
+                )
+            if self.storage_rule.reassignment_cap is not None:
+                raise ValueError(
+                    "the arrival model relocates nothing, so the storage_rule section takes no "
+                    "reassignment_cap."
+                )
+        elif self.storage.initial_placement == "demand_sized_blocks":
+            raise ValueError(
+                "initial_placement 'demand_sized_blocks' needs the arrival section for its margin."
+            )
+        return self
 
     @model_validator(mode="after")
     def _matched_training_has_its_storage_rule(self) -> "TrainingSpec":
@@ -286,29 +344,38 @@ def build_instance(spec: TrainingSpec) -> GeneratedInstance:
 
 
 def build_storage(
-    storage: StorageSettings, graph: WarehouseGraph, demand: DemandSettings | None = None
+    storage: StorageSettings,
+    graph: WarehouseGraph,
+    demand: DemandSettings | None = None,
+    sizing: StockSizing | None = None,
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
     """The SKUs, the capacity of every storage vertex and the initial counts, as described by
-    `StorageSettings`. `demand` gives the popularity ranking "demand_blocks" places by, and
-    None ranks the SKUs in id order, as the uniform draw has no ranking. Raises if the initial
-    counts break the capacity constraint."""
+    `StorageSettings`. `demand` gives the popularity ranking "demand_blocks" and
+    "demand_sized_blocks" place by, and None ranks the SKUs in id order, as the uniform draw has
+    no ranking. "demand_sized_blocks" needs `sizing`. Raises if the initial counts break the
+    capacity constraint."""
     storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
     skus: dict[SkuId, SkuType] = {}
     for i in range(storage.num_skus):
         sku_id = f"sku_{i:03d}"
         unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
         skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
-    if storage.initial_placement == "demand_blocks":
+    units = dict.fromkeys(skus, storage.initial_units)
+    if storage.initial_placement in ("demand_blocks", "demand_sized_blocks"):
         home = _demand_blocks(list(skus), graph, storage_vertices, demand)
     else:
         home = {
             sku_id: storage_vertices[i % len(storage_vertices)] for i, sku_id in enumerate(skus)
         }
+    if storage.initial_placement == "demand_sized_blocks":
+        if sizing is None:
+            raise ValueError("initial_placement 'demand_sized_blocks' needs the stock sizing.")
+        units = _sized_units(list(skus), storage.initial_units, demand, sizing)
     counts: dict[SkuId, dict[VertexId, int]] = {}
     used = dict.fromkeys(storage_vertices, 0.0)
     for sku_id, sku in skus.items():
-        counts[sku_id] = {home[sku_id]: storage.initial_units}
-        used[home[sku_id]] += sku.unit_capacity * storage.initial_units
+        counts[sku_id] = {home[sku_id]: units[sku_id]}
+        used[home[sku_id]] += sku.unit_capacity * units[sku_id]
     over = {v: u for v, u in used.items() if u > storage.vertex_capacity}
     if over:
         raise ValueError(
@@ -344,6 +411,38 @@ def _demand_blocks(
     return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(ranked)}
 
 
+def _sized_units(
+    sku_ids: list[SkuId], floor: int, demand: DemandSettings | None, sizing: StockSizing
+) -> dict[SkuId, int]:
+    """The starting units of every SKU under "demand_sized_blocks" (see `StorageSettings`).
+    Without a demand section every SKU weighs the same, as the uniform draw has no ranking."""
+    ranked = popularity_ranking(
+        sku_ids,
+        0,
+        None if demand is None else demand.rotation_period,
+        None if demand is None else demand.rotation_shift,
+    )
+    weights = zipf_weights(len(ranked), 0.0 if demand is None else demand.skew)
+    return {
+        sku_id: max(
+            floor,
+            math.ceil(
+                (1 + sizing.margin) * sizing.arrival_rate * sizing.epoch_length * weights[rank]
+            ),
+        )
+        for rank, sku_id in enumerate(ranked)
+    }
+
+
+def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
+    """What the starting stock of `spec` is sized by, or None when it is not sized."""
+    if spec.storage.initial_placement != "demand_sized_blocks":
+        return None
+    # _arrival_settings guarantees both sections for this placement.
+    assert spec.arrival is not None and spec.storage_rule is not None
+    return StockSizing(spec.arrival_rate, spec.storage_rule.epoch_length, spec.arrival.margin)
+
+
 def training_storage_mode(spec: TrainingSpec) -> StorageMode:
     """The storage rule a run trains under. "fixed_only" trains under F_fix and "matched" under
     the storage rule used at evaluation (sec:method:training)."""
@@ -351,16 +450,23 @@ def training_storage_mode(spec: TrainingSpec) -> StorageMode:
 
 
 def check_storage_rule(spec: TrainingSpec, storage_mode: StorageMode) -> None:
-    """Raises a ValueError naming what `spec` lacks to play `storage_mode`. F_fix needs nothing,
-    the adaptive rules need the `storage_rule` section, and the congestion rule needs beta in
-    it as well."""
-    if storage_mode == "fixed":
-        return
+    """Raises a ValueError naming what `spec` lacks to play `storage_mode`. In the template
+    model F_fix needs nothing and the adaptive rules need the `storage_rule` section with nu.
+    In the arrival model every rule needs the section, for Delta, and none takes nu. The
+    congestion rule needs beta in it as well."""
     rule = spec.storage_rule
-    if rule is None:
+    if spec.arrival is None:
+        if storage_mode == "fixed":
+            return
+        if rule is None or rule.reassignment_cap is None:
+            raise ValueError(
+                f"storage mode {storage_mode!r} needs a storage_rule section with epoch_length "
+                "and reassignment_cap, and there is none."
+            )
+    elif rule is None:
         raise ValueError(
-            f"storage mode {storage_mode!r} needs a storage_rule section with epoch_length and "
-            "reassignment_cap, and there is none."
+            "the arrival model needs a storage_rule section with epoch_length under every "
+            "storage mode, and there is none."
         )
     if storage_mode == "congestion" and rule.congestion_weight is None:
         raise ValueError(
@@ -373,14 +479,16 @@ def build_experiment_config(
     spec: TrainingSpec, seed: int | None = None, storage_mode: StorageMode | None = None
 ) -> ExperimentConfig:
     """The configuration a run trains under, or plays under `storage_mode` when that is given.
-    An adaptive mode takes Delta, nu and, for the congestion rule, beta from the spec's
-    `storage_rule` section, and F_fix ignores the section."""
+    In the template model an adaptive mode takes Delta, nu and, for the congestion rule, beta
+    from the spec's `storage_rule` section, and F_fix ignores the section. In the arrival model
+    every mode takes Delta from it, and the stock settings from the `arrival` section."""
     experiment = spec.experiment
     demand = spec.demand
+    arrival = spec.arrival
     if storage_mode is None:
         storage_mode = training_storage_mode(spec)
     check_storage_rule(spec, storage_mode)
-    rule = None if storage_mode == "fixed" else spec.storage_rule
+    rule = None if storage_mode == "fixed" and arrival is None else spec.storage_rule
     return ExperimentConfig(
         storage_mode=storage_mode,
         controller=spec.controller,
@@ -405,6 +513,10 @@ def build_experiment_config(
         congestion_weight=(
             rule.congestion_weight if rule is not None and storage_mode == "congestion" else None
         ),
+        stock_model="template" if arrival is None else "arrival",
+        stock_margin=None if arrival is None else arrival.margin,
+        stock_floor=None if arrival is None else spec.storage.initial_units,
+        stock_receiving=None if arrival is None else arrival.receiving,
     )
 
 
@@ -412,7 +524,9 @@ def build_study(spec: TrainingSpec) -> Study:
     instance = build_instance(spec)
     # x_0 depends on the instance, the storage settings and the demand only, so every storage
     # rule, in training and at evaluation, starts from the same stock (sec:impl:instances).
-    skus, capacities, counts = build_storage(spec.storage, instance.graph, spec.demand)
+    skus, capacities, counts = build_storage(
+        spec.storage, instance.graph, spec.demand, stock_sizing(spec)
+    )
     config = build_experiment_config(spec)
     max_messages = spec.arm.max_messages or max(spec.experiment.num_agents - 1, 1)
     arm = build_arm(

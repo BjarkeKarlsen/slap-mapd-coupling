@@ -215,6 +215,10 @@ class WarehouseMAPDEnv:
         config: ExperimentConfig,
         assigner: Assigner | None = None,
     ) -> None:
+        if config.stock_model != "template":
+            raise NotImplementedError(
+                f"stock_model={config.stock_model!r} is not simulated yet. Only 'template' is."
+            )
         self.graph = graph
         self.config = config
         self._skus = dict(skus)

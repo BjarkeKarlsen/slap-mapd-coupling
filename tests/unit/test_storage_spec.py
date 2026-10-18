@@ -48,10 +48,19 @@ def test_matched_fixed_and_fixed_only_need_no_section(spec):
 
 
 def test_the_section_has_no_defaults():
-    with pytest.raises(ValidationError):
-        StorageRuleSettings(epoch_length=100)
+    # nu has none either. It may be left out because the arrival stock model takes no nu, and
+    # an adaptive rule of the template model then refuses the section.
+    assert StorageRuleSettings(epoch_length=100).reassignment_cap is None
     with pytest.raises(ValidationError):
         StorageRuleSettings(reassignment_cap=48)
+
+
+def test_a_template_adaptive_rule_refuses_the_section_without_nu(spec):
+    section = StorageRuleSettings(epoch_length=100)
+    with pytest.raises(ValidationError, match="reassignment_cap"):
+        _with(spec, regime="matched", evaluation_storage_mode="demand", storage_rule=section)
+    with pytest.raises(ValueError, match="reassignment_cap"):
+        build_experiment_config(_with(spec, storage_rule=section), storage_mode="demand")
 
 
 def test_the_section_reaches_the_experiment_config_of_an_adaptive_mode(spec):

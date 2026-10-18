@@ -17,6 +17,12 @@ from pydantic import (
 from slap_mapd_coupling.planners.registry import PlannerName
 
 StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
+# How stock behaves. "template": stock never runs out and an adaptive rule relocates it every
+# Delta steps. "arrival": an order takes a unit, stock arrives every Delta steps, and the storage
+# rule decides where the arriving stock goes (thesis wording pending).
+StockModel = Literal["template", "arrival"]
+# Where arriving stock enters the warehouse. "delivery": the delivery vertices, one I/O side.
+ReceivingVertices = Literal["delivery"]
 # "full_view" is the full-view setting (sec:method:controllers), the decentralised router with
 # every movable vertex in view and the pooled readout. It is not a controller in Pi.
 ControllerArchitecture = Literal["centralised", "section", "decentralised", "full_view"]
@@ -77,8 +83,20 @@ class ExperimentConfig(BaseModel):
     demand_rotation_period: PositiveInt | None = None  # None means no rotation
     demand_rotation_shift: PositiveInt | None = None
 
+    # The stock model. Under "arrival" Delta is the arrival period for every storage rule,
+    # F_fix included, and nothing is relocated, so there is no nu. Each SKU is filled up to
+    # max(stock_floor, ceil((1 + stock_margin) * its orders in the last period)). The margin
+    # epsilon, the floor and the receiving vertices are study parameters, so the arrival model
+    # takes no defaults, and "template", today's model, is the default.
+    stock_model: StockModel = "template"
+    stock_margin: NonNegativeFloat | None = None  # epsilon
+    stock_floor: PositiveInt | None = None  # the fewest units a SKU is filled up to
+    stock_receiving: ReceivingVertices | None = None  # V_rcv
+
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
+        if self.stock_model == "arrival":
+            return self  # _arrival_stock_parameters checks the arrival model
         if self.storage_mode == "fixed":
             if self.storage_epoch_length is not None:
                 raise ValueError(
@@ -91,6 +109,28 @@ class ExperimentConfig(BaseModel):
                     raise ValueError(f"storage_mode={self.storage_mode!r} requires {name}.")
             if self.storage_mode == "congestion" and self.congestion_weight is None:
                 raise ValueError("storage_mode='congestion' requires congestion_weight (beta).")
+        return self
+
+    @model_validator(mode="after")
+    def _arrival_stock_parameters(self) -> "ExperimentConfig":
+        """The template model has no arrivals, so it takes no stock settings. The arrival model
+        needs all of them, and Delta under every storage rule, and it relocates nothing, so it
+        takes no nu."""
+        stock = ("stock_margin", "stock_floor", "stock_receiving")
+        if self.stock_model == "template":
+            for name in stock:
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} only applies to stock_model='arrival'.")
+            return self
+        for name in (*stock, "storage_epoch_length"):
+            if getattr(self, name) is None:
+                raise ValueError(f"stock_model='arrival' requires {name}.")
+        if self.reassignment_cap is not None:
+            raise ValueError(
+                "stock_model='arrival' relocates nothing, so do not set reassignment_cap (nu)."
+            )
+        if self.storage_mode == "congestion" and self.congestion_weight is None:
+            raise ValueError("storage_mode='congestion' requires congestion_weight (beta).")
         return self
 
     @model_validator(mode="after")
