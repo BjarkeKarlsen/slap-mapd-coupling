@@ -1,0 +1,114 @@
+# The training run of the 8-agent warehouse under the arrival stock model, read by
+# `slap-mapd train`. The four files of configs/medium_arrival differ only in `controller`. Each
+# is its namesake in configs/medium with the arrival stock model switched on: the `arrival`
+# section, a starting stock sized by demand, no relocation cap and a congestion weight of 1.
+#
+# Values are illustrative and are not thesis values. The arrival model is not yet in the thesis.
+# The margin of 1 and the congestion weight beta of 1 under the arrival model are pending the
+# author's decisions. Everything else is configs/medium: the 94-vertex instance of the night of
+# 2026-10-16 with 8 agents, an arrival rate of 0.6, a horizon of 2000 and a budget of 500 000
+# timesteps. The SKUs are skewed and their popularity drifts (`demand`). An order takes a unit
+# of its SKU and stock arrives every `storage_rule.epoch_length` steps under every storage rule.
+# Training stays on fixed storage, and `slap-mapd evaluate --storage-modes` plays the others.
+# See training/spec.py for what each section means.
+
+controller: full_view
+regime: fixed_only          # fixed_only | matched
+communication: false        # decentralised arm only
+evaluation_storage_mode: fixed
+
+# An overload on this instance. Token Passing finishes 0.26 to 0.27 tasks per step at 0.3 and its
+# backlog grows, so the arms are compared on throughput and backlog. A sampling call of a runner
+# is one complete episode, and the budget below counts timesteps, one per timestep however
+# many robots choose within it.
+arrival_rate: 0.6
+horizon: 2000
+
+experiment:
+  num_agents: 8
+  wait_cost: 0.1            # c_wait, one value for the graph and the reward
+  keep_up_threshold: 0.8    # f_up of eq:throughput
+  observation_depth: 5      # d_obs
+  discount: 0.99            # gamma
+  # n_deliver is raised well above 1.0. A 5000-iteration run on this instance showed rising
+  # training return with zero evaluation completions, consistent with the per-step shaping
+  # term outweighing a small completion bonus.
+  deliver_reward: 10.0
+  override_penalty: 0.5
+  congestion_reward_weight: 0.1
+  congestion_sensitive: false
+  seed: 0
+
+# GeneratorParams without wait_cost and num_endpoints, which follow the experiment section.
+instance:
+  max_num_aisles: 12
+  max_aisle_length: 10
+  max_num_cross_aisles: 8
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: true
+  edge_cost_range: [0.5, 2.0]
+  num_storage_vertices: 10
+  num_delivery_vertices: 4
+  min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
+  seed: 42
+
+# 100 SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), with the most popular
+# SKUs at the storage vertices nearest the delivery vertices. Each SKU starts with its expected
+# orders over one arrival period, with the margin, and at least 8 units, the floor of every
+# arrival too. Each vertex holds up to 200. An order picks a SKU by its popularity and takes a
+# unit from the shelf holding it nearest its delivery vertex, or waits for the next arrival.
+# See StorageSettings, ArrivalSettings and DemandSettings.
+storage:
+  num_skus: 100
+  unit_capacities: [0.5, 1.0, 2.0]
+  vertex_capacity: 200.0
+  initial_units: 8
+  initial_placement: demand_sized_blocks
+
+# SKU popularity is Zipf with the given skew, and the ranking rotates by 5 places every 200 steps.
+demand:
+  skew: 1.0
+  rotation_period: 200
+  rotation_shift: 5
+
+# Delta, the arrival period of every storage rule, and beta of the congestion rule, used by
+# `slap-mapd evaluate --storage-modes`. Nothing is relocated, so there is no nu.
+storage_rule:
+  epoch_length: 100
+  congestion_weight: 1.0
+
+# The arrival stock model. Each SKU is filled up to max(8, ceil((1 + margin) * its orders in the
+# last period)), and the stock arrives at the delivery vertices.
+arrival:
+  margin: 1.0
+  receiving: delivery
+
+arm:
+  num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)
+  # max_messages defaults to num_agents - 1, so no sender is dropped. Communication only.
+
+model:
+  num_rounds: 2
+  hidden_width: 32
+  head_hidden_width: 32
+
+ppo:
+  lr: 0.0003
+  clip_param: 0.2
+  gae_lambda: 0.95
+  minibatch_size: 128
+  num_epochs: 5
+  entropy_coeff: 0.02
+  vf_loss_coeff: 1.0
+  training_budget_env_steps: 500000
+
+train_seed_count: 100
+validation_seed_count: 2
+test_seed_count: 6
+
+checkpoint:
+  frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end
+  num_to_keep: null         # keep every one, a checkpoint is chosen on validation seeds
+  score_attribute: episode_return_mean   # a top-level key of the result
+  score_order: max

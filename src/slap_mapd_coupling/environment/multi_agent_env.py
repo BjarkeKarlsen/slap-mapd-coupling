@@ -326,6 +326,13 @@ class WarehouseMAPDEnv:
         (training/rllib_env.py, #30)."""
         return self._t
 
+    @property
+    def waiting_orders(self) -> tuple[Order, ...]:
+        """The orders of the arrival stock model still waiting for a unit of their SKU, in
+        release order. They are released but not yet tasks. Always empty under the template
+        model."""
+        return tuple(self._waiting_orders)
+
     def reset(
         self, *, seed: int | None = None
     ) -> tuple[dict[AgentId, VertexId], dict[AgentId, dict]]:
