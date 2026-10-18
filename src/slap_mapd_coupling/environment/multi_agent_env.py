@@ -54,7 +54,11 @@ release order: an order takes one unit of its SKU from the storage vertex holdin
 nearest its delivery vertex (ties by vertex id), and only then becomes a task, with its release
 time kept. An order whose SKU has no unit anywhere waits in the queue and counts in the backlog.
 The SKU of an order is drawn without looking at stock, so the orders of a seed do not depend on
-the storage rule or the controller. Stock arriving at a storage epoch is not simulated yet.
+the storage rule or the controller. Stage 6 is then the arrival of new stock every Delta steps,
+under every storage rule, F_fix included: the amount of each SKU is the same under every rule,
+and the put-away rule of the storage mode decides which shelves it goes to, without moving stock
+already on a shelf (storage/arrival.py). An order waiting for stock is served by stage 1 of the
+next step, after the arrival.
 
 step(actions) takes one action slot per robot (the action mask), decoded by
 environment/spaces.py::action_for_slot, so the simulator has one step mode.
@@ -89,6 +93,7 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
+from slap_mapd_coupling.storage.arrival import PutAwayRule, arrival_amounts, get_putaway_rule
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
 
@@ -195,6 +200,18 @@ class EpisodeLog:
     # Arrival stock model only: the steps each task's order waited for a unit of its SKU,
     # from its release until a unit was taken for it. 0 for an order served at once.
     stock_wait_by_task: dict[TaskId, int] = field(default_factory=dict)
+    # Arrival stock model only, one entry per arrival. The put-away measure: the travel of the
+    # arriving units from the nearest receiving vertex to their shelves, in units x d_G.
+    putaway_distance_by_update: list[float] = field(default_factory=list)
+    # Arrival stock model only: the units that arrived at each arrival, placed or not.
+    arrived_units_by_update: list[int] = field(default_factory=list)
+    # Arrival stock model only: the arriving units that fit on no shelf at each arrival.
+    unplaced_units_by_update: list[int] = field(default_factory=list)
+    # Arrival stock model only: the units F_fix placed off their SKU's home shelf at each
+    # arrival. Always 0 under the adaptive rules, which have no home shelf.
+    overflow_units_by_update: list[int] = field(default_factory=list)
+    # Arrival stock model only: the SKUs held at more than one storage vertex after each arrival.
+    split_skus_by_update: list[int] = field(default_factory=list)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
     # five sums of an agent add up to its summed reward). overrides_by_agent counts the
@@ -262,6 +279,17 @@ class WarehouseMAPDEnv:
             if config.demand_skew is None
             else list(_running_sum(zipf_weights(len(self._sku_ids), config.demand_skew)))
         )
+        # The arrival model's put-away rule, and each SKU's home shelf, which F_fix fills.
+        self._putaway_rule: PutAwayRule | None = None
+        self._home: dict[SkuId, VertexId] = {}
+        if config.stock_model == "arrival":
+            self._putaway_rule = get_putaway_rule(config.storage_mode)
+            self._home = _home_shelves(self._initial_counts)
+            if config.storage_mode == "fixed" and set(self._home) != set(self._skus):
+                missing = sorted(set(self._skus) - set(self._home))
+                raise ValueError(
+                    f"SKUs {missing} start with no units, so F_fix has no home shelf for them."
+                )
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -426,31 +454,9 @@ class WarehouseMAPDEnv:
         delta = self.config.storage_epoch_length
         if delta is not None and next_t % delta == 0:
             if self.config.stock_model == "arrival":
-                raise NotImplementedError(
-                    "stock arriving at a storage epoch is not simulated yet, so an arrival "
-                    "model episode cannot reach the first epoch."
-                )
-            # rho_hat_t/mu_hat_t/w_hat_t of the window that ends now, counted per step
-            # over the last Delta steps only (environment/storage_estimates.py), then
-            # a fresh window. Causal by construction: the order released at next_t
-            # itself is only released after this stage.
-            estimates = self._estimator.close_window(delta)
-            before_storage = self.storage
-            self.storage = self._storage_rule(
-                self.storage,
-                self.graph,
-                self.config.reassignment_cap,
-                self.config.congestion_weight,
-                estimates.demand,
-                estimates.traversal,
-                estimates.waiting,
-            )
-            self.log.relocated_units_by_update.append(
-                _relocated_units(before_storage, self.storage)
-            )
-            self.log.relocation_distance_by_update.append(
-                _relocation_distance(before_storage, self.storage, self.graph)
-            )
+                self._arrive(delta)
+            else:
+                self._update_storage(delta)
 
         rewards = self._compute_rewards(
             before_locations, active_by_agent, result.overridden, next_t, congestion
@@ -471,6 +477,65 @@ class WarehouseMAPDEnv:
         }
         infos["__all__"] = {}
         return observations, rewards, terminated, truncated, infos
+
+    def _update_storage(self, delta: int) -> None:
+        """Stage 6 under the template stock model: the storage update relocates stock."""
+        # rho_hat_t/mu_hat_t/w_hat_t of the window that ends now, counted per step
+        # over the last Delta steps only (environment/storage_estimates.py), then
+        # a fresh window. Causal by construction: the order released at next_t
+        # itself is only released after this stage.
+        estimates = self._estimator.close_window(delta)
+        before_storage = self.storage
+        self.storage = self._storage_rule(
+            self.storage,
+            self.graph,
+            self.config.reassignment_cap,
+            self.config.congestion_weight,
+            estimates.demand,
+            estimates.traversal,
+            estimates.waiting,
+        )
+        self.log.relocated_units_by_update.append(_relocated_units(before_storage, self.storage))
+        self.log.relocation_distance_by_update.append(
+            _relocation_distance(before_storage, self.storage, self.graph)
+        )
+
+    def _arrive(self, delta: int) -> None:
+        """Stage 6 under the arrival stock model (module docstring): new stock arrives and the
+        put-away rule places it. The estimates are those of the window that ends now, as in the
+        template model, and every storage rule closes it, since Delta is the arrival period.
+        Orders still waiting are served by stage 1 of the next step, not here."""
+        assert self._putaway_rule is not None
+        assert self.config.stock_margin is not None
+        assert self.config.stock_floor is not None
+        estimates = self._estimator.close_window(delta)
+        waiting_by_sku: dict[SkuId, int] = {}
+        for order in self._waiting_orders:
+            waiting_by_sku[order.sku] = waiting_by_sku.get(order.sku, 0) + 1
+        amounts = arrival_amounts(
+            self.storage,
+            estimates.demand,
+            delta,
+            self.config.stock_margin,
+            self.config.stock_floor,
+            waiting_by_sku,
+        )
+        result = self._putaway_rule(
+            self.storage,
+            self.graph,
+            amounts,
+            self._home,
+            estimates.demand,
+            estimates.traversal,
+            estimates.waiting,
+            self.config.congestion_weight,
+        )
+        self.storage = result.storage
+        self.log.putaway_distance_by_update.append(result.putaway_distance)
+        self.log.arrived_units_by_update.append(result.arrived_units)
+        self.log.unplaced_units_by_update.append(result.unplaced_units)
+        self.log.overflow_units_by_update.append(result.overflow_units)
+        self.log.split_skus_by_update.append(_split_skus(self.storage))
 
     def _release_and_assign(self) -> None:
         """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
@@ -753,6 +818,26 @@ class WarehouseMAPDEnv:
             self.log.record_reward_terms(agent_id, terms, was_overridden)
             rewards[agent_id] = terms.total
         return rewards
+
+
+def _home_shelves(counts: Mapping[SkuId, Mapping[VertexId, int]]) -> dict[SkuId, VertexId]:
+    """Each SKU's home shelf under the arrival stock model: the storage vertex holding most of
+    its starting units, ties by vertex id. A SKU with no starting units has none."""
+    home: dict[SkuId, VertexId] = {}
+    for sku_id, per_vertex in counts.items():
+        held = [(-count, v) for v, count in per_vertex.items() if count > 0]
+        if held:
+            home[sku_id] = min(held)[1]
+    return home
+
+
+def _split_skus(storage: StorageState) -> int:
+    """The SKUs held at more than one storage vertex."""
+    return sum(
+        1
+        for per_vertex in storage.counts.values()
+        if sum(1 for count in per_vertex.values() if count > 0) > 1
+    )
 
 
 def _relocated_units(before: StorageState, after: StorageState) -> int:
