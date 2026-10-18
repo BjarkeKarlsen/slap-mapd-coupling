@@ -48,6 +48,14 @@ agent's own current vertex. The full o_i(t) feature vector
 needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
+Under the arrival stock model (config.stock_model == "arrival", thesis wording pending) stage 1
+works on orders, not tasks. An order is queued when it is released, and the queue is served in
+release order: an order takes one unit of its SKU from the storage vertex holding it that is
+nearest its delivery vertex (ties by vertex id), and only then becomes a task, with its release
+time kept. An order whose SKU has no unit anywhere waits in the queue and counts in the backlog.
+The SKU of an order is drawn without looking at stock, so the orders of a seed do not depend on
+the storage rule or the controller. Stock arriving at a storage epoch is not simulated yet.
+
 step(actions) takes one action slot per robot (the action mask), decoded by
 environment/spaces.py::action_for_slot, so the simulator has one step mode.
 Whoever produces the slots, a learned policy or a planner driven from
@@ -63,7 +71,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, NamedTuple
 
 import numpy as np
 
@@ -91,6 +99,15 @@ from slap_mapd_coupling.storage.registry import get_storage_rule
 _ORDER_SEED_OFFSET = 1_000_000_007
 
 
+class Order(NamedTuple):
+    """An order of the arrival stock model that waits for a unit of its SKU. It becomes a task,
+    with this release time, once a unit is taken for it."""
+
+    release_time: int
+    sku: SkuId
+    delivery_vertex: VertexId
+
+
 def popularity_ranking(
     sku_ids: list[SkuId], t: int, period: int | None, shift: int | None
 ) -> list[SkuId]:
@@ -115,6 +132,15 @@ def zipf_weights(count: int, skew: float) -> list[float]:
     raw = [1.0 / (rank + 1) ** skew for rank in range(count)]
     total = sum(raw)
     return [w / total for w in raw]
+
+
+def _running_sum(values: list[float]):
+    """The running sums of `values`, the cumulative popularity over every SKU of the arrival
+    stock model's order draw."""
+    total = 0.0
+    for value in values:
+        total += value
+        yield total
 
 
 def popularity_cumulative(
@@ -166,6 +192,9 @@ class EpisodeLog:
     # The relocation measure of each storage update: the travel the moved units would
     # cost, in units x d_G. Relocation itself stays instant and free in the simulator.
     relocation_distance_by_update: list[float] = field(default_factory=list)
+    # Arrival stock model only: the steps each task's order waited for a unit of its SKU,
+    # from its release until a unit was taken for it. 0 for an order served at once.
+    stock_wait_by_task: dict[TaskId, int] = field(default_factory=dict)
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
     # five sums of an agent add up to its summed reward). overrides_by_agent counts the
@@ -215,10 +244,6 @@ class WarehouseMAPDEnv:
         config: ExperimentConfig,
         assigner: Assigner | None = None,
     ) -> None:
-        if config.stock_model != "template":
-            raise NotImplementedError(
-                f"stock_model={config.stock_model!r} is not simulated yet. Only 'template' is."
-            )
         self.graph = graph
         self.config = config
         self._skus = dict(skus)
@@ -227,6 +252,16 @@ class WarehouseMAPDEnv:
         self._assigner = assigner
         self._storage_rule = get_storage_rule(config.storage_mode)
         self._edge_cost = {(edge.source, edge.target): edge.cost for edge in graph.edges}
+        # The order draw of the arrival model looks at every SKU, never at stock.
+        self._sku_ids = sorted(self._skus)
+        self._delivery_vertices = sorted(
+            v for v, vertex in graph.vertices.items() if vertex.role.delivery
+        )
+        self._all_sku_cumulative = (
+            None
+            if config.demand_skew is None
+            else list(_running_sum(zipf_weights(len(self._sku_ids), config.demand_skew)))
+        )
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -277,6 +312,7 @@ class WarehouseMAPDEnv:
             }
         )
         self.tasks = []
+        self._waiting_orders: list[Order] = []
         self.storage = StorageState(
             skus=self._skus,
             capacities=self._storage_capacities,
@@ -389,6 +425,11 @@ class WarehouseMAPDEnv:
         # means F_fix's Delta = infinity: never triggers, by construction).
         delta = self.config.storage_epoch_length
         if delta is not None and next_t % delta == 0:
+            if self.config.stock_model == "arrival":
+                raise NotImplementedError(
+                    "stock arriving at a storage epoch is not simulated yet, so an arrival "
+                    "model episode cannot reach the first epoch."
+                )
             # rho_hat_t/mu_hat_t/w_hat_t of the window that ends now, counted per step
             # over the last Delta steps only (environment/storage_estimates.py), then
             # a fresh window. Causal by construction: the order released at next_t
@@ -434,9 +475,12 @@ class WarehouseMAPDEnv:
     def _release_and_assign(self) -> None:
         """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
         assignment, or the assigner's own) for the current t."""
-        new_tasks = self._generate_tasks()
-        for task in new_tasks:
-            self._estimator.record_order(task.sku)
+        if self.config.stock_model == "arrival":
+            new_tasks = self._release_orders()  # records each order as it is released
+        else:
+            new_tasks = self._generate_tasks()
+            for task in new_tasks:
+                self._estimator.record_order(task.sku)
         self.tasks.extend(new_tasks)
 
         assign_start = time.perf_counter()
@@ -454,6 +498,64 @@ class WarehouseMAPDEnv:
                 )
                 for task in self.tasks
             ]
+
+    def _release_orders(self) -> list[Task]:
+        """Stage 1 under the arrival stock model (module docstring): the orders released now
+        join the queue, then the queue is served in release order.
+
+        The order draw is the one of `_generate_tasks`, the arrival count and then three uniform
+        numbers per order, with the SKU mapped over every SKU instead of the SKUs in stock. The
+        number for the pickup vertex is drawn and not used, because the pickup is the nearest
+        holder, so the stream stays the template model's. Every order is recorded in the demand
+        estimate when it is released, whether or not a unit is taken for it then.
+        """
+        t = self._t
+        num_new = int(self._order_rng.poisson(self.config.arrival_rate))
+        if num_new:
+            draws = self._order_rng.random((num_new, 3))
+            ranked = popularity_ranking(
+                self._sku_ids,
+                t,
+                self.config.demand_rotation_period,
+                self.config.demand_rotation_shift,
+            )
+            for u_sku, _u_pickup, u_delivery in draws:
+                if self._all_sku_cumulative is None:
+                    sku_id = ranked[int(u_sku * len(ranked))]
+                else:
+                    index = bisect.bisect_right(self._all_sku_cumulative, u_sku)
+                    sku_id = ranked[min(index, len(ranked) - 1)]
+                delivery = self._delivery_vertices[int(u_delivery * len(self._delivery_vertices))]
+                self._estimator.record_order(sku_id)
+                self._waiting_orders.append(Order(t, sku_id, delivery))
+
+        counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in self.storage.counts.items()}
+        still_waiting: list[Order] = []
+        new_tasks: list[Task] = []
+        for order in self._waiting_orders:
+            per_vertex = counts.get(order.sku, {})
+            holders = [v for v, count in per_vertex.items() if count > 0]
+            if not holders:
+                still_waiting.append(order)
+                continue
+            pickup = min(holders, key=lambda v: (self.graph.distance(v, order.delivery_vertex), v))
+            per_vertex[pickup] -= 1
+            task = Task(
+                task_id=self._next_task_id,
+                release_time=order.release_time,
+                pickup_vertex=pickup,
+                delivery_vertex=order.delivery_vertex,
+                sku=order.sku,
+            )
+            self._next_task_id += 1
+            self.log.stock_wait_by_task[task.task_id] = t - order.release_time
+            new_tasks.append(task)
+        self._waiting_orders = still_waiting
+        if new_tasks:
+            self.storage = StorageState(
+                skus=self._skus, capacities=self._storage_capacities, counts=counts
+            )
+        return new_tasks
 
     def _generate_tasks(self) -> list[Task]:
         """Stage 1: P_ord -> new tasks (the task definition), entering Q_t.
@@ -589,8 +691,11 @@ class WarehouseMAPDEnv:
         self.log.crowding_sum_by_t.append(sum(self._congestion_by_agent.values()))
 
     def _backlog(self, t: int) -> int:
-        """B_t = |Q_t| + |B_t|, the backlog that the keep-up check plots."""
-        return sum(1 for task in self.tasks if task.status(t) in ("waiting", "active"))
+        """B_t = |Q_t| + |B_t|, the backlog that the keep-up check plots. Under the arrival
+        stock model an order still waiting for stock is released and unfinished, so it counts
+        too."""
+        unfinished = sum(1 for task in self.tasks if task.status(t) in ("waiting", "active"))
+        return unfinished + len(self._waiting_orders)
 
     def _compute_rewards(
         self,

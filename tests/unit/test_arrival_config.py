@@ -1,4 +1,4 @@
-"""The settings of the arrival stock model, before it is simulated.
+"""The settings of the arrival stock model.
 
 Under the arrival model an order takes a unit, stock arrives every Delta steps, and the storage
 rule decides where it goes. This file covers its settings only: the stock fields of
@@ -14,7 +14,6 @@ import pytest
 from pydantic import ValidationError
 
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.training.spec import (
     ArrivalSettings,
     DemandSettings,
@@ -83,14 +82,6 @@ def test_the_congestion_rule_needs_beta_under_the_arrival_model_too():
     with pytest.raises(ValidationError, match="congestion_weight"):
         ExperimentConfig(**fields)
     ExperimentConfig(**fields, congestion_weight=1.0)
-
-
-def test_the_simulator_refuses_the_arrival_model_until_it_is_built():
-    spec = _arrival_spec(_medium())
-    study = build_study(spec)
-    config = build_experiment_config(spec)
-    with pytest.raises(NotImplementedError, match="arrival"):
-        WarehouseMAPDEnv(study.instance.graph, study.skus, study.counts, study.capacities, config)
 
 
 # The training spec
