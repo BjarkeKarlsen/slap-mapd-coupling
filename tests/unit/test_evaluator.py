@@ -11,11 +11,17 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, StorageState
-from slap_mapd_coupling.environment.multi_agent_env import _relocated_units, _relocation_distance
+from slap_mapd_coupling.core.tasks import Task
+from slap_mapd_coupling.environment.multi_agent_env import (
+    OrderLine,
+    _relocated_units,
+    _relocation_distance,
+)
 from slap_mapd_coupling.evaluation.evaluator import (
     backlog_slope,
     completed_share,
     keeps_up,
+    order_metrics,
     run_episode,
 )
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
@@ -319,3 +325,41 @@ def test_relocation_distance_is_logged_per_update_under_demand_storage():
     assert metrics.mean_relocation_distance >= 0.0
     if metrics.mean_relocated_units > 0:
         assert metrics.mean_relocation_distance > 0.0
+
+
+def _done(task_id: int, release: int, finish: int) -> Task:
+    task = Task(
+        task_id=task_id, release_time=release, pickup_vertex=1, delivery_vertex=2, sku="tea"
+    )
+    return task.assign(1, release).pick_up(release).complete(finish)
+
+
+def test_the_order_completion_time_is_the_longest_service_time_of_its_tasks():
+    # One order of two lines, released at 2, its lines finishing at 10 and 14.
+    tasks = [_done(1, 2, 10), _done(2, 2, 14)]
+    metrics = order_metrics(tasks, {1: (5, 0), 2: (5, 1)}, [], set())
+    assert metrics["mean_order_completion"] == 12
+    assert metrics["num_completed_orders"] == 1
+    assert metrics["mean_tasks_per_line"] == 1.0
+    assert metrics["num_lines_waited"] == 0
+
+
+def test_an_order_with_a_line_still_waiting_or_a_task_unfinished_is_not_complete():
+    unfinished = Task(task_id=3, release_time=0, pickup_vertex=1, delivery_vertex=2, sku="tea")
+    tasks = [_done(1, 0, 6), _done(2, 0, 9), unfinished, _done(4, 1, 5), _done(5, 1, 7)]
+    by_task = {1: (1, 0), 2: (1, 0), 3: (2, 0), 4: (3, 0), 5: (3, 1)}
+    waiting = [OrderLine(1, "mugs", 2, order_id=3, line_index=1, missing=2)]
+    metrics = order_metrics(tasks, by_task, waiting, {(3, 1), (1, 0)})
+    # Order 1 completes in 9. Order 2 has a task under way and order 3 a line still waiting.
+    assert metrics["mean_order_completion"] == 9
+    assert metrics["num_completed_orders"] == 1
+    # Line (1, 0) was split over two shelves, (2, 0) and (3, 0) were not, (3, 1) still waits.
+    assert metrics["mean_tasks_per_line"] == 4 / 3
+    assert metrics["num_lines_waited"] == 2
+
+
+def test_a_template_run_has_no_order_measures():
+    metrics = _run(_graph(), _config(horizon=20))
+    assert metrics.mean_order_completion is None
+    assert metrics.num_completed_orders == 0
+    assert metrics.mean_tasks_per_line is None

@@ -260,6 +260,8 @@ def _arrival_metrics(seed, storage_mode, service_time):
         mean_putaway_distance=110.0 if storage_mode == "fixed" else 54.0,
         mean_arrived_units=30.0,
         mean_split_skus=0.0 if storage_mode == "fixed" else 4.0,
+        mean_order_completion=12.0 if storage_mode == "fixed" else 9.0,
+        num_completed_orders=4,
     )
     return RunMetrics(**values)
 
@@ -295,20 +297,23 @@ def test_a_template_summary_keeps_its_columns(tmp_path, fake_episodes, monkeypat
     assert "putaway" not in "\n".join(lines) and "stock wait" not in "\n".join(lines)
 
 
-def test_an_arrival_summary_adds_putaway_and_stock_wait(tmp_path, fake_episodes, monkeypatch):
+def test_an_arrival_summary_adds_putaway_stock_wait_and_order_completion(
+    tmp_path, fake_episodes, monkeypatch
+):
     fake_episodes([3, 9])
     lines = _summary_of(tmp_path, monkeypatch, _arrival_metrics, ARRIVAL_CONFIG)
     header = _cells(lines[2])
-    assert len(header) == 15 and len(_cells(lines[3])) == 15
+    assert len(header) == 16 and len(_cells(lines[3])) == 16
     assert header[11:] == [
         "putaway per update F_fix",
         "putaway per update mode",
         "stock wait F_fix",
         "stock wait mode",
+        "order completion F_fix / mode",
     ]
     chosen = _cells(next(line for line in lines if line.startswith("| chosen")))
     assert chosen[:2] == ["chosen", "demand"]
-    assert chosen[11:] == ["110.000", "54.000", "1.000", "0.500"]
+    assert chosen[11:] == ["110.000", "54.000", "1.000", "0.500", "12.000 / 9.000"]
 
 
 def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episodes, monkeypatch):
