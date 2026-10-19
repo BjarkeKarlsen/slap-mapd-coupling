@@ -234,14 +234,17 @@ def train(
     multiple=True,
     help="Storage rules the test seeds are played under, e.g. --storage-modes fixed demand. "
     "Default: the rule the run trained with. An adaptive rule takes its epoch length, "
-    "relocation cap and congestion weight from the storage_rule section of the run's spec.",
+    "relocation cap and congestion weight from the storage_rule section of the run's spec. "
+    "With an arrival section in the spec every rule takes the epoch length, the arrival "
+    "period, from it, the congestion rule its weight, and there is no relocation cap.",
 )
 @click.option(
     "--arrival-rate",
     type=float,
     default=None,
     help="Load the test seeds are played at, in tasks per step. Default: the training load. "
-    "The checkpoint is still chosen at the training load.",
+    "The checkpoint is still chosen at the training load. A starting stock sized by the load "
+    "(demand_sized_blocks) is sized at this load for the test seeds.",
 )
 def evaluate(run_dir, output, storage_modes, arrival_rate):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the

@@ -152,7 +152,13 @@ def test_the_arrival_model_trains_under_its_own_rules_too():
 
 
 @pytest.mark.parametrize(
-    "path", sorted((ROOT / "configs").glob("*.yaml")) + sorted((ROOT / "configs").glob("*/*.yaml"))
+    "path",
+    sorted((ROOT / "configs").glob("*.yaml"))
+    + sorted(
+        path
+        for path in (ROOT / "configs").glob("*/*.yaml")
+        if path.parent.name != "medium_arrival"  # the arrival configs, test_arrival_evaluation
+    ),
 )
 def test_every_shipped_config_stays_on_the_template_model(path):
     spec = load_spec(path)

@@ -3,13 +3,12 @@
 An order is queued when it is released and served in release order. It takes one unit of its
 SKU from the storage vertex holding it that is nearest its delivery vertex, ties by vertex id,
 and only then becomes a task, with its release time kept. An order with no unit anywhere waits
-and counts in the backlog. The SKU of an order is drawn without looking at stock. Stock arriving
-at a storage epoch is not simulated yet, so these episodes end before the first epoch.
+and counts in the backlog. The SKU of an order is drawn without looking at stock. These episodes
+end before the first arrival, apart from the one that checks an arrival runs. Arrivals and their
+put-away are tested in test_arrival_rules.py.
 """
 
 from pathlib import Path
-
-import pytest
 
 import slap_mapd_coupling.storage.congestion  # noqa: F401 -- registers "congestion"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
@@ -171,12 +170,14 @@ def test_the_replay_is_deterministic():
     assert first.storage == second.storage
 
 
-def test_an_arrival_epoch_is_not_simulated_yet():
+def test_an_arrival_epoch_now_runs():
     spec = _spec()
     data = spec.model_dump()
     data["storage_rule"]["epoch_length"] = 20
-    with pytest.raises(NotImplementedError, match="arriving"):
-        _run(type(spec).model_validate(data), steps=20)
+    env = _run(type(spec).model_validate(data), steps=20)
+    assert env.t == 20
+    assert len(env.log.arrived_units_by_update) == 1
+    assert env.log.relocated_units_by_update == []
 
 
 def test_the_template_model_has_no_order_queue():

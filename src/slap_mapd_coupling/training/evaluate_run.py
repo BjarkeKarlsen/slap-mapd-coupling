@@ -8,9 +8,12 @@ checkpoint is played exactly as it was trained, on any warehouse.
    one that completes the most tasks on average is chosen, the later one on a tie. The training
    return is not used, because its shaping term dominates it.
 2. Test. The chosen checkpoint and the last one play the test seeds under every storage mode
-   asked for, F_fix when it is among them. An adaptive mode takes its epoch length, relocation
-   cap and congestion weight from the spec's `storage_rule` section. The choice in step 1 does
-   not change with the modes, it is always made under the storage rule the run trained with.
+   asked for, F_fix when it is among them. Under the template stock model an adaptive mode
+   takes its epoch length, relocation cap and congestion weight from the spec's `storage_rule`
+   section. Under the arrival stock model (the spec's `arrival` section) every mode takes the
+   epoch length, the arrival period, from it, and the congestion rule its weight, and nothing
+   is relocated. The choice in step 1 does not change with the modes, it is always made under
+   the storage rule the run trained with.
 
 The validation and test seeds are the same for every run (training/config.py::split_seeds), so
 runs with different training seeds and different arms are scored on the same scenarios. Actions
@@ -18,7 +21,8 @@ are sampled, as in every reported result.
 
 `summary.md` compares every adaptive mode with F_fix over the test seeds, pairing the runs seed
 by seed (evaluation/comparison.py::compare_paired), once for the chosen and once for the last
-checkpoint.
+checkpoint. For an arrival run it also gives the put-away distance per update and the wait for
+stock of both arms.
 """
 
 from __future__ import annotations
@@ -93,6 +97,20 @@ def play(
     )
 
 
+def build_test_study(
+    spec: TrainingSpec, study: Study, arrival_rate: float | None
+) -> tuple[TrainingSpec, Study]:
+    """The spec and the study the test episodes play: `spec` and `study` themselves at the
+    training load, or both rebuilt at `arrival_rate`. The starting stock of
+    "demand_sized_blocks" is sized by the arrival rate, so the test episodes start from stock
+    sized at the load they play. Every other part of the study, and the stock of every other
+    placement, does not depend on the arrival rate, so it is the training study's."""
+    if arrival_rate is None:
+        return spec, study
+    test_spec = override_spec(spec, arrival_rate=arrival_rate)
+    return test_spec, build_study(test_spec)
+
+
 def evaluate_run(
     run_dir: Path,
     out_dir: Path,
@@ -107,9 +125,9 @@ def evaluate_run(
 
     `arrival_rate` plays the test seeds at another load than the run trained at, for example a
     load where the fleet keeps up, so service time counts. The checkpoint is still chosen at
-    the training load, so the same checkpoint is measured at every load."""
+    the training load, so the same checkpoint is measured at every load. The test episodes
+    start from the stock of that load (`build_test_study`)."""
     spec = load_run_spec(run_dir)
-    test_spec = spec if arrival_rate is None else override_spec(spec, arrival_rate=arrival_rate)
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
         raise ValueError(f"{run_dir} holds no checkpoints.")
@@ -117,6 +135,7 @@ def evaluate_run(
     for mode in modes:
         check_storage_rule(spec, mode)
     study = build_study(spec)
+    test_spec, test_study = build_test_study(spec, study, arrival_rate)
     seeds = split_seeds(study.seed_split)
     out_dir.mkdir(parents=True, exist_ok=True)
     validation_path, test_path = out_dir / "validation.jsonl", out_dir / "test.jsonl"
@@ -142,7 +161,7 @@ def evaluate_run(
     for role, checkpoint in (("chosen", chosen), ("last", last)):
         for mode in modes:
             for seed in seeds.test:
-                metrics = play(study, test_spec, checkpoint, seed, mode)
+                metrics = play(test_study, test_spec, checkpoint, seed, mode)
                 played.setdefault((role, mode), []).append(metrics)
                 row = {
                     "role": role,
@@ -161,6 +180,12 @@ _SUMMARY_HEADER = (
     "| service time F_fix | service time mode | mean gain | CI | shortens |\n"
     "|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
+# The columns an arrival run adds to every row: the put-away distance per update and the wait
+# for stock of both arms.
+_ARRIVAL_HEADER = (
+    " putaway per update F_fix | putaway per update mode | stock wait F_fix | stock wait mode |",
+    "---|---|---|---|",
+)
 
 
 def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMetrics]]) -> str:
@@ -172,19 +197,23 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
     if "fixed" not in modes or not adaptive:
         lines.append("No comparison, it needs F_fix and at least one adaptive mode.")
         return "\n".join(lines) + "\n"
-    lines += [_SUMMARY_HEADER.rstrip("\n")]
+    header = _SUMMARY_HEADER.rstrip("\n").split("\n")
+    arrival = any(run.stock_model == "arrival" for runs in played.values() for run in runs)
+    if arrival:
+        header = [line + extra for line, extra in zip(header, _ARRIVAL_HEADER)]
+    lines += header
     for role in ("chosen", "last"):
         for mode in adaptive:
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])
             except ValueError as error:
-                lines.append(f"| {role} | {mode} | {error} |" + " |" * 8)
+                lines.append(f"| {role} | {mode} | {error} |" + " |" * (12 if arrival else 8))
                 continue
-            lines.append(_summary_row(role, result))
+            lines.append(_summary_row(role, result, arrival))
     return "\n".join(lines) + "\n"
 
 
-def _summary_row(role: str, result: PairedComparison) -> str:
+def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> str:
     def mean(summary: dict, name: str) -> str:
         return f"{summary[name].mean:.3f}" if name in summary else "n/a"
 
@@ -205,6 +234,13 @@ def _summary_row(role: str, result: PairedComparison) -> str:
         ci,
         str(result.shortens_service_time),
     ]
+    if arrival:
+        cells += [
+            mean(result.fixed_summary, "mean_putaway_distance"),
+            mean(result.adaptive_summary, "mean_putaway_distance"),
+            mean(result.fixed_summary, "mean_stock_wait"),
+            mean(result.adaptive_summary, "mean_stock_wait"),
+        ]
     return "| " + " | ".join(cells) + " |"
 
 
