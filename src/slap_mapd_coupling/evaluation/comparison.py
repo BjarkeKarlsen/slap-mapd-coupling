@@ -1,10 +1,10 @@
 """The paired comparison of eq:rqformal: does adaptive storage shorten
-mean service time under a controller, compared with fixed storage?
+total service time under a controller, compared with fixed storage?
 
 Under one seed, fixed and adaptive storage face exactly the same order
-stream (sec:impl:instances), so the difference in their mean service times
+stream (sec:impl:instances), so the difference in their total service times
 comes from the storage rule alone. eq:rqformal therefore pairs runs seed by
-seed: gain_n = zeta_bar_T(F_fix) - zeta_bar_T(F) under seed n, and adaptive
+seed: gain_n = zeta^tot_T(F_fix) - zeta^tot_T(F) under seed n, and adaptive
 storage wins if every run keeps up and the confidence interval of the
 mean gain lies above zero, a paired t-test over seeds. Every other scored
 quantity of each arm is reported as a mean over seeds with the same kind
@@ -62,6 +62,8 @@ _SCORED_QUANTITIES = (
 # task, and a run that does not keep up is not compared on them
 # (eq:throughput), so they are summarised only when every run keeps up.
 _SERVICE_QUANTITIES = (
+    "total_service_time",
+    "total_service_time_finished",
     "mean_service_time",
     "mean_wait_for_agent",
     "mean_travel_time",
@@ -108,12 +110,17 @@ class PairedComparison(BaseModel):
     mean_gain: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
-    # The relative gain, each seed's gain over the route time of its F_fix run, mean travel plus
-    # mean blocked time, with its interval as for the gain. Controllers are compared on it.
-    # None unless all_keep_up is True.
+    # The relative gain, each seed's gain over the route time of its F_fix run, total travel
+    # plus total blocked time, with its interval as for the gain. Controllers are compared on
+    # it. None unless all_keep_up is True.
     mean_relative_gain: float | None = None
     relative_ci_low: float | None = None
     relative_ci_high: float | None = None
+    # The gain in mean pick service time, reported next to the total gain. None unless
+    # all_keep_up is True and every run completed a pick.
+    mean_pick_gain: float | None = None
+    pick_ci_low: float | None = None
+    pick_ci_high: float | None = None
     # eq:rqformal: all runs keep up and ci_low > 0.
     shortens_service_time: bool
 
@@ -179,21 +186,23 @@ def compare_paired(
             shortens_service_time=False,
         )
 
-    gains = []
+    gains: list[float] = []
     relative_gains = []
+    pick_gains = []
     for seed in seeds:
         fixed = fixed_by_seed[seed]
-        fixed_time = fixed.mean_service_time
-        adaptive_time = adaptive_by_seed[seed].mean_service_time
-        # A run that keeps up has finished tasks, so these are set.
-        assert fixed_time is not None and adaptive_time is not None
-        assert fixed.mean_travel_time is not None and fixed.mean_blocked_time is not None
-        gain = fixed_time - adaptive_time
+        adaptive = adaptive_by_seed[seed]
+        gain = float(fixed.total_service_time - adaptive.total_service_time)
         gains.append(gain)
-        relative_gains.append(gain / (fixed.mean_travel_time + fixed.mean_blocked_time))
+        relative_gains.append(gain / (fixed.total_travel_time + fixed.total_blocked_time))
+        if fixed.mean_service_time is not None and adaptive.mean_service_time is not None:
+            pick_gains.append(fixed.mean_service_time - adaptive.mean_service_time)
 
     mean_gain, ci_low, ci_high = _mean_and_interval(gains, confidence)
     mean_relative, relative_low, relative_high = _mean_and_interval(relative_gains, confidence)
+    pick: tuple[float | None, float | None, float | None] = (None, None, None)
+    if len(pick_gains) == len(seeds):
+        pick = _mean_and_interval(pick_gains, confidence)
     return PairedComparison(
         adaptive_storage_mode=adaptive_mode,
         num_seeds=len(seeds),
@@ -208,6 +217,9 @@ def compare_paired(
         mean_relative_gain=mean_relative,
         relative_ci_low=relative_low,
         relative_ci_high=relative_high,
+        mean_pick_gain=pick[0],
+        pick_ci_low=pick[1],
+        pick_ci_high=pick[2],
         shortens_service_time=ci_low > 0.0,
     )
 

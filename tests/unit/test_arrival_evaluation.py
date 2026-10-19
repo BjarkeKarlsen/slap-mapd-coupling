@@ -253,6 +253,10 @@ def _run(seed, service_time, storage_mode="fixed", **overrides):
         mean_wait_for_agent=service_time / 2,
         mean_travel_time=service_time / 2,
         mean_blocked_time=0.0,
+        # ten tasks, so the totals are ten times the means
+        total_service_time=round(10 * service_time),
+        total_wait_for_agent=round(5 * service_time),
+        total_travel_time=round(10 * service_time) - round(5 * service_time),
         mean_putaway_distance=110.0 if storage_mode == "fixed" else 54.0 + seed,
         mean_stock_wait=1.0 + seed,
     )
@@ -273,7 +277,8 @@ def test_two_arrival_arms_are_paired_with_their_putaway_and_stock_wait():
     fixed = [_run(seed, 10.0 + seed) for seed in range(3)]
     adaptive = [_run(seed, 8.0 + seed, "demand") for seed in range(3)]
     result = compare_paired(fixed, adaptive)
-    assert result.gains == pytest.approx((2.0, 2.0, 2.0))
+    assert result.gains == pytest.approx((20.0, 20.0, 20.0))
+    assert result.mean_pick_gain == pytest.approx(2.0)
     assert result.fixed_summary["mean_putaway_distance"].mean == pytest.approx(110.0)
     assert result.adaptive_summary["mean_putaway_distance"].mean == pytest.approx(55.0)
     assert result.adaptive_summary["mean_split_skus"].mean == pytest.approx(4.5)
@@ -304,6 +309,7 @@ def test_an_arrival_config_differs_from_its_medium_namesake_in_the_stock_only(pa
     assert arrival.pop("arrival") == {
         "margin": 1.0,
         "receiving": "delivery",
+        "putaway": "instant",
         "lines_per_order": None,
         "units_per_line": None,
         "cold_stock_top_k": 10,

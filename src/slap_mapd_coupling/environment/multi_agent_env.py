@@ -62,6 +62,14 @@ and the put-away rule of the storage mode decides which shelves it goes to, with
 already on a shelf (storage/arrival.py). An order waiting for stock is served by stage 1 of the
 next step, after the arrival.
 
+When robots carry the put-away (config.stock_putaway == "robots", sec:pf:storage) the arriving
+units do not reach the shelf at the arrival. Every (SKU, shelf) the rule put units on gives one
+put-away task, released at the arrival, from the receiving vertex nearest the shelf (ties by
+vertex id) to the shelf, in SKU id then vertex id order. Until it is delivered its units are on
+their way, x^in_t: they take up room on the shelf, so the rule sees shelf stock plus stock on
+its way, but no line can take them. On delivery they move onto the shelf. Free agents take picks
+and put-aways from one queue.
+
 step(actions) takes one action slot per robot (the action mask), decoded by
 environment/spaces.py::action_for_slot, so the simulator has one step mode.
 Whoever produces the slots, a learned policy or a planner driven from
@@ -77,7 +85,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 import numpy as np
 
@@ -95,7 +103,12 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
 )
-from slap_mapd_coupling.storage.arrival import PutAwayRule, arrival_amounts, get_putaway_rule
+from slap_mapd_coupling.storage.arrival import (
+    PutAwayRule,
+    arrival_amounts,
+    get_putaway_rule,
+    nearest_receiving_point,
+)
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
 
@@ -305,6 +318,14 @@ class WarehouseMAPDEnv:
         self._delivery_vertices = sorted(
             v for v, vertex in graph.vertices.items() if vertex.role.delivery
         )
+        # V_rcv when it is the receiving role. None means the delivery vertices.
+        self._receiving_vertices: list[VertexId] | None = None
+        if config.stock_receiving == "receiving":
+            self._receiving_vertices = sorted(
+                v for v, vertex in graph.vertices.items() if vertex.role.receiving
+            )
+            if not self._receiving_vertices:
+                raise ValueError("stock_receiving='receiving' needs a receiving vertex.")
         self._all_sku_cumulative = (
             None
             if config.demand_skew is None
@@ -398,6 +419,8 @@ class WarehouseMAPDEnv:
             for v, count in per_vertex.items()
             if count > 0
         }
+        # Robot put-away only: x^in_t, the units on their way to each shelf.
+        self._in_transit: dict[SkuId, dict[VertexId, int]] = {}
         self._t = 0
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
@@ -567,16 +590,27 @@ class WarehouseMAPDEnv:
         waiting_by_sku: dict[SkuId, int] = {}
         for line in self._waiting_orders:
             waiting_by_sku[line.sku] = waiting_by_sku.get(line.sku, 0) + line.missing
+        robots = self.config.stock_putaway == "robots"
+        # The arrivals count the stock on its way as stock, so it is not ordered again.
+        given = self._shelf_and_transit() if robots else self.storage
         amounts = arrival_amounts(
-            self.storage,
+            given,
             estimates.units,
             delta,
             self.config.stock_margin,
             self.config.stock_floor,
             waiting_by_sku,
         )
+        # With robot put-away the rule sees shelf stock plus stock on its way, so the room
+        # of a put-away not yet delivered stays reserved.
+        # Only the options a run sets are passed, so a rule written before them still works.
+        options: dict[str, Any] = {}
+        if self._receiving_vertices is not None:
+            options["receiving"] = self._receiving_vertices
+        if robots:
+            options["trip"] = True
         result = self._putaway_rule(
-            self.storage,
+            given,
             self.graph,
             amounts,
             self._home,
@@ -584,16 +618,36 @@ class WarehouseMAPDEnv:
             estimates.traversal,
             estimates.waiting,
             self.config.congestion_weight,
+            **options,
         )
         arrival_t = self._t + 1  # stage 6 runs before t advances
+        placed: list[tuple[SkuId, VertexId, int]] = []
         for sku_id, per_vertex in result.storage.counts.items():
-            before = self.storage.counts.get(sku_id, {})
+            before = given.counts.get(sku_id, {})
             for v, count in per_vertex.items():
                 if count > before.get(v, 0):
-                    self._lots.setdefault((sku_id, v), []).append(
-                        [arrival_t, count - before.get(v, 0)]
+                    placed.append((sku_id, v, count - before.get(v, 0)))
+        if robots:
+            receiving = self._receiving_vertices or self._delivery_vertices
+            for sku_id, v, units in sorted(placed, key=lambda p: (p[0], p[1])):
+                per_vertex = self._in_transit.setdefault(sku_id, {})
+                per_vertex[v] = per_vertex.get(v, 0) + units
+                self.tasks.append(
+                    Task(
+                        task_id=self._next_task_id,
+                        release_time=arrival_t,
+                        pickup_vertex=nearest_receiving_point(self.graph, v, receiving),
+                        delivery_vertex=v,
+                        sku=sku_id,
+                        quantity=units,
+                        kind="putaway",
                     )
-        self.storage = result.storage
+                )
+                self._next_task_id += 1
+        else:
+            for sku_id, v, units in placed:
+                self._lots.setdefault((sku_id, v), []).append([arrival_t, units])
+            self.storage = result.storage
         if self.config.cold_stock_top_k is not None:
             self.log.cold_prime_share_by_update.append(self._cold_prime_share(arrival_t))
         self.log.putaway_distance_by_update.append(result.putaway_distance)
@@ -601,6 +655,30 @@ class WarehouseMAPDEnv:
         self.log.unplaced_units_by_update.append(result.unplaced_units)
         self.log.overflow_units_by_update.append(result.overflow_units)
         self.log.split_skus_by_update.append(_split_skus(self.storage))
+
+    def _shelf_and_transit(self) -> StorageState:
+        """x_t + x^in_t, the stock on the shelves plus the stock on its way to them."""
+        counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in self.storage.counts.items()}
+        for sku_id, per_vertex in self._in_transit.items():
+            target = counts.setdefault(sku_id, {})
+            for v, units in per_vertex.items():
+                target[v] = target.get(v, 0) + units
+        return StorageState(skus=self._skus, capacities=self._storage_capacities, counts=counts)
+
+    def _shelve(self, task: Task, t: int) -> None:
+        """A put-away delivered at t: its units move from x^in_t onto the shelf, as a lot that
+        arrived at t."""
+        per_vertex = self._in_transit[task.sku]
+        per_vertex[task.delivery_vertex] -= task.quantity
+        if not per_vertex[task.delivery_vertex]:
+            del per_vertex[task.delivery_vertex]
+        counts = {sku_id: dict(units) for sku_id, units in self.storage.counts.items()}
+        shelf = counts.setdefault(task.sku, {})
+        shelf[task.delivery_vertex] = shelf.get(task.delivery_vertex, 0) + task.quantity
+        self.storage = StorageState(
+            skus=self._skus, capacities=self._storage_capacities, counts=counts
+        )
+        self._lots.setdefault((task.sku, task.delivery_vertex), []).append([t, task.quantity])
 
     def _cold_prime_share(self, t: int) -> float:
         """The share of the prime shelves' capacity that holds units of SKUs outside the top
@@ -904,6 +982,8 @@ class WarehouseMAPDEnv:
                 task = task.pick_up(next_t)
             if task.pickup_time is not None and location == task.delivery_vertex:
                 task = task.complete(next_t)
+                if task.kind == "putaway":
+                    self._shelve(task, next_t)
             updated.append(task)
         return updated
 

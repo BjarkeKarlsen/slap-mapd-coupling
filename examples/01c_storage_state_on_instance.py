@@ -7,9 +7,9 @@ generate_instance() graph + positions, a StorageState assigned onto its
 actual storage vertices (some holding more than one SKU at once), rendered
 as one picture via viz.warehouse_plot. Every non-plain vertex is given a
 short name by plot_node_names (storage vertices: A, B, C, ... matching
-01b_storage_and_config.py's own A/B/C worked example; delivery/endpoint
-vertices: D1, D2, ... / E1, E2, ...) -- no contents/capacity to show for
-delivery/endpoint yet, but a fixed per-node name is what a future path or
+01b_storage_and_config.py's own A/B/C worked example; delivery/receiving/
+endpoint vertices: D1, D2, ... / R1, R2, ... / E1, E2, ...) -- no
+contents/capacity to show for them yet, but a fixed per-node name is what a future path or
 congestion overlay would need to refer to a specific node by. Storage
 vertices additionally get their "sku:count" contents labelled underneath
 (plot_storage_contents) and a side list gives each letter's used/max
@@ -76,6 +76,8 @@ def main() -> None:
         wait_cost=0.2,
         num_storage_vertices=4,
         num_delivery_vertices=4,
+        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
+        num_receiving_vertices=4,
         num_endpoints=4,
         # Require at least eight selected role nodes to have degree >= 2.
         # Use zero if leaf placements are also acceptable.

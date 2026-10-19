@@ -69,6 +69,7 @@ class EpisodeTraceWriter:
                     "storage": vertex.role.storage,
                     "delivery": vertex.role.delivery,
                     "endpoint": vertex.role.endpoint,
+                    "receiving": vertex.role.receiving,
                 }
                 for v, vertex in sorted(graph.vertices.items())
             ],

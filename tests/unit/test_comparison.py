@@ -8,6 +8,8 @@ from slap_mapd_coupling.evaluation.metrics import RunMetrics
 
 
 def _run(seed: int, service_time: float, storage_mode: str = "fixed", **overrides) -> RunMetrics:
+    """A run whose mean pick service time is `service_time` and whose total service time is
+    ten times it, as if over ten tasks."""
     values = dict(
         storage_mode=storage_mode,
         controller="prioritised_astar",
@@ -30,6 +32,8 @@ def _run(seed: int, service_time: float, storage_mode: str = "fixed", **override
         mean_wait_for_agent=0.0,
         mean_travel_time=service_time,
         mean_blocked_time=0.0,
+        total_service_time=round(10 * service_time),
+        total_travel_time=round(10 * service_time),
         num_storage_updates=0 if storage_mode == "fixed" else 4,
         mean_relocated_units=0.0 if storage_mode == "fixed" else 2.0,
         mean_relocation_distance=0.0 if storage_mode == "fixed" else 6.0,
@@ -58,15 +62,18 @@ def _split_run(seed, storage_mode, wait, travel, blocked):
         mean_wait_for_agent=wait,
         mean_travel_time=travel,
         mean_blocked_time=blocked,
+        total_wait_for_agent=round(10 * wait),
+        total_travel_time=round(10 * travel),
+        total_blocked_time=round(10 * blocked),
     )
 
 
 def test_the_relative_gain_is_the_gain_over_the_route_time_under_fixed_storage():
-    # Route time under F_fix, travel plus blocked, is 8 and 12. The gains are 2 and 2.
+    # Route time under F_fix, total travel plus blocked, is 80 and 120. The gains are 20 and 20.
     fixed = [_split_run(0, "fixed", 2.0, 6.0, 2.0), _split_run(1, "fixed", 0.0, 8.0, 4.0)]
     adaptive = [_split_run(0, "demand", 1.0, 5.0, 2.0), _split_run(1, "demand", 0.0, 7.0, 3.0)]
     result = compare_paired(fixed, adaptive)
-    assert result.gains == pytest.approx((2.0, 2.0))
+    assert result.gains == pytest.approx((20.0, 20.0))
     relative = [2.0 / 8.0, 2.0 / 12.0]
     mean = sum(relative) / 2
     half = stats.t.ppf(0.975, df=1) * stats.tstd(relative) / 2**0.5
@@ -88,17 +95,38 @@ def test_consistent_gain_shortens_service_time():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     result = compare_paired(fixed, adaptive)
     assert result.all_keep_up
-    assert result.gains == pytest.approx((1.0, 1.2, 0.9, 1.1))
-    assert result.mean_gain == pytest.approx(1.05)
+    assert result.gains == pytest.approx((10.0, 12.0, 9.0, 11.0))
+    assert result.mean_gain == pytest.approx(10.5)
     assert result.ci_low > 0.0
     assert result.shortens_service_time
+
+
+def test_the_gain_is_in_total_service_time_and_the_mean_pick_gain_is_reported_next_to_it():
+    fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
+    # The adaptive arm makes more tasks, so its total grows while its picks get faster.
+    adaptive = [
+        run.model_copy(
+            update=dict(
+                total_service_time=run.total_service_time + 20,
+                total_travel_time=run.total_travel_time + 20,
+            )
+        )
+        for run in adaptive
+    ]
+    result = compare_paired(fixed, adaptive)
+    assert result.gains == pytest.approx((-10.0, -8.0, -11.0, -9.0))
+    assert not result.shortens_service_time
+    assert result.mean_pick_gain == pytest.approx(1.05)
+    gains = [1.0, 1.2, 0.9, 1.1]
+    expected = stats.t.interval(0.95, df=3, loc=1.05, scale=stats.sem(gains))
+    assert (result.pick_ci_low, result.pick_ci_high) == pytest.approx(expected)
 
 
 def test_interval_matches_a_paired_t_test():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     result = compare_paired(fixed, adaptive)
-    gains = [1.0, 1.2, 0.9, 1.1]
-    expected = stats.t.interval(0.95, df=3, loc=1.05, scale=stats.sem(gains))
+    gains = [10.0, 12.0, 9.0, 11.0]
+    expected = stats.t.interval(0.95, df=3, loc=10.5, scale=stats.sem(gains))
     assert (result.ci_low, result.ci_high) == pytest.approx(expected)
 
 
@@ -151,6 +179,7 @@ def test_every_scored_quantity_has_an_interval_per_arm():
     assert (summary.ci_low, summary.ci_high) == pytest.approx(expected)
     assert result.adaptive_summary["mean_crowding"].ci_low == pytest.approx(0.05)
     assert result.adaptive_summary["mean_service_time"].mean == pytest.approx(9.0)
+    assert result.adaptive_summary["total_service_time"].mean == pytest.approx(90.0)
     for name in ("keep_up_ratio", "throughput", "mean_relocated_units", "mean_travel_time"):
         assert name in result.fixed_summary
 

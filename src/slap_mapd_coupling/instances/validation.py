@@ -97,12 +97,14 @@ def check_connectivity(
     graph: WarehouseGraph, target_vertices: set[VertexId] | None = None
 ) -> ConnectivityReport:
     """(a): for every v in V_mov and every w in target_vertices (default:
-    V_str | V_del), d_G(v, w) must be finite. NOT blanket strong
+    V_str | V_del | V_rcv), d_G(v, w) must be finite. NOT blanket strong
     connectivity -- only checks (any occupiable vertex, any target vertex).
     """
     if target_vertices is None:
         target_vertices = {
-            v for v, vertex in graph.vertices.items() if vertex.role.storage or vertex.role.delivery
+            v
+            for v, vertex in graph.vertices.items()
+            if vertex.role.storage or vertex.role.delivery or vertex.role.receiving
         }
     movable = [v for v, vertex in graph.vertices.items() if vertex.role.movable]
 
@@ -126,23 +128,22 @@ def check_connectivity(
 def check_well_formedness(graph: WarehouseGraph, fleet_size: int) -> WellFormednessReport:
     """(b): requires at least fleet_size non-task endpoints, the vertices of
     V_ep in neither V_str nor V_del, AND, with endpoints := V_ep | V_str |
-    V_del, for every ordered pair of distinct endpoints (v, w): a v->w path
+    V_del | V_rcv, for every ordered pair of distinct endpoints (v, w): a v->w path
     AND a w->v path, each avoiding every other endpoint (sec:pf:agents).
 
     Token Passing parks an agent on a non-task endpoint where no other path
     ends. Fewer than m of them can leave none free (Ma et al. 2017, Property 2),
     and the environment places the agents on V_ep, so it needs m of those.
     """
-    endpoints = sorted(
-        v
-        for v, vertex in graph.vertices.items()
-        if vertex.role.endpoint or vertex.role.storage or vertex.role.delivery
-    )
+    endpoints = sorted(v for v, vertex in graph.vertices.items() if vertex.role.is_task_endpoint)
     num_endpoints = len(endpoints)
     num_non_task_endpoints = sum(
         1
         for vertex in graph.vertices.values()
-        if vertex.role.endpoint and not vertex.role.storage and not vertex.role.delivery
+        if vertex.role.endpoint
+        and not vertex.role.storage
+        and not vertex.role.delivery
+        and not vertex.role.receiving
     )
     endpoint_count_ok = num_non_task_endpoints >= fleet_size
 

@@ -24,7 +24,7 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
 from slap_mapd_coupling.viz import theme
 
-_MARKERS = {"circle": "o", "square": "s", "diamond": "D"}
+_MARKERS = {"circle": "o", "square": "s", "diamond": "D", "triangle": "^"}
 
 
 def _patch_for_shape(shape: str, xy: tuple[float, float], size: float, **kwargs):
@@ -37,6 +37,8 @@ def _patch_for_shape(shape: str, xy: tuple[float, float], size: float, **kwargs)
         # would instead rotate it into an axis-aligned square, which
         # looked like a mix of the two shapes rather than either one.
         return RegularPolygon(xy, numVertices=4, radius=size / 1.5, orientation=0, **kwargs)
+    if shape == "triangle":
+        return RegularPolygon(xy, numVertices=3, radius=size / 1.5, orientation=0, **kwargs)
     return Circle(xy, size / 2, **kwargs)
 
 
@@ -182,11 +184,12 @@ def plot_storage_heatmap(
 
 
 def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
-    """Short display name for every vertex playing a storage, delivery, or
-    endpoint role (plain vertices get none), in vertex-id order: storage
-    vertices get A, B, C, ... (matches 01b_storage_and_config.py's own
-    A/B/C worked example); delivery and endpoint vertices get D1, D2, ...
-    / E1, E2, ... -- short handles for future overlays that need to refer
+    """Short display name for every vertex playing a storage, delivery,
+    receiving or endpoint role (plain vertices get none), in vertex-id
+    order: storage vertices get A, B, C, ... (matches
+    01b_storage_and_config.py's own A/B/C worked example); delivery,
+    receiving and endpoint vertices get D1, D2, ... / R1, R2, ... /
+    E1, E2, ... -- short handles for future overlays that need to refer
     to a specific node (a path trace, per-node congestion).
 
     Storage is checked unconditionally, not via theme.ROLE_PRIORITY (which
@@ -204,6 +207,7 @@ def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
     storage_letters = iter(string.ascii_uppercase)
     delivery_count = 0
     endpoint_count = 0
+    receiving_count = 0
     for vertex_id in sorted(graph.vertices):
         role = graph.vertices[vertex_id].role
         if role.storage:
@@ -211,6 +215,9 @@ def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
         elif role.delivery:
             delivery_count += 1
             names[vertex_id] = f"D{delivery_count}"
+        elif role.receiving:
+            receiving_count += 1
+            names[vertex_id] = f"R{receiving_count}"
         elif role.endpoint:
             endpoint_count += 1
             names[vertex_id] = f"E{endpoint_count}"

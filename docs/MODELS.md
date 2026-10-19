@@ -9,10 +9,11 @@ the network. `GNNEncoderConfig` and `PolicyValueHeadConfig` set its sizes.
 - The window, a set of vertices. It is the field of view for the decentralised arm, every movable
   vertex for the centralised arm and the full-view setting, and the zone with its halo for the
   section arm. A window is never truncated, so `max_local_nodes` must fit it.
-- Seven features per vertex (`NODE_FEATURE_DIM`): the multi-hot role (storage, delivery, endpoint,
+- Eight features per vertex (`NODE_FEATURE_DIM`): the multi-hot role (storage, delivery, endpoint,
   transit), the distance label, whether another robot stands there, and whether the vertex is
   claimed. Claimed means an earlier robot of the same decision has chosen to end the timestep on
-  it. It is always 0 for the decentralised arm and the full-view setting.
+  it. It is always 0 for the decentralised arm and the full-view setting. The eighth, last,
+  marks a receiving vertex, where arriving stock enters.
 - The action mask. It holds the legal moves from the robot's vertex. For the centralised and
   section arms it also holds the claim mask, which switches off a move onto a claimed vertex, onto
   a robot that has not chosen yet, or a swap with an earlier robot. Waiting is never switched off.

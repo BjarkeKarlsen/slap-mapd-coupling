@@ -20,6 +20,9 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
     encoded_observation_space,
 )
 
+# The column of the claimed flag, the vertex features in the order of gnn_encoder.py.
+CLAIMED = 6
+
 
 def _line_graph(n: int) -> WarehouseGraph:
     vertices = {i: Vertex(id=i) for i in range(n)}
@@ -99,6 +102,7 @@ def test_encode_observation_own_index_points_at_agent_vertex():
             own_features.eta,
             float(own_features.occupied),
             float(own_features.claimed),
+            float(own_features.receiving),
         ],
     )
     assert encoded.node_mask[encoded.own_index] == 1.0
@@ -121,8 +125,8 @@ def test_encode_observation_writes_the_claim_column():
         LocalSubgraphEncodingConfig(max_local_nodes=8, max_messages=1),
     )
     index = {v: i for i, v in enumerate(observation.visible_vertices)}
-    assert encoded.node_features[index[3], -1] == 1.0
-    assert encoded.node_features[index[2], -1] == 0.0
+    assert encoded.node_features[index[3], CLAIMED] == 1.0
+    assert encoded.node_features[index[2], CLAIMED] == 0.0
 
 
 def test_encode_observation_node_mask_marks_padding():
@@ -556,7 +560,9 @@ def test_the_padded_arrays_follow_the_window(name):
         assert item.node_mask.tolist() == [1.0] * n + [0.0] * (8 - n)
         # a transit vertex, eta is the distance to the robot's own vertex (no task), and
         # occupied marks the other robot, and nothing is claimed
-        expected = [[0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other), 0.0] for v in window]
+        expected = [
+            [0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other), 0.0, 0.0] for v in window
+        ]
         np.testing.assert_array_equal(item.node_features[:n], expected)
         assert not item.node_features[n:].any()
         assert item.own_index == window.index(location)
@@ -636,20 +642,20 @@ def test_no_windows_gives_the_same_arrays_as_before_windows_existed():
     # Robot 2 at 4 has no task, so eta is the distance to its own vertex.
     first, second = encoded[1], encoded[2]
     expected_first = [
-        [0.0, 0.0, 0.0, 1.0, 5.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 4.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 3.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 2.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 4.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     ]
     expected_second = [
-        [0.0, 0.0, 0.0, 1.0, 2.0, 1.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     ]
     np.testing.assert_array_equal(first.node_features, expected_first)
     assert first.node_mask.tolist() == [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
@@ -774,8 +780,8 @@ def test_chosen_vertices_become_claims_and_close_those_moves():
         _line_graph(6), fleet, [], agent_id=1, t=0, config=_config(observation_depth=3)
     )
     index = {v: i for i, v in enumerate(observation.visible_vertices)}
-    assert encoded.node_features[index[1], -1] == 1.0
-    assert encoded.node_features[index[0], -1] == 0.0
+    assert encoded.node_features[index[1], CLAIMED] == 1.0
+    assert encoded.node_features[index[0], CLAIMED] == 0.0
     assert encoded.action_mask.tolist()[:2] == [1.0, 0.0]  # wait stays, the move to 1 is closed
 
 
@@ -783,7 +789,7 @@ def test_a_robot_without_an_entry_in_chosen_has_no_claims():
     fleet = _fleet({1: 0, 2: 1})
     encoded = _encode_turn(fleet, chosen={})
     assert encoded[1].action_mask.tolist()[1] == 1.0  # robot 2 stands on vertex 1, still open
-    assert not encoded[1].node_features[:, -1].any()
+    assert not encoded[1].node_features[:, CLAIMED].any()
 
 
 def test_communication_needs_every_robot_to_act():

@@ -37,6 +37,8 @@ def make_params(seed: int) -> GeneratorParams:
         wait_cost=0.2,
         num_storage_vertices=4,
         num_delivery_vertices=4,
+        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
+        num_receiving_vertices=4,
         num_endpoints=FLEET_SIZE,
         # At least two role vertices must have two distinct neighbours.
         min_internal_role_vertices=2,
@@ -77,6 +79,7 @@ def sweep_seeds() -> None:
 def describe(instance: GeneratedInstance) -> None:
     graph = instance.graph
     num_storage = sum(1 for v in graph.vertices.values() if v.role.storage)
+    num_receiving = sum(1 for v in graph.vertices.values() if v.role.receiving)
     num_delivery = sum(1 for v in graph.vertices.values() if v.role.delivery)
     num_endpoint = sum(1 for v in graph.vertices.values() if v.role.endpoint)
     num_one_way = sum(1 for e in graph.edges if e.one_way)
@@ -88,6 +91,7 @@ def describe(instance: GeneratedInstance) -> None:
     )
     print(f"  |V_mov| = {len(graph.vertices)}")
     print(f"  |V_str| = {num_storage}")
+    print(f"  |V_rcv| = {num_receiving}")
     print(f"  |V_del| = {num_delivery}")
     print(f"  |V_ep|  = {num_endpoint}")
     print(f"  |E|     = {len(graph.edges)} ({num_one_way} one-way)")

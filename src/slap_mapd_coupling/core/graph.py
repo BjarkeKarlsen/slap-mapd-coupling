@@ -21,9 +21,9 @@ VertexId = int
 class VertexRole(BaseModel):
     """Non-exclusive role membership for one vertex.
 
-    Roles overlap by definition: V_str, V_del and V_ep are all subsets of
-    V_mov and need not be pairwise disjoint (sec:pf:env). This is
-    deliberately not an enum.
+    Roles overlap by definition: V_str, V_del, V_rcv and V_ep are all
+    subsets of V_mov and need not be pairwise disjoint (sec:pf:env). This
+    is deliberately not an enum.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -32,19 +32,22 @@ class VertexRole(BaseModel):
     storage: bool = False
     delivery: bool = False
     endpoint: bool = False
+    receiving: bool = False
 
     @model_validator(mode="after")
     def _roles_require_movable(self) -> "VertexRole":
-        if not self.movable and (self.storage or self.delivery or self.endpoint):
+        if not self.movable and (
+            self.storage or self.delivery or self.endpoint or self.receiving
+        ):
             raise ValueError(
-                "storage/delivery/endpoint roles require movable=True "
-                "(V_str, V_del, V_ep are subsets of V_mov, sec:pf:env)."
+                "storage/delivery/receiving/endpoint roles require movable=True "
+                "(V_str, V_del, V_rcv, V_ep are subsets of V_mov, sec:pf:env)."
             )
         return self
 
     @property
     def is_task_endpoint(self) -> bool:
-        return self.storage or self.delivery or self.endpoint
+        return self.storage or self.delivery or self.endpoint or self.receiving
 
 
 class Vertex(BaseModel):

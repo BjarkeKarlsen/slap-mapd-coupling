@@ -322,6 +322,7 @@ def encode_view(
             f.eta,
             float(f.occupied),
             float(f.claimed),
+            float(f.receiving),
         )
     node_mask = np.zeros(config.max_local_nodes, dtype=np.float32)
     node_mask[:n] = 1.0

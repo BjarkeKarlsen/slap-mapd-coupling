@@ -62,6 +62,8 @@ def main() -> None:
         wait_cost=0.2,
         num_storage_vertices=4,
         num_delivery_vertices=4,
+        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
+        num_receiving_vertices=4,
         num_endpoints=num_agents,
         # Require at least eight selected role nodes to have degree >= 2.
         # Use zero if leaf placements are also acceptable.

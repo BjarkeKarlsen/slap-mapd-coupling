@@ -22,7 +22,12 @@ StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
 # rule decides where the arriving stock goes (thesis wording pending).
 StockModel = Literal["template", "arrival"]
 # Where arriving stock enters the warehouse. "delivery": the delivery vertices, one I/O side.
-ReceivingVertices = Literal["delivery"]
+# "receiving": the vertices with the receiving role, on the inbound side (sec:impl:instances).
+ReceivingVertices = Literal["delivery", "receiving"]
+# How arriving stock reaches its shelf. "instant": it is on the shelf at the arrival.
+# "robots": every (SKU, shelf) of an arrival is a put-away task, and the units are on their
+# way, x^in_t, until it is delivered (sec:pf:storage).
+StockPutaway = Literal["instant", "robots"]
 
 
 class LinesPerOrder(BaseModel):
@@ -110,6 +115,7 @@ class ExperimentConfig(BaseModel):
     stock_margin: NonNegativeFloat | None = None  # epsilon
     stock_floor: PositiveInt | None = None  # the fewest units a SKU is filled up to
     stock_receiving: ReceivingVertices | None = None  # V_rcv
+    stock_putaway: StockPutaway = "instant"
     # Order lines, arrival model only. An order is lines of distinct SKUs, each asking for a
     # quantity drawn uniformly from the inclusive range units_per_line. None means one line of
     # one unit, the order before lines existed. arrival_rate stays lines per timestep.
@@ -148,6 +154,8 @@ class ExperimentConfig(BaseModel):
         if self.units_per_line is not None and self.units_per_line[0] > self.units_per_line[1]:
             raise ValueError(f"units_per_line = {self.units_per_line} must be (low, high).")
         if self.stock_model == "template":
+            if self.stock_putaway != "instant":
+                raise ValueError("stock_putaway only applies to stock_model='arrival'.")
             for name in ("lines_per_order", "units_per_line", "cold_stock_top_k"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")

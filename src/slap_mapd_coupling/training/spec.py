@@ -37,6 +37,7 @@ from slap_mapd_coupling.core.experiment_config import (
     ExperimentConfig,
     LinesPerOrder,
     ReceivingVertices,
+    StockPutaway,
     StorageMode,
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -164,13 +165,16 @@ class ArrivalSettings(BaseModel):
     which shelves it goes to. Each SKU is filled up to
     max(initial_units, ceil((1 + margin) * its orders in the last period)), so `initial_units`
     of the `storage` section is the floor. `margin` is epsilon. Neither has a default, because
-    both are study parameters.
+    both are study parameters. `receiving: receiving` needs `num_receiving_vertices` above 0
+    in the `instance` section. `putaway: robots` makes the robots carry the stock to its
+    shelves (sec:pf:storage).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     margin: NonNegativeFloat
     receiving: ReceivingVertices
+    putaway: StockPutaway = "instant"
     # Order lines (tab:evalparams). None is one line of one unit per order.
     lines_per_order: LinesPerOrder | None = None
     units_per_line: tuple[PositiveInt, PositiveInt] | None = None
@@ -275,6 +279,13 @@ class TrainingSpec(BaseModel):
                 raise ValueError(
                     "the arrival model relocates nothing, so the storage_rule section takes no "
                     "reassignment_cap."
+                )
+            if self.arrival.receiving == "receiving" and not self.instance.get(
+                "num_receiving_vertices", 0
+            ):
+                raise ValueError(
+                    "arrival.receiving 'receiving' needs num_receiving_vertices above 0 in the "
+                    "instance section."
                 )
         elif self.storage.initial_placement == "demand_sized_blocks":
             raise ValueError(
@@ -554,6 +565,7 @@ def build_experiment_config(
         stock_margin=None if arrival is None else arrival.margin,
         stock_floor=None if arrival is None else spec.storage.initial_units,
         stock_receiving=None if arrival is None else arrival.receiving,
+        stock_putaway="instant" if arrival is None else arrival.putaway,
         lines_per_order=None if arrival is None else arrival.lines_per_order,
         units_per_line=None if arrival is None else arrival.units_per_line,
         cold_stock_top_k=None if arrival is None else arrival.cold_stock_top_k,
