@@ -1,14 +1,14 @@
 """Put-away rules of the arrival stock model (thesis wording pending).
 
-Under the arrival stock model (config.stock_model == "arrival") an order takes one unit of its
-SKU when it is released, so picks empty the shelves. Every Delta steps new stock arrives at the
+Under the arrival stock model (config.stock_model == "arrival") an order line takes its units
+by the pickup rule when it is released, so picks empty the shelves. Every Delta steps new stock arrives at the
 receiving vertices, and the storage update becomes the put-away of that stock: the storage rule
 decides which shelves the arriving units go to. Nothing already on a shelf moves, so a SKU can
 sit on several shelves at once, old stock on one and new stock on another.
 
 How much arrives does not depend on the rule (`arrival_amounts`). Each SKU is filled up to
-max(floor, ceil((1 + epsilon) * its orders in the last period)), plus the orders still waiting
-for it, less what is on hand. Where it goes is the rule's choice, through one shared fill loop
+max(floor, ceil((1 + epsilon) * its units ordered in the last period)), plus the units lines
+still wait for, less what is on hand. Where it goes is the rule's choice, through one shared fill loop
 (`_put_away`) that only differs in the order the SKUs are placed in and each SKU's order of
 shelves:
 
@@ -27,9 +27,9 @@ Choices flagged, not fixed by the thesis yet:
 - Stock is received at the delivery vertices (config.stock_receiving == "delivery", one I/O
   side), and the put-away distance of a unit is the distance from the nearest one to its shelf,
   min_{g in V_del} d_G(g, v), whichever rule places it.
-- The orders of SKU k in the last period are counted as round(rho_hat_t(k) * Delta), the exact
-  order count, since rho_hat_t is per step. Taking the ceiling of the float product
-  (1 + epsilon) * rho_hat_t(k) * Delta directly could round an exact count up by one unit.
+- The units of SKU k ordered in the last period are counted as round(rho_hat^unit_t(k) * Delta),
+  the exact count, since the estimate is per step. Taking the ceiling of the float product
+  (1 + epsilon) * rho_hat^unit_t(k) * Delta directly could round an exact count up by one unit.
 - The number of units of SKU k a shelf v takes is int(free(v) // b_k + 1e-9), the tolerance
   keeping a floating-point remainder from losing a unit that fits.
 """
@@ -110,22 +110,23 @@ def registered_putaway_rules() -> tuple[str, ...]:
 
 def arrival_amounts(
     x_prev: StorageState,
-    demand_estimate: DemandEstimate,
+    unit_estimate: DemandEstimate,
     epoch_length: int,
     margin: float,
     floor: int,
     waiting_by_sku: dict[SkuId, int],
 ) -> dict[SkuId, int]:
-    """The units of every SKU that arrive at an arrival epoch, the same under every rule.
+    """The arrivals, the units of every SKU that arrive at an epoch, the same under every rule.
 
-    SKU k is filled up to max(floor, ceil((1 + epsilon) * n_k)), n_k being its orders in the
-    period that ends now, plus one unit for every order still waiting for it. What is on hand
-    counts towards that, and nothing is taken away, so a SKU with more than enough gets none.
+    SKU k is filled up to max(floor, ceil((1 + epsilon) * n_k)), n_k being the units of k
+    ordered in the period that ends now (rho_hat^unit), plus the units that lines still wait for
+    (`waiting_by_sku`). What is on hand counts towards that, and nothing is taken away, so a SKU
+    with more than enough gets none.
     """
     amounts: dict[SkuId, int] = {}
     for sku_id in x_prev.skus:
-        orders = round(demand_estimate.get(sku_id, 0.0) * epoch_length)
-        target = max(floor, math.ceil((1 + margin) * orders))
+        ordered = round(unit_estimate.get(sku_id, 0.0) * epoch_length)
+        target = max(floor, math.ceil((1 + margin) * ordered))
         on_hand = sum(x_prev.counts.get(sku_id, {}).values())
         amounts[sku_id] = max(0, target + waiting_by_sku.get(sku_id, 0) - on_hand)
     return amounts

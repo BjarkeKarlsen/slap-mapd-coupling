@@ -16,6 +16,7 @@ from pydantic import ValidationError
 import slap_mapd_coupling.storage.congestion  # noqa: F401 -- registers "congestion"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig, LinesPerOrder
+from slap_mapd_coupling.core.tasks import Task
 from slap_mapd_coupling.environment.multi_agent_env import OrderLine, WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.evaluator import _planner_run
 from slap_mapd_coupling.training.spec import (
@@ -24,6 +25,7 @@ from slap_mapd_coupling.training.spec import (
     build_experiment_config,
     build_study,
     load_spec,
+    stock_sizing,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,7 +110,7 @@ def test_every_task_takes_one_unit_when_it_is_released():
     start = build_study(spec).counts
     env = _run(spec)
     for sku_id, per_vertex in start.items():
-        taken = sum(1 for t in env.tasks if t.sku == sku_id)
+        taken = sum(t.quantity for t in env.tasks if t.sku == sku_id)
         assert sum(env.storage.counts[sku_id].values()) == sum(per_vertex.values()) - taken
     assert set(env.log.stock_wait_by_task.values()) == {0}
 
@@ -269,3 +271,111 @@ def test_order_lines_only_apply_to_the_arrival_model():
     arrival = build_experiment_config(_spec(), 0, "fixed")
     with pytest.raises(ValidationError, match="units_per_line"):
         ExperimentConfig.model_validate({**arrival.model_dump(), "units_per_line": (5, 1)})
+
+
+# The pickup rule over several shelves
+
+
+def _two_shelves(env, sku_id):
+    """A delivery vertex and two storage vertices at different distances from it, nearer
+    first, with `sku_id` on no other shelf."""
+    graph = env.graph
+    storage = sorted(v for v, x in graph.vertices.items() if x.role.storage)
+    for delivery in env._delivery_vertices:
+        by_distance = sorted(storage, key=lambda v: (graph.distance(v, delivery), v))
+        near, far = by_distance[0], by_distance[-1]
+        if graph.distance(near, delivery) < graph.distance(far, delivery):
+            return delivery, near, far
+    raise AssertionError("no delivery vertex with two storage vertices at different distances")
+
+
+def _stock(env, sku_id, per_vertex):
+    counts = {k: dict(v) for k, v in env.storage.counts.items()}
+    counts[sku_id] = dict(per_vertex)
+    env.storage = env.storage.model_copy(update={"counts": counts})
+
+
+@pytest.mark.parametrize(
+    "units, tasks, left",
+    [(4, [1, 3], 0), (7, [1, 5], 1), (1, [1], 0)],
+)
+def test_a_line_takes_from_the_nearest_shelf_first_and_the_rest_waits(units, tasks, left):
+    env = _run(_spec(), steps=1)
+    env._order_rng = _NoOrders()
+    sku_id = "sku_000"
+    delivery, near, far = _two_shelves(env, sku_id)
+    _stock(env, sku_id, {near: 1, far: 5})
+    env._waiting_orders = [OrderLine(env.t, sku_id, delivery, order_id=9, missing=units)]
+    released = env._release_orders()
+    assert [(t.pickup_vertex, t.quantity) for t in released] == list(
+        zip([near, far], tasks)
+    )
+    assert all(t.order_id == 9 and t.release_time == env.t for t in released)
+    assert sum(env.storage.counts[sku_id].values()) == 6 - sum(tasks)
+    if left:
+        (line,) = env._waiting_orders
+        assert line.missing == left and line.order_id == 9
+    else:
+        assert env._waiting_orders == []
+
+
+def test_the_rest_of_a_line_is_served_the_same_way_once_stock_arrives():
+    env = _run(_spec(), steps=1)
+    env._order_rng = _NoOrders()
+    sku_id = "sku_000"
+    delivery, near, far = _two_shelves(env, sku_id)
+    _stock(env, sku_id, {})
+    env._waiting_orders = [OrderLine(0, sku_id, delivery, missing=4)]
+    assert env._release_orders() == []
+    _stock(env, sku_id, {near: 3, far: 5})
+    env._t = 7
+    released = env._release_orders()
+    assert [(t.pickup_vertex, t.quantity) for t in released] == [(near, 3), (far, 1)]
+    assert all(env.log.stock_wait_by_task[t.task_id] == 7 for t in released)
+
+
+def test_the_stock_condition_needs_the_units_the_task_carries():
+    env = _run(_spec(), steps=1)
+    sku_id = "sku_000"
+    delivery, near, _ = _two_shelves(env, sku_id)
+    _stock(env, sku_id, {near: 2})
+    task = Task(
+        task_id=1, release_time=0, pickup_vertex=near, delivery_vertex=delivery, sku=sku_id
+    )
+    assert task.is_pickup_feasible(env.storage)
+    assert task.model_copy(update={"quantity": 2}).is_pickup_feasible(env.storage)
+    assert not task.model_copy(update={"quantity": 3}).is_pickup_feasible(env.storage)
+
+
+def test_with_order_lines_the_stock_stays_within_capacity_and_the_replay_is_deterministic():
+    def run():
+        data = _spec(initial_units=2).model_dump()
+        data["storage_rule"]["epoch_length"] = 40
+        return _run(type(_spec()).model_validate(data), steps=STEPS, **LINES)
+
+    first, second = run(), run()
+    assert first.tasks == second.tasks
+    assert first._waiting_orders == second._waiting_orders
+    assert first.storage == second.storage
+    assert any(t.quantity > 1 for t in first.tasks)
+    for v, capacity in first.storage.capacities.items():
+        assert first.storage.used_capacity(v) <= capacity + 1e-9
+    assert all(c >= 0 for per_vertex in first.storage.counts.values() for c in per_vertex.values())
+    for t in range(first.t + 1):
+        for task in first.tasks:
+            if task.release_time <= t:
+                assert task.status(t) in ("waiting", "active", "completed")
+
+
+def test_the_sized_starting_stock_counts_the_mean_units_per_line():
+    data = _spec(placement="demand_sized_blocks", initial_units=1).model_dump()
+    data["storage_rule"]["epoch_length"] = 100
+    plain = type(_spec()).model_validate(data)
+    data["arrival"]["units_per_line"] = (1, 5)
+    lines = type(plain).model_validate(data)
+    assert stock_sizing(plain).mean_units == 1.0
+    assert stock_sizing(lines).mean_units == 3.0
+    assert build_experiment_config(lines, 0, "fixed").units_per_line == (1, 5)
+    one, three = build_study(plain).counts, build_study(lines).counts
+    top = max(one, key=lambda k: sum(one[k].values()))
+    assert sum(three[top].values()) > 2 * sum(one[top].values())

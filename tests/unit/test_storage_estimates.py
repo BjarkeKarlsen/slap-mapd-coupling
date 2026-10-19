@@ -306,6 +306,17 @@ def _move(env: WarehouseMAPDEnv, agent_id: int, target: int) -> int:
     return slot_for_action(env.graph, at, Action(kind="move", target=target))
 
 
+def test_the_unit_estimate_counts_units_and_the_demand_estimate_counts_lines():
+    estimator = WindowEstimator()
+    estimator.record_order("tea", 3)
+    estimator.record_order("tea", 5)
+    estimator.record_order("mugs")
+    estimates = estimator.close_window(10)
+    assert estimates.demand == {"tea": 0.2, "mugs": 0.1}
+    assert estimates.units == {"tea": 0.8, "mugs": 0.1}
+    assert estimator.close_window(10).units == {}
+
+
 def test_a_chosen_wait_is_charged_to_the_next_edge_of_the_shortest_route():
     # Before pickup the goal is the storage vertex. Both 1 and 2 start a shortest route
     # from the hub, so the tie goes to the lower id.

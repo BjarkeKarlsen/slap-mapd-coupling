@@ -35,6 +35,7 @@ import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import (
     ControllerArchitecture,
     ExperimentConfig,
+    LinesPerOrder,
     ReceivingVertices,
     StorageMode,
 )
@@ -76,9 +77,10 @@ class StorageSettings(BaseModel):
       and the SKU at rank r goes to vertex number r // ceil(|K| / |V_str|) in that order, so the
       most popular SKUs fill the vertex nearest the delivery vertices first.
     - "demand_sized_blocks": the blocks of "demand_blocks", with each SKU's units sized to its
-      expected orders over one arrival period, for the arrival stock model. The SKU at rank r
-      starts with max(initial_units, ceil((1 + epsilon) * lambda_task * Delta * w_r)) units,
-      w_r being its popularity at t = 0, so every SKU holds at least `initial_units`. It needs
+      expected units ordered over one arrival period, for the arrival stock model. The SKU at
+      rank r starts with max(initial_units, ceil((1 + epsilon) * lambda_task * Delta * q_bar *
+      w_r)) units, w_r being its popularity at t = 0 and q_bar the mean of `units_per_line` (1
+      without it), so every SKU holds at least `initial_units`. It needs
       the `arrival` section for epsilon and the `storage_rule` section for Delta.
 
     A new task picks a SKU in stock, then a vertex holding it, so more SKUs mean more distinct
@@ -169,14 +171,19 @@ class ArrivalSettings(BaseModel):
 
     margin: NonNegativeFloat
     receiving: ReceivingVertices
+    # Order lines (tab:evalparams). None is one line of one unit per order.
+    lines_per_order: LinesPerOrder | None = None
+    units_per_line: tuple[PositiveInt, PositiveInt] | None = None
 
 
 class StockSizing(NamedTuple):
-    """What "demand_sized_blocks" sizes the starting stock by: lambda_task, Delta and epsilon."""
+    """What "demand_sized_blocks" sizes the starting stock by: lambda_task, Delta, epsilon and
+    q_bar, the mean units per line."""
 
     arrival_rate: float
     epoch_length: int
     margin: float
+    mean_units: float = 1.0
 
 
 class ExperimentSettings(BaseModel):
@@ -446,7 +453,11 @@ def _sized_units(
         sku_id: max(
             floor,
             math.ceil(
-                (1 + sizing.margin) * sizing.arrival_rate * sizing.epoch_length * weights[rank]
+                (1 + sizing.margin)
+                * sizing.arrival_rate
+                * sizing.epoch_length
+                * sizing.mean_units
+                * weights[rank]
             ),
         )
         for rank, sku_id in enumerate(ranked)
@@ -459,7 +470,11 @@ def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
         return None
     # _arrival_settings guarantees both sections for this placement.
     assert spec.arrival is not None and spec.storage_rule is not None
-    return StockSizing(spec.arrival_rate, spec.storage_rule.epoch_length, spec.arrival.margin)
+    units = spec.arrival.units_per_line
+    mean_units = 1.0 if units is None else (units[0] + units[1]) / 2
+    return StockSizing(
+        spec.arrival_rate, spec.storage_rule.epoch_length, spec.arrival.margin, mean_units
+    )
 
 
 def training_storage_mode(spec: TrainingSpec) -> StorageMode:
@@ -537,6 +552,8 @@ def build_experiment_config(
         stock_margin=None if arrival is None else arrival.margin,
         stock_floor=None if arrival is None else spec.storage.initial_units,
         stock_receiving=None if arrival is None else arrival.receiving,
+        lines_per_order=None if arrival is None else arrival.lines_per_order,
+        units_per_line=None if arrival is None else arrival.units_per_line,
     )
 
 

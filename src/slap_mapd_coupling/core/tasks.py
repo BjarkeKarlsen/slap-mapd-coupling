@@ -135,12 +135,12 @@ class Task(BaseModel):
         return Task.model_validate({**self.model_dump(), "finish_time": t})
 
     def is_pickup_feasible(self, storage: StorageState) -> bool:
-        """The stock condition: x_{t_j^released}(k_j, s_j) > 0.
+        """The stock condition: x_{t_j^released}(k_j, s_j) >= q_j.
 
         Caller passes the StorageState snapshot as-of t_j^released, Task
         holds no storage-history reference itself.
         """
-        return storage.units(self.sku, self.pickup_vertex) > 0
+        return storage.units(self.sku, self.pickup_vertex) >= self.quantity
 
     @property
     def service_time(self) -> int | None:

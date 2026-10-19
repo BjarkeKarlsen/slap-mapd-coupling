@@ -50,10 +50,11 @@ plans from full state directly, not from o_i(t).
 
 Under the arrival stock model (config.stock_model == "arrival", thesis wording pending) stage 1
 works on order lines, not tasks. An order is lines of distinct SKUs, each asking for some units,
-and its lines are queued when it is released. The queue is served in release order: a line takes
-its units one at a time, each from the storage vertex holding its SKU that is nearest its
-delivery vertex (ties by vertex id), and each unit taken becomes a task, with the order's release
-time kept. A line with units still missing waits in the queue and counts in the backlog. The
+and its lines are queued when it is released. The queue is served in release order by the pickup
+rule: a line takes its units from the storage vertices holding its SKU, nearest its delivery
+vertex first (ties by vertex id), as many from each as it still misses or the vertex holds, and
+every vertex it takes from gives one task carrying those units, with the order's release time
+kept. A line with units still missing waits in the queue and counts in the backlog. The
 lines of an order are drawn without looking at stock, so the orders of a seed do not depend on
 the storage rule or the controller. Stage 6 is then the arrival of new stock every Delta steps,
 under every storage rule, F_fix included: the amount of each SKU is the same under every rule,
@@ -107,7 +108,7 @@ _ORDER_SEED_OFFSET = 1_000_000_007
 
 class OrderLine(NamedTuple):
     """A line of an order of the arrival stock model, waiting for `missing` units of its SKU.
-    Every unit taken for it becomes a task with the order's release time."""
+    Every shelf it takes units from gives a task with the order's release time."""
 
     release_time: int
     sku: SkuId
@@ -537,12 +538,13 @@ class WarehouseMAPDEnv:
         assert self.config.stock_margin is not None
         assert self.config.stock_floor is not None
         estimates = self._estimator.close_window(delta)
+        # q^wait_t(k), the units of k that lines still wait for.
         waiting_by_sku: dict[SkuId, int] = {}
-        for order in self._waiting_orders:
-            waiting_by_sku[order.sku] = waiting_by_sku.get(order.sku, 0) + 1
+        for line in self._waiting_orders:
+            waiting_by_sku[line.sku] = waiting_by_sku.get(line.sku, 0) + line.missing
         amounts = arrival_amounts(
             self.storage,
-            estimates.demand,
+            estimates.units,
             delta,
             self.config.stock_margin,
             self.config.stock_floor,
@@ -611,30 +613,34 @@ class WarehouseMAPDEnv:
         else:
             lines = self._draw_order_lines(t, ranked)
         for line in lines:
-            self._estimator.record_order(line.sku)
+            self._estimator.record_order(line.sku, line.missing)
         self._waiting_orders.extend(lines)
 
         counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in self.storage.counts.items()}
         still_waiting: list[OrderLine] = []
         new_tasks: list[Task] = []
         for line in self._waiting_orders:
+            # The pickup rule: the holders nearest the delivery vertex first, ties by vertex id,
+            # each giving one task for min(units still missing, units it holds).
             per_vertex = counts.get(line.sku, {})
+            holders = sorted(
+                (v for v, count in per_vertex.items() if count > 0),
+                key=lambda v: (self.graph.distance(v, line.delivery_vertex), v),
+            )
             missing = line.missing
-            while missing:
-                holders = [v for v, count in per_vertex.items() if count > 0]
-                if not holders:
+            for pickup in holders:
+                if not missing:
                     break
-                pickup = min(
-                    holders, key=lambda v: (self.graph.distance(v, line.delivery_vertex), v)
-                )
-                per_vertex[pickup] -= 1
-                missing -= 1
+                quantity = min(missing, per_vertex[pickup])
+                per_vertex[pickup] -= quantity
+                missing -= quantity
                 task = Task(
                     task_id=self._next_task_id,
                     release_time=line.release_time,
                     pickup_vertex=pickup,
                     delivery_vertex=line.delivery_vertex,
                     sku=line.sku,
+                    quantity=quantity,
                     order_id=line.order_id,
                     line_index=line.line_index,
                 )

@@ -5,9 +5,13 @@ Each estimate looks back over one storage period only. At an epoch t it counts
 the events of the window [t - Delta, t), divides the count by the Delta steps
 of the window, and the next window starts from zero:
 
-    rho_hat_t(k) = #{orders for k released in the window} / Delta
+    rho_hat_t(k)      = #{order lines for k released in the window} / Delta
+    rho_hat^unit_t(k) = #{units of k ordered in the window} / Delta
     mu_hat_t(e)  = #{traversals of e in the window} / Delta
     w_hat_t(e)   = #{waits attributed to e in the window} / Delta
+
+rho_hat counts lines and orders the SKUs for placement. rho_hat^unit counts units and sizes the
+arrivals. Under the template model every order is one line of one unit, so the two agree.
 
 Counting per step keeps the size of the estimates, and so the weight beta of
 the congestion-aware score, the same whatever Delta is.
@@ -48,7 +52,8 @@ class WindowEstimates:
     window, and how many orders were released in it (zero means there is no
     evidence to act on)."""
 
-    demand: DemandEstimate  # rho_hat_t(k), orders per step
+    demand: DemandEstimate  # rho_hat_t(k), order lines per step
+    units: DemandEstimate  # rho_hat^unit_t(k), units ordered per step
     traversal: TrafficEstimate  # mu_hat_t(e), traversals per step
     waiting: TrafficEstimate  # w_hat_t(e), waits per step
     num_orders: int  # orders released in the window, summed over SKUs
@@ -60,12 +65,14 @@ class WindowEstimator:
     per-step estimates when the window closes."""
 
     orders: dict[SkuId, int] = field(default_factory=dict)
+    units: dict[SkuId, int] = field(default_factory=dict)
     traversals: dict[EdgeKey, int] = field(default_factory=dict)
     waits: dict[EdgeKey, int] = field(default_factory=dict)
 
-    def record_order(self, sku: SkuId) -> None:
-        """One order for `sku` was released."""
+    def record_order(self, sku: SkuId, units: int = 1) -> None:
+        """One order line for `units` units of `sku` was released."""
         self.orders[sku] = self.orders.get(sku, 0) + 1
+        self.units[sku] = self.units.get(sku, 0) + units
 
     def record_traversal(self, edge: EdgeKey) -> None:
         """A robot realised a move along `edge`."""
@@ -82,11 +89,13 @@ class WindowEstimator:
             raise ValueError(f"window_length must be positive, got {window_length}.")
         estimates = WindowEstimates(
             demand={k: n / window_length for k, n in self.orders.items()},
+            units={k: n / window_length for k, n in self.units.items()},
             traversal={e: n / window_length for e, n in self.traversals.items()},
             waiting={e: n / window_length for e, n in self.waits.items()},
             num_orders=sum(self.orders.values()),
         )
         self.orders = {}
+        self.units = {}
         self.traversals = {}
         self.waits = {}
         return estimates
