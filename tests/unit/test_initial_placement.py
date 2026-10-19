@@ -108,6 +108,33 @@ def test_demand_blocks_fill_the_vertices_nearest_the_delivery_vertices_first():
     }
 
 
+_NAMES = ("tea", "coffee", "mugs", "biscuits", "sugar", "milk", "spoons")
+
+
+def test_sku_names_name_the_skus_and_their_order_is_the_ranking():
+    # Not alphabetical, so the blocks follow the list order rather than the sorted names.
+    skus, _, counts = build_storage(
+        _settings("demand_blocks", sku_names=_NAMES), _line(), _DEMAND
+    )
+    assert list(skus) == list(_NAMES)
+    assert counts == {
+        "tea": {4: 3},
+        "coffee": {4: 3},
+        "mugs": {5: 3},
+        "biscuits": {5: 3},
+        "sugar": {1: 3},
+        "milk": {1: 3},
+        "spoons": {0: 3},
+    }
+
+
+def test_sku_names_need_one_distinct_name_per_sku():
+    with pytest.raises(ValueError, match="sku_names"):
+        _settings("by_number", sku_names=_NAMES[:3])
+    with pytest.raises(ValueError, match="distinct"):
+        _settings("by_number", sku_names=("tea",) * 7)
+
+
 def test_by_number_spreads_the_skus_in_vertex_number_order():
     _, _, counts = build_storage(_settings("by_number"), _line())
     storage = [0, 1, 4, 5]

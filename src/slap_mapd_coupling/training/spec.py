@@ -62,9 +62,9 @@ from slap_mapd_coupling.training.trainer import CheckpointSettings
 class StorageSettings(BaseModel):
     """The SKUs and where they start.
 
-    There are `num_skus` SKUs named sku_000, sku_001 and so on. Three digits keep the id order
-    the numeric order up to 1000 SKUs, which the popularity ranking of `DemandSettings` relies
-    on. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
+    There are `num_skus` SKUs, named by `sku_names` when it is given and sku_000, sku_001 and so
+    on otherwise. The popularity ranking of `DemandSettings` starts from the order of that list,
+    so the first name is the most popular at t = 0. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
     Every storage vertex has the capacity `vertex_capacity`. Every SKU starts with
     `initial_units` units, all at one storage vertex, chosen by `initial_placement`:
 
@@ -88,17 +88,36 @@ class StorageSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     num_skus: PositiveInt
+    sku_names: tuple[str, ...] | None = None
     unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
     vertex_capacity: PositiveFloat
     initial_units: PositiveInt
     initial_placement: Literal["by_number", "demand_blocks", "demand_sized_blocks"] = "by_number"
+
+    @model_validator(mode="after")
+    def _one_name_per_sku(self) -> "StorageSettings":
+        if self.sku_names is None:
+            return self
+        if len(self.sku_names) != self.num_skus:
+            raise ValueError(
+                f"sku_names has {len(self.sku_names)} names for num_skus={self.num_skus}."
+            )
+        if len(set(self.sku_names)) != len(self.sku_names) or not all(self.sku_names):
+            raise ValueError("sku_names must be distinct and non-empty.")
+        return self
+
+    def sku_ids(self) -> list[SkuId]:
+        """The SKU ids in list order, the order the popularity ranking starts from."""
+        if self.sku_names is not None:
+            return list(self.sku_names)
+        return [f"sku_{i:03d}" for i in range(self.num_skus)]
 
 
 class DemandSettings(BaseModel):
     """The order distribution P_ord (sec:pf:tasks) when SKUs differ in popularity.
 
     The SKU at rank r weighs 1 / (r + 1)^skew, rank 0 being the most popular. The ranking starts
-    as the SKUs in id order and rotates left by `rotation_shift` places every `rotation_period`
+    as the SKUs in the order of `StorageSettings.sku_ids` and rotates left by `rotation_shift` places every `rotation_period`
     steps, or never without a period. A spec without this section draws the SKU uniformly among
     the SKUs in stock.
     """
@@ -352,13 +371,12 @@ def build_storage(
 ) -> tuple[dict[SkuId, SkuType], dict[VertexId, float], dict[SkuId, dict[VertexId, int]]]:
     """The SKUs, the capacity of every storage vertex and the initial counts, as described by
     `StorageSettings`. `demand` gives the popularity ranking "demand_blocks" and
-    "demand_sized_blocks" place by, and None ranks the SKUs in id order, as the uniform draw has
-    no ranking. "demand_sized_blocks" needs `sizing`. Raises if the initial counts break the
+    "demand_sized_blocks" place by, and None ranks the SKUs in list order, as the uniform draw
+    has no ranking. "demand_sized_blocks" needs `sizing`. Raises if the initial counts break the
     capacity constraint."""
     storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
     skus: dict[SkuId, SkuType] = {}
-    for i in range(storage.num_skus):
-        sku_id = f"sku_{i:03d}"
+    for i, sku_id in enumerate(storage.sku_ids()):
         unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
         skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
     units = dict.fromkeys(skus, storage.initial_units)
