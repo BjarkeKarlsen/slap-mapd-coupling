@@ -4,13 +4,20 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType, StorageState
 from slap_mapd_coupling.environment.multi_agent_env import _relocated_units, _relocation_distance
-from slap_mapd_coupling.evaluation.evaluator import run_episode
+from slap_mapd_coupling.evaluation.evaluator import (
+    backlog_slope,
+    completed_share,
+    keeps_up,
+    run_episode,
+)
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 
 
@@ -105,10 +112,57 @@ def test_keeps_up_is_unset_without_a_threshold():
     assert metrics.keep_up_ratio == metrics.throughput / metrics.arrival_rate
 
 
-def test_keeps_up_compares_throughput_with_the_threshold():
-    config = _config(horizon=40, arrival_rate=1.0, keep_up_threshold=0.5)
+def test_keeps_up_is_unset_with_only_one_threshold():
+    assert _run(_graph(), _config(horizon=30, keep_up_threshold=0.5)).keeps_up is None
+    assert _run(_graph(), _config(horizon=30, backlog_slope_max=0.1)).keeps_up is None
+
+
+def test_keeps_up_checks_the_completed_share_and_the_backlog_slope():
+    config = _config(horizon=40, arrival_rate=1.0, keep_up_threshold=0.5, backlog_slope_max=0.1)
     metrics = _run(_graph(), config)
-    assert metrics.keeps_up == (metrics.throughput >= 0.5 * config.arrival_rate)
+    assert metrics.completed_share == metrics.num_completed_tasks / (
+        metrics.num_completed_tasks + metrics.backlog
+    )
+    assert metrics.backlog_slope is not None
+    assert metrics.keeps_up == (
+        metrics.completed_share >= 0.5 and metrics.backlog_slope <= 0.1
+    )
+
+
+def test_completed_share_counts_the_released_tasks():
+    assert completed_share(336, 378 - 336) == 336 / 378
+    assert completed_share(0, 0) is None
+
+
+_T = 600
+
+
+def _keeps_up(trace: list[int]) -> bool | None:
+    return keeps_up(completed_share(500, trace[-1]), backlog_slope(trace), 0.8, 0.01)
+
+
+def test_a_backlog_that_levels_off_keeps_up():
+    trace = [min(t, 20) + (t % 3) for t in range(_T + 1)]
+    assert backlog_slope(trace) == pytest.approx(0.0, abs=1e-3)
+    assert _keeps_up(trace) is True
+
+
+def test_a_backlog_that_grows_linearly_does_not_keep_up():
+    trace = [t // 10 for t in range(_T + 1)]
+    assert backlog_slope(trace) == pytest.approx(0.1, abs=1e-3)
+    assert _keeps_up(trace) is False
+
+
+def test_a_backlog_that_jumps_once_and_then_stays_flat_keeps_up():
+    trace = [5 if t < 200 else 40 for t in range(_T + 1)]
+    assert backlog_slope(trace) == pytest.approx(0.0, abs=1e-9)
+    assert _keeps_up(trace) is True
+
+
+def test_the_backlog_slope_reads_only_the_second_half_of_the_run():
+    trace = [t if t < _T // 2 else 10 for t in range(_T + 1)]
+    assert backlog_slope(trace) == pytest.approx(0.0, abs=1e-9)
+    assert backlog_slope([3]) is None
 
 
 def test_crowding_is_a_fraction_for_the_reference_planner():
@@ -180,7 +234,12 @@ import sys
 import slap_mapd_coupling.storage.fixed
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
-from slap_mapd_coupling.evaluation.evaluator import run_episode
+from slap_mapd_coupling.evaluation.evaluator import (
+    backlog_slope,
+    completed_share,
+    keeps_up,
+    run_episode,
+)
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 
 graph = generate_warehouse_graph(GeneratorParams(
