@@ -118,12 +118,12 @@ def popularity_ranking(
 ) -> list[SkuId]:
     """The SKUs from most to least popular at step t, for the order distribution with a skew.
 
-    Rank 0 is the most popular. The ranking starts as the SKUs in id order and rotates left by
-    `shift` places every `period` steps, so at step t the SKU in position
-    ((t // period) * shift) mod |K| of the id order is the most popular. Without a period the
-    ranking never rotates.
+    Rank 0 is the most popular. The ranking starts as `sku_ids` in the order given, the order of
+    the SKU list, and rotates left by `shift` places every `period` steps, so at step t the SKU
+    in position ((t // period) * shift) mod |K| of that order is the most popular. Without a
+    period the ranking never rotates.
     """
-    ranked = sorted(sku_ids)
+    ranked = list(sku_ids)
     if period is None or not ranked:
         return ranked
     assert shift is not None  # ExperimentConfig requires a shift with a period
@@ -283,8 +283,9 @@ class WarehouseMAPDEnv:
         self._assigner = assigner
         self._storage_rule = get_storage_rule(config.storage_mode)
         self._edge_cost = {(edge.source, edge.target): edge.cost for edge in graph.edges}
-        # The order draw of the arrival model looks at every SKU, never at stock.
-        self._sku_ids = sorted(self._skus)
+        # The order draw of the arrival model looks at every SKU, never at stock. The SKUs keep
+        # the order of `skus`, which the popularity ranking starts from.
+        self._sku_ids = list(self._skus)
         self._delivery_vertices = sorted(
             v for v, vertex in graph.vertices.items() if vertex.role.delivery
         )
@@ -689,7 +690,7 @@ class WarehouseMAPDEnv:
             in_stock = [sku_id for sku_id, vertices in vertices_by_sku.items() if vertices]
         else:
             ranked = popularity_ranking(
-                list(vertices_by_sku),
+                [sku_id for sku_id in self._sku_ids if sku_id in vertices_by_sku],
                 self._t,
                 self.config.demand_rotation_period,
                 self.config.demand_rotation_shift,

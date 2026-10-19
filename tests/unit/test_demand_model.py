@@ -220,10 +220,24 @@ def test_the_most_popular_sku_moves_by_the_shift_exactly_at_multiples_of_the_per
     assert top[0] == skus[0]
 
 
-def test_the_ranking_is_a_left_rotation_of_the_id_order_and_does_not_rotate_without_a_period():
-    skus = [f"sku_{i:03d}" for i in range(5)]
-    assert popularity_ranking(skus[::-1], 3, 2, 3) == skus[3:] + skus[:3]
-    assert popularity_ranking(skus[::-1], 10**6, None, None) == skus
+def test_the_ranking_is_a_left_rotation_of_the_list_order_and_does_not_rotate_without_a_period():
+    skus = ["tea", "coffee", "mugs", "biscuits", "sugar"]  # not sorted, the list order counts
+    assert popularity_ranking(skus, 3, 2, 3) == skus[3:] + skus[:3]
+    assert popularity_ranking(skus, 10**6, None, None) == skus
+
+
+def test_the_most_popular_sku_of_the_orders_is_the_first_in_the_list_not_the_first_sorted():
+    graph = _graph()
+    storage = _storage_vertices(graph)
+    names = ["tea", "coffee", "mugs", "biscuits", "sugar", "milk"]
+    skus = {name: SkuType(sku_id=name, unit_capacity=1.0) for name in names}
+    counts = {name: {storage[i % len(storage)]: 4} for i, name in enumerate(names)}
+    config = _config(arrival_rate=4.0, demand_skew=4.0, horizon=50)
+    env = WarehouseMAPDEnv(graph, skus, counts, {v: 40.0 for v in storage}, config)
+    for _ in range(config.horizon):
+        env.step({agent_id: 0 for agent_id in env.fleet.agents})
+    ordered = Counter(task.sku for task in env.tasks)
+    assert ordered.most_common(1)[0][0] == "tea"
 
 
 def test_the_most_popular_sku_of_the_orders_changes_with_the_ranking():
