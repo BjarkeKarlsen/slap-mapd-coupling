@@ -379,3 +379,13 @@ def test_the_sized_starting_stock_counts_the_mean_units_per_line():
     one, three = build_study(plain).counts, build_study(lines).counts
     top = max(one, key=lambda k: sum(one[k].values()))
     assert sum(three[top].values()) > 2 * sum(one[top].values())
+
+
+def test_the_log_holds_the_order_and_line_of_every_task_and_the_lines_that_waited():
+    env = _run(_spec(initial_units=2), **LINES)
+    assert env._waiting_orders  # the small stock runs out
+    assert set(env.log.order_line_by_task) == {t.task_id for t in env.tasks}
+    for task in env.tasks:
+        assert env.log.order_line_by_task[task.task_id] == (task.order_id, task.line_index)
+    waiting = {(line.order_id, line.line_index) for line in env._waiting_orders}
+    assert waiting <= env.log.lines_waited

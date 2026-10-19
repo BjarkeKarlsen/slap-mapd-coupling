@@ -40,7 +40,13 @@ _PUTAWAY_FIELDS = (
     "unplaced_units",
     "overflow_units",
 )
-_ARRIVAL_FIELDS = ("mean_stock_wait", "num_waiting_orders", *_PUTAWAY_FIELDS)
+_ORDER_FIELDS = (
+    "mean_order_completion",
+    "num_completed_orders",
+    "mean_tasks_per_line",
+    "num_lines_waited",
+)
+_ARRIVAL_FIELDS = ("mean_stock_wait", "num_waiting_orders", *_PUTAWAY_FIELDS, *_ORDER_FIELDS)
 
 
 class RunMetrics(BaseModel):
@@ -109,6 +115,16 @@ class RunMetrics(BaseModel):
     # for a unit of its SKU. A task keeps its order's release time, so this wait is part of
     # mean_wait_for_agent. None under the template model, and None iff |C_T| = 0.
     mean_stock_wait: NonNegativeFloat | None = None
+    # Arrival stock model only. The order completion time, the longest service time among an
+    # order's tasks, averaged over the orders whose tasks are all completed and none of whose
+    # lines still waits. None without such an order.
+    mean_order_completion: NonNegativeFloat | None = None
+    num_completed_orders: NonNegativeInt = 0
+    # Arrival stock model only. Tasks per order line, over the lines with no units still
+    # missing, so how often a line is split over shelves. None without such a line.
+    mean_tasks_per_line: NonNegativeFloat | None = None
+    # Arrival stock model only. The order lines that waited for stock at some point.
+    num_lines_waited: NonNegativeInt = 0
 
     # --- congestion, eq:crowding ---
     mean_crowding: NonNegativeFloat = Field(le=1.0)  # bar_delta_T in [0,1]

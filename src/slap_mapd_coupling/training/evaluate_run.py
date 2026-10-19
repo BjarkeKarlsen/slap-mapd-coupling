@@ -181,10 +181,11 @@ _SUMMARY_HEADER = (
     "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
 # The columns an arrival run adds to every row: the put-away distance per update and the wait
-# for stock of both arms.
+# for stock of both arms, and the order completion time under each rule, F_fix / mode.
 _ARRIVAL_HEADER = (
-    " putaway per update F_fix | putaway per update mode | stock wait F_fix | stock wait mode |",
-    "---|---|---|---|",
+    " putaway per update F_fix | putaway per update mode | stock wait F_fix | stock wait mode "
+    "| order completion F_fix / mode |",
+    "---|---|---|---|---|",
 )
 
 
@@ -207,9 +208,14 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])
             except ValueError as error:
-                lines.append(f"| {role} | {mode} | {error} |" + " |" * (13 if arrival else 9))
+                lines.append(f"| {role} | {mode} | {error} |" + " |" * (14 if arrival else 9))
                 continue
-            lines.append(_summary_row(role, result, arrival))
+            row = _summary_row(role, result, arrival)
+            if arrival:
+                fixed_time = _mean_order_completion(played[(role, "fixed")])
+                mode_time = _mean_order_completion(played[(role, mode)])
+                row += f" {fixed_time} / {mode_time} |"
+            lines.append(row)
     return "\n".join(lines) + "\n"
 
 
@@ -248,6 +254,12 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
             mean(result.adaptive_summary, "mean_stock_wait"),
         ]
     return "| " + " | ".join(cells) + " |"
+
+
+def _mean_order_completion(runs: list[RunMetrics]) -> str:
+    """The order completion time averaged over the runs that completed an order."""
+    times = [run.mean_order_completion for run in runs if run.mean_order_completion is not None]
+    return f"{sum(times) / len(times):.3f}" if times else "n/a"
 
 
 def _append(path: Path, row: dict) -> None:

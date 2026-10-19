@@ -209,6 +209,10 @@ class EpisodeLog:
     # Arrival stock model only: the steps each task's order waited for a unit of its SKU,
     # from its release until a unit was taken for it. 0 for an order served at once.
     stock_wait_by_task: dict[TaskId, int] = field(default_factory=dict)
+    # Arrival stock model only: the order and the line of the order each task was made from,
+    # and the lines that waited for stock, as (order id, line index).
+    order_line_by_task: dict[TaskId, tuple[int, int]] = field(default_factory=dict)
+    lines_waited: set[tuple[int, int]] = field(default_factory=set)
     # Arrival stock model only, one entry per arrival. The put-away measure: the travel of the
     # arriving units from the nearest receiving vertex to their shelves, in units x d_G.
     putaway_distance_by_update: list[float] = field(default_factory=list)
@@ -646,9 +650,11 @@ class WarehouseMAPDEnv:
                 )
                 self._next_task_id += 1
                 self.log.stock_wait_by_task[task.task_id] = t - line.release_time
+                self.log.order_line_by_task[task.task_id] = (line.order_id, line.line_index)
                 new_tasks.append(task)
             if missing:
                 still_waiting.append(line._replace(missing=missing))
+                self.log.lines_waited.add((line.order_id, line.line_index))
         self._waiting_orders = still_waiting
         if new_tasks:
             self.storage = StorageState(
