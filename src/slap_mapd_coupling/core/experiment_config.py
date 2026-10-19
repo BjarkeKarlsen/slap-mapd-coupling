@@ -23,6 +23,19 @@ StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
 StockModel = Literal["template", "arrival"]
 # Where arriving stock enters the warehouse. "delivery": the delivery vertices, one I/O side.
 ReceivingVertices = Literal["delivery"]
+
+
+class LinesPerOrder(BaseModel):
+    """The number of lines of an order (tab:evalparams, mean 5, distribution TBD).
+    "shifted_poisson" is 1 + Poisson(mean - 1), so every order has a line and the mean is exact.
+    An order never has more lines than there are SKUs, since its lines are distinct SKUs."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    distribution: Literal["shifted_poisson"]
+    mean: float = Field(ge=1.0)
+
+
 # "full_view" is the full-view setting (sec:method:controllers), the decentralised router with
 # every movable vertex in view and the pooled readout. It is not a controller in Pi.
 ControllerArchitecture = Literal["centralised", "section", "decentralised", "full_view"]
@@ -97,6 +110,11 @@ class ExperimentConfig(BaseModel):
     stock_margin: NonNegativeFloat | None = None  # epsilon
     stock_floor: PositiveInt | None = None  # the fewest units a SKU is filled up to
     stock_receiving: ReceivingVertices | None = None  # V_rcv
+    # Order lines, arrival model only. An order is lines of distinct SKUs, each asking for a
+    # quantity drawn uniformly from the inclusive range units_per_line. None means one line of
+    # one unit, the order before lines existed. arrival_rate stays lines per timestep.
+    lines_per_order: LinesPerOrder | None = None
+    units_per_line: tuple[PositiveInt, PositiveInt] | None = None
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -122,7 +140,12 @@ class ExperimentConfig(BaseModel):
         needs all of them, and Delta under every storage rule, and it relocates nothing, so it
         takes no nu."""
         stock = ("stock_margin", "stock_floor", "stock_receiving")
+        if self.units_per_line is not None and self.units_per_line[0] > self.units_per_line[1]:
+            raise ValueError(f"units_per_line = {self.units_per_line} must be (low, high).")
         if self.stock_model == "template":
+            for name in ("lines_per_order", "units_per_line"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"{name} only applies to stock_model='arrival'.")
             for name in stock:
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")

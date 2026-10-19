@@ -303,7 +303,7 @@ def test_an_order_with_no_stock_is_served_right_after_the_next_arrival():
     assert env.log.unplaced_units_by_update == [0]
     served = {(t.release_time, t.sku, t.delivery_vertex): t for t in env.tasks}
     for order in waiting:
-        task = served[tuple(order)]
+        task = served[(order.release_time, order.sku, order.delivery_vertex)]
         assert env.log.stock_wait_by_task[task.task_id] == DELTA - order.release_time
     assert all(order.release_time == DELTA for order in env._waiting_orders)
 

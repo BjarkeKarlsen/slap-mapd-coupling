@@ -49,11 +49,12 @@ needed by the reference planner this milestone wires up, since it
 plans from full state directly, not from o_i(t).
 
 Under the arrival stock model (config.stock_model == "arrival", thesis wording pending) stage 1
-works on orders, not tasks. An order is queued when it is released, and the queue is served in
-release order: an order takes one unit of its SKU from the storage vertex holding it that is
-nearest its delivery vertex (ties by vertex id), and only then becomes a task, with its release
-time kept. An order whose SKU has no unit anywhere waits in the queue and counts in the backlog.
-The SKU of an order is drawn without looking at stock, so the orders of a seed do not depend on
+works on order lines, not tasks. An order is lines of distinct SKUs, each asking for some units,
+and its lines are queued when it is released. The queue is served in release order: a line takes
+its units one at a time, each from the storage vertex holding its SKU that is nearest its
+delivery vertex (ties by vertex id), and each unit taken becomes a task, with the order's release
+time kept. A line with units still missing waits in the queue and counts in the backlog. The
+lines of an order are drawn without looking at stock, so the orders of a seed do not depend on
 the storage rule or the controller. Stage 6 is then the arrival of new stock every Delta steps,
 under every storage rule, F_fix included: the amount of each SKU is the same under every rule,
 and the put-away rule of the storage mode decides which shelves it goes to, without moving stock
@@ -104,13 +105,16 @@ from slap_mapd_coupling.storage.registry import get_storage_rule
 _ORDER_SEED_OFFSET = 1_000_000_007
 
 
-class Order(NamedTuple):
-    """An order of the arrival stock model that waits for a unit of its SKU. It becomes a task,
-    with this release time, once a unit is taken for it."""
+class OrderLine(NamedTuple):
+    """A line of an order of the arrival stock model, waiting for `missing` units of its SKU.
+    Every unit taken for it becomes a task with the order's release time."""
 
     release_time: int
     sku: SkuId
     delivery_vertex: VertexId
+    order_id: int = 0
+    line_index: int = 0
+    missing: int = 1
 
 
 def popularity_ranking(
@@ -341,10 +345,9 @@ class WarehouseMAPDEnv:
         return self._t
 
     @property
-    def waiting_orders(self) -> tuple[Order, ...]:
-        """The orders of the arrival stock model still waiting for a unit of their SKU, in
-        release order. They are released but not yet tasks. Always empty under the template
-        model."""
+    def waiting_orders(self) -> tuple[OrderLine, ...]:
+        """The order lines of the arrival stock model still missing units of their SKU, in
+        release order. Always empty under the template model."""
         return tuple(self._waiting_orders)
 
     def reset(
@@ -361,7 +364,8 @@ class WarehouseMAPDEnv:
             }
         )
         self.tasks = []
-        self._waiting_orders: list[Order] = []
+        self._waiting_orders: list[OrderLine] = []
+        self._next_order_id = 1
         self.storage = StorageState(
             skus=self._skus,
             capacities=self._storage_capacities,
@@ -591,59 +595,119 @@ class WarehouseMAPDEnv:
         """Stage 1 under the arrival stock model (module docstring): the orders released now
         join the queue, then the queue is served in release order.
 
-        The order draw is the one of `_generate_tasks`, the arrival count and then three uniform
-        numbers per order, with the SKU mapped over every SKU instead of the SKUs in stock. The
-        number for the pickup vertex is drawn and not used, because the pickup is the nearest
-        holder, so the stream stays the template model's. Every order is recorded in the demand
-        estimate when it is released, whether or not a unit is taken for it then.
+        Every line is recorded in the demand estimate when it is released, whether or not a
+        unit is taken for it then.
         """
         t = self._t
-        num_new = int(self._order_rng.poisson(self.config.arrival_rate))
-        if num_new:
-            draws = self._order_rng.random((num_new, 3))
-            ranked = popularity_ranking(
-                self._sku_ids,
-                t,
-                self.config.demand_rotation_period,
-                self.config.demand_rotation_shift,
-            )
-            for u_sku, _u_pickup, u_delivery in draws:
-                if self._all_sku_cumulative is None:
-                    sku_id = ranked[int(u_sku * len(ranked))]
-                else:
-                    index = bisect.bisect_right(self._all_sku_cumulative, u_sku)
-                    sku_id = ranked[min(index, len(ranked) - 1)]
-                delivery = self._delivery_vertices[int(u_delivery * len(self._delivery_vertices))]
-                self._estimator.record_order(sku_id)
-                self._waiting_orders.append(Order(t, sku_id, delivery))
+        ranked = popularity_ranking(
+            self._sku_ids,
+            t,
+            self.config.demand_rotation_period,
+            self.config.demand_rotation_shift,
+        )
+        if self.config.lines_per_order is None and self.config.units_per_line is None:
+            lines = self._draw_single_line_orders(t, ranked)
+        else:
+            lines = self._draw_order_lines(t, ranked)
+        for line in lines:
+            self._estimator.record_order(line.sku)
+        self._waiting_orders.extend(lines)
 
         counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in self.storage.counts.items()}
-        still_waiting: list[Order] = []
+        still_waiting: list[OrderLine] = []
         new_tasks: list[Task] = []
-        for order in self._waiting_orders:
-            per_vertex = counts.get(order.sku, {})
-            holders = [v for v, count in per_vertex.items() if count > 0]
-            if not holders:
-                still_waiting.append(order)
-                continue
-            pickup = min(holders, key=lambda v: (self.graph.distance(v, order.delivery_vertex), v))
-            per_vertex[pickup] -= 1
-            task = Task(
-                task_id=self._next_task_id,
-                release_time=order.release_time,
-                pickup_vertex=pickup,
-                delivery_vertex=order.delivery_vertex,
-                sku=order.sku,
-            )
-            self._next_task_id += 1
-            self.log.stock_wait_by_task[task.task_id] = t - order.release_time
-            new_tasks.append(task)
+        for line in self._waiting_orders:
+            per_vertex = counts.get(line.sku, {})
+            missing = line.missing
+            while missing:
+                holders = [v for v, count in per_vertex.items() if count > 0]
+                if not holders:
+                    break
+                pickup = min(
+                    holders, key=lambda v: (self.graph.distance(v, line.delivery_vertex), v)
+                )
+                per_vertex[pickup] -= 1
+                missing -= 1
+                task = Task(
+                    task_id=self._next_task_id,
+                    release_time=line.release_time,
+                    pickup_vertex=pickup,
+                    delivery_vertex=line.delivery_vertex,
+                    sku=line.sku,
+                    order_id=line.order_id,
+                    line_index=line.line_index,
+                )
+                self._next_task_id += 1
+                self.log.stock_wait_by_task[task.task_id] = t - line.release_time
+                new_tasks.append(task)
+            if missing:
+                still_waiting.append(line._replace(missing=missing))
         self._waiting_orders = still_waiting
         if new_tasks:
             self.storage = StorageState(
                 skus=self._skus, capacities=self._storage_capacities, counts=counts
             )
         return new_tasks
+
+    def _draw_single_line_orders(self, t: int, ranked: list[SkuId]) -> list[OrderLine]:
+        """The orders released at t when an order is one line of one unit. The draw is the one
+        of `_generate_tasks`, the arrival count and then three uniform numbers per order, with
+        the SKU mapped over every SKU instead of the SKUs in stock. The number for the pickup
+        vertex is drawn and not used, because the pickup is the nearest holder, so the stream
+        stays the template model's."""
+        num_new = int(self._order_rng.poisson(self.config.arrival_rate))
+        if not num_new:
+            return []
+        lines: list[OrderLine] = []
+        for u_sku, _u_pickup, u_delivery in self._order_rng.random((num_new, 3)):
+            if self._all_sku_cumulative is None:
+                sku_id = ranked[int(u_sku * len(ranked))]
+            else:
+                index = bisect.bisect_right(self._all_sku_cumulative, u_sku)
+                sku_id = ranked[min(index, len(ranked) - 1)]
+            delivery = self._delivery_vertices[int(u_delivery * len(self._delivery_vertices))]
+            lines.append(OrderLine(t, sku_id, delivery, order_id=self._next_order_id))
+            self._next_order_id += 1
+        return lines
+
+    def _draw_order_lines(self, t: int, ranked: list[SkuId]) -> list[OrderLine]:
+        """The orders released at t, as order lines. The number of orders is Poisson with mean
+        arrival_rate / mean lines per order, so arrival_rate lines arrive per timestep. Each
+        order then draws its line count, that many distinct SKUs by popularity without
+        replacement, one delivery vertex uniformly, and a quantity per line uniformly from
+        units_per_line. Everything comes from the order stream, never from stock."""
+        lines_config = self.config.lines_per_order
+        mean_lines = 1.0 if lines_config is None else lines_config.mean
+        num_new = int(self._order_rng.poisson(self.config.arrival_rate / mean_lines))
+        if self.config.demand_skew is None:
+            weights = None
+        else:
+            weights = np.asarray(zipf_weights(len(ranked), self.config.demand_skew))
+        low, high = self.config.units_per_line or (1, 1)
+        lines: list[OrderLine] = []
+        for _ in range(num_new):
+            num_lines = 1
+            if lines_config is not None:
+                num_lines = 1 + int(self._order_rng.poisson(lines_config.mean - 1.0))
+            num_lines = min(num_lines, len(ranked))
+            ranks = self._order_rng.choice(len(ranked), size=num_lines, replace=False, p=weights)
+            delivery = self._delivery_vertices[
+                int(self._order_rng.integers(len(self._delivery_vertices)))
+            ]
+            quantities = self._order_rng.integers(low, high + 1, size=num_lines)
+            for index, (rank, quantity) in enumerate(zip(ranks, quantities)):
+                lines.append(
+                    OrderLine(
+                        t,
+                        ranked[int(rank)],
+                        delivery,
+                        order_id=self._next_order_id,
+                        line_index=index,
+                        missing=int(quantity),
+                    )
+                )
+            self._next_order_id += 1
+        return lines
 
     def _generate_tasks(self) -> list[Task]:
         """Stage 1: P_ord -> new tasks (the task definition), entering Q_t.
