@@ -74,9 +74,15 @@ class RunMetrics(BaseModel):
     # --- keeping up, eq:throughput: a check, applied first ---
     num_completed_tasks: NonNegativeInt  # |C_T|
     throughput: NonNegativeFloat  # Lambda_T = |C_T| / T
-    keep_up_ratio: NonNegativeFloat  # Lambda_T / lambda_task
-    # Lambda_T >= f_up * lambda_task; None iff f_up (keep_up_threshold) is
-    # not configured, since tab:evalparams leaves its value TBD.
+    # Lambda_T / lambda_task, throughput over the nominal rate. Reported, no longer the check.
+    keep_up_ratio: NonNegativeFloat
+    # |C_T| / (|C_T| + B_T), the share of the released tasks that finished. None iff nothing
+    # was released.
+    completed_share: NonNegativeFloat | None = None
+    # chi_T, the least-squares slope of B_t over T/2 <= t <= T, in tasks per timestep.
+    backlog_slope: float | None = None
+    # The keep-up check: completed_share >= f_up and backlog_slope <= chi_max. None unless
+    # both thresholds are configured, since tab:evalparams leaves chi_max TBD.
     keeps_up: bool | None = None
     num_waiting_tasks: NonNegativeInt  # |Q_T|
     num_active_tasks: NonNegativeInt  # |B_T|

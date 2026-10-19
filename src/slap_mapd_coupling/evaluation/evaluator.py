@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
+import numpy as np
+
 from slap_mapd_coupling.controllers.assignment import Assigner
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -158,19 +160,49 @@ def _controller_run(
     return adapter.core, step
 
 
+def completed_share(num_completed: int, backlog: int) -> float | None:
+    """|C_T| / (|C_T| + B_T), the share of the released tasks that finished. None when
+    nothing was released."""
+    released = num_completed + backlog
+    return num_completed / released if released else None
+
+
+def backlog_slope(backlog_by_t: Sequence[int]) -> float | None:
+    """chi_T, the slope of a least-squares line through B_t over the second half of the run,
+    T/2 <= t <= T, where entry t of `backlog_by_t` is B_t. None with fewer than two points."""
+    horizon = len(backlog_by_t) - 1
+    t = np.arange(-(-horizon // 2), horizon + 1)  # ceil(T/2) .. T
+    if len(t) < 2:
+        return None
+    return float(np.polyfit(t, np.asarray(backlog_by_t, dtype=float)[t], 1)[0])
+
+
+def keeps_up(
+    share: float | None,
+    slope: float | None,
+    keep_up_threshold: float | None,
+    backlog_slope_max: float | None,
+) -> bool | None:
+    """The keep-up check, share >= f_up and slope <= chi_max. None unless both thresholds
+    are set and both measures exist."""
+    if None in (share, slope, keep_up_threshold, backlog_slope_max):
+        return None
+    assert share is not None and slope is not None  # narrowed by the check above
+    assert keep_up_threshold is not None and backlog_slope_max is not None
+    return share >= keep_up_threshold and slope <= backlog_slope_max
+
+
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
     horizon = config.horizon
     completed = [task for task in env.tasks if task.finish_time is not None]
     num_completed = len(completed)
 
-    # Keeping up, eq:throughput.
+    # The keep-up check, against the tasks released in the run, and throughput, reported.
+    backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
+    share = completed_share(num_completed, backlog)
+    slope = backlog_slope(env.log.backlog_by_t)
     throughput = num_completed / horizon  # Lambda_T
     keep_up_ratio = throughput / config.arrival_rate
-    keeps_up = (
-        None
-        if config.keep_up_threshold is None
-        else throughput >= config.keep_up_threshold * config.arrival_rate
-    )
 
     # The result and its split, eq:meanservice / eq:split. After assignment
     # an agent either moves or stands still at every timestep, and every
@@ -199,7 +231,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     # Under the arrival model, orders released and still waiting for stock. They count in B_T.
     # Always 0 under the template model.
     num_waiting_orders = len(env.waiting_orders)
-    backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
 
     # The mean crowding: the mean of delta_i(t) over agents and
     # timesteps, recorded every timestep for every controller.
@@ -256,7 +287,9 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         num_completed_tasks=num_completed,
         throughput=throughput,
         keep_up_ratio=keep_up_ratio,
-        keeps_up=keeps_up,
+        completed_share=share,
+        backlog_slope=slope,
+        keeps_up=keeps_up(share, slope, config.keep_up_threshold, config.backlog_slope_max),
         num_waiting_tasks=num_waiting,
         num_active_tasks=num_active,
         backlog=backlog,
