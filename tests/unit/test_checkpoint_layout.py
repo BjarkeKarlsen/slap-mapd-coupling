@@ -73,6 +73,7 @@ def _tiny_algo():
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     hyperparameters = PPOHyperparameters(

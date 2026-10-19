@@ -177,6 +177,7 @@ _EPISODE_KEY_NAMES = (
     "return_shaping",
     "return_deliver",
     "return_override",
+    "return_move",
     "return_wait",
     "return_congestion",
     "override_rate",
@@ -192,6 +193,7 @@ def test_iteration_record_carries_the_per_episode_keys_and_null_when_no_episode_
         "return_shaping": 12.5,
         "return_deliver": np.float32(4.0),
         "return_override": -30.0,
+        "return_move": -2.5,
         "return_wait": -1.5,
         "return_congestion": 0.0,
         "override_rate": 0.125,
@@ -253,6 +255,7 @@ def _adapter(controller: str, horizon: int = 12) -> WarehouseMAPDMultiAgentEnv:
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     skus = {"tea": SkuType(sku_id="tea", unit_capacity=1.0)}
@@ -351,8 +354,11 @@ def test_on_episode_end_logs_the_terms_that_add_up_to_the_episode_return(control
     (shaping,) = logger.values["return_shaping"]
     (deliver,) = logger.values["return_deliver"]
     (override,) = logger.values["return_override"]
+    (move,) = logger.values["return_move"]
     (congestion,) = logger.values["return_congestion"]
-    assert shaping + deliver + override + congestion == pytest.approx(episode_return, abs=1e-9)
+    assert shaping + deliver + override + move + congestion == pytest.approx(
+        episode_return, abs=1e-9
+    )
     assert deliver >= 0.0 and override <= 0.0 and congestion <= 0.0
 
     log = env.core.log
@@ -389,13 +395,14 @@ def test_a_planner_run_leaves_the_reward_term_log_at_zero():
     log = env.log
     assert not (log.return_shaping_by_agent or log.return_delivery_by_agent)
     assert not (log.return_override_by_agent or log.return_congestion_by_agent)
-    assert not log.return_wait_by_agent
+    assert not (log.return_move_by_agent or log.return_wait_by_agent)
     assert not log.overrides_by_agent
     metrics = episode_metrics(env)
     for key in (
         "return_shaping",
         "return_deliver",
         "return_override",
+        "return_move",
         "return_wait",
         "return_congestion",
     ):

@@ -76,6 +76,7 @@ def _config(**overrides) -> ExperimentConfig:
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     defaults.update(overrides)
@@ -475,6 +476,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
         horizon=60,
         num_agents=4,
         wait_cost=0.2,
+        move_cost=0.1,
     )
     rollout = _random_rollout(env, 60, seed=3)
     log = env.core.log
@@ -485,6 +487,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
                 log.return_shaping_by_agent[int(aid)]
                 + log.return_delivery_by_agent[int(aid)]
                 + log.return_override_by_agent[int(aid)]
+                + log.return_move_by_agent[int(aid)]
                 + log.return_wait_by_agent[int(aid)]
                 + log.return_congestion_by_agent[int(aid)]
             )
@@ -495,6 +498,7 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
             log.return_shaping_by_agent,
             log.return_delivery_by_agent,
             log.return_override_by_agent,
+            log.return_move_by_agent,
             log.return_wait_by_agent,
             log.return_congestion_by_agent,
         )
@@ -514,6 +518,10 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
     wait = sum(log.return_wait_by_agent.values())
     assert wait < 0.0
     assert wait / -0.2 == pytest.approx(round(wait / -0.2), abs=1e-9)
+    # every realised move costs c_move, so the sum is a whole multiple of it
+    move = sum(log.return_move_by_agent.values())
+    assert move < 0.0
+    assert move / -0.1 == pytest.approx(round(move / -0.1), abs=1e-9)
 
 
 def test_the_centralised_arm_credits_every_robot_with_the_fleet_mean():

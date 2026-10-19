@@ -68,11 +68,13 @@ def test_reward_is_pure_shaping_with_no_other_terms():
         task_next=task,
         completed_task=False,
         overridden=False,
+        moved=True,
         stood_still=False,
         congestion=0.0,
         discount=0.9,
         deliver_reward=1.0,
         override_penalty=1.0,
+        move_cost=0.0,
         wait_cost=1.0,
         congestion_reward_weight=1.0,
     )
@@ -90,11 +92,13 @@ def test_deliver_reward_added_on_completion():
         location_next=4,
         task_next=None,
         overridden=False,
+        moved=False,
         stood_still=False,
         congestion=0.0,
         discount=0.9,
         deliver_reward=5.0,
         override_penalty=1.0,
+        move_cost=1.0,
         wait_cost=1.0,
         congestion_reward_weight=1.0,
     )
@@ -112,11 +116,13 @@ def test_override_penalty_subtracted():
         location_next=4,
         task_next=None,
         completed_task=False,
+        moved=False,
         stood_still=False,
         congestion=0.0,
         discount=0.9,
         deliver_reward=1.0,
         override_penalty=2.0,
+        move_cost=1.0,
         wait_cost=1.0,
         congestion_reward_weight=1.0,
     )
@@ -135,10 +141,12 @@ def test_congestion_penalty_scales_with_weight_and_value():
         task_next=None,
         completed_task=False,
         overridden=False,
+        moved=False,
         stood_still=False,
         discount=0.9,
         deliver_reward=1.0,
         override_penalty=1.0,
+        move_cost=1.0,
         wait_cost=1.0,
         congestion_reward_weight=3.0,
     )
@@ -153,8 +161,8 @@ def _bits(x: float) -> bytes:
 
 def _reference_reward(
     graph, *, location_now, task_now, location_next, task_next, completed_task, overridden,
-    stood_still, congestion, discount, deliver_reward, override_penalty, wait_cost,
-    congestion_reward_weight,
+    moved, stood_still, congestion, discount, deliver_reward, override_penalty, move_cost,
+    wait_cost, congestion_reward_weight,
 ) -> float:  # fmt: skip
     """The reward as it was written before reward_terms existed, one inline sum."""
     phi_now = potential(graph, location_now, task_now)
@@ -164,6 +172,7 @@ def _reference_reward(
         shaping
         + deliver_reward * completed_task
         - override_penalty * overridden
+        - move_cost * moved
         - wait_cost * stood_still
         - congestion_reward_weight * congestion
     )
@@ -179,11 +188,13 @@ def _cases(graph):
         task_next=towards,
         completed_task=False,
         overridden=False,
+        moved=True,
         stood_still=False,
         congestion=0.0,
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.1,
         wait_cost=0.1,
         congestion_reward_weight=0.1,
     )
@@ -198,16 +209,25 @@ def _cases(graph):
             "task_next": None,
             "completed_task": True,
             "overridden": True,
+            "moved": False,
             "congestion": 0.37,
         },
         {**base, "completed_task": True, "deliver_reward": 5.0, "congestion": 1 / 3},
         {**base, "overridden": True, "override_penalty": 2.0, "discount": 0.9},
-        {**base, "location_now": 4, "task_now": None, "location_next": 4, "task_next": None},
+        {
+            **base,
+            "location_now": 4,
+            "task_now": None,
+            "location_next": 4,
+            "task_next": None,
+            "moved": False,
+        },
+        {**base, "move_cost": 0.3, "discount": 0.97},
         {**base, "congestion": 0.1 + 0.2, "congestion_reward_weight": 3.0, "discount": 0.97},
         {**base, "overridden": True, "completed_task": True, "congestion": 0.8, "discount": 1.0},
         # standing still while serving a task, chosen or overridden
-        {**base, "location_next": 0, "stood_still": True, "wait_cost": 0.3},
-        {**base, "location_next": 0, "stood_still": True, "overridden": True},
+        {**base, "location_next": 0, "moved": False, "stood_still": True, "wait_cost": 0.3},
+        {**base, "location_next": 0, "moved": False, "stood_still": True, "overridden": True},
     ]
 
 
@@ -219,7 +239,12 @@ def test_reward_terms_sum_to_the_reward_to_the_last_bit():
         assert _bits(terms.total) == _bits(expected)
         assert _bits(reward(graph, **case)) == _bits(expected)
         assert _bits(
-            terms.shaping + terms.delivery + terms.override + terms.wait + terms.congestion
+            terms.shaping
+            + terms.delivery
+            + terms.override
+            + terms.move
+            + terms.wait
+            + terms.congestion
         ) == _bits(expected)
 
 
@@ -230,6 +255,7 @@ def test_reward_terms_hold_each_term_with_its_sign():
     assert isinstance(terms, RewardTerms)
     assert terms.delivery == pytest.approx(1.0)
     assert terms.override == pytest.approx(-0.5)
+    assert terms.move == 0.0  # the carrier stays on vertex 3
     assert terms.wait == 0.0  # it was overridden but the case does not mark it as standing still
     assert terms.congestion == pytest.approx(-0.1 * 0.37)
     # the carrier stands on the delivery vertex's neighbour and the task is done, so
@@ -239,8 +265,9 @@ def test_reward_terms_hold_each_term_with_its_sign():
 
 def test_reward_terms_are_zero_where_their_indicator_is_off():
     graph = _line_graph(5)
-    case = _cases(graph)[0]
+    case = {**_cases(graph)[0], "moved": False}
     terms = reward_terms(graph, **case)
+    assert terms.move == 0.0
     assert terms.delivery == 0.0
     assert terms.override == 0.0
     assert terms.wait == 0.0
@@ -250,7 +277,13 @@ def test_reward_terms_are_zero_where_their_indicator_is_off():
 
 def test_standing_still_while_serving_costs_the_wait_cost():
     graph = _line_graph(5)
-    case = {**_cases(graph)[0], "location_next": 0, "stood_still": True, "wait_cost": 0.3}
+    case = {
+        **_cases(graph)[0],
+        "location_next": 0,
+        "moved": False,
+        "stood_still": True,
+        "wait_cost": 0.3,
+    }
     still = reward_terms(graph, **case)
     moving = reward_terms(graph, **{**case, "stood_still": False})
     assert still.wait == pytest.approx(-0.3)
@@ -260,9 +293,19 @@ def test_standing_still_while_serving_costs_the_wait_cost():
 
 def test_an_override_costs_the_wait_cost_and_the_penalty_and_a_chosen_wait_only_the_first():
     graph = _line_graph(5)
-    base = {**_cases(graph)[0], "location_next": 0, "stood_still": True}
+    base = {**_cases(graph)[0], "location_next": 0, "moved": False, "stood_still": True}
     chosen = reward_terms(graph, **{**base, "overridden": False})
     forced = reward_terms(graph, **{**base, "overridden": True})
     assert chosen.total - forced.total == pytest.approx(0.5)  # the override penalty
     assert forced.wait == pytest.approx(chosen.wait) == pytest.approx(-0.1)
     assert forced.total < chosen.total  # yielding is never dearer than being overridden
+
+
+def test_a_move_costs_the_move_cost_whether_or_not_the_agent_serves_a_task():
+    graph = _line_graph(5)
+    serving = reward_terms(graph, **_cases(graph)[0])
+    free = {**_cases(graph)[0], "location_now": 2, "task_now": None, "location_next": 3}
+    idle = reward_terms(graph, **{**free, "task_next": None})
+    assert serving.move == pytest.approx(-0.1)
+    assert idle.move == pytest.approx(-0.1)
+    assert idle.wait == 0.0

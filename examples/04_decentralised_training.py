@@ -234,6 +234,7 @@ def build_config(
         # with the per-step shaping term outweighing a small completion bonus.
         deliver_reward=10.0,
         override_penalty=0.5,
+        move_cost=0.1,  # c_move, after van Knippenberg et al. (2021)
         congestion_reward_weight=0.1,
     )
 
