@@ -49,6 +49,41 @@ def _arms(fixed_times, adaptive_times, **adaptive_overrides):
     return fixed, adaptive
 
 
+def _split_run(seed, storage_mode, wait, travel, blocked):
+    """A run that keeps up, with its service time split into the three parts given."""
+    return _run(
+        seed,
+        wait + travel + blocked,
+        storage_mode=storage_mode,
+        mean_wait_for_agent=wait,
+        mean_travel_time=travel,
+        mean_blocked_time=blocked,
+    )
+
+
+def test_the_relative_gain_is_the_gain_over_the_route_time_under_fixed_storage():
+    # Route time under F_fix, travel plus blocked, is 8 and 12. The gains are 2 and 2.
+    fixed = [_split_run(0, "fixed", 2.0, 6.0, 2.0), _split_run(1, "fixed", 0.0, 8.0, 4.0)]
+    adaptive = [_split_run(0, "demand", 1.0, 5.0, 2.0), _split_run(1, "demand", 0.0, 7.0, 3.0)]
+    result = compare_paired(fixed, adaptive)
+    assert result.gains == pytest.approx((2.0, 2.0))
+    relative = [2.0 / 8.0, 2.0 / 12.0]
+    mean = sum(relative) / 2
+    half = stats.t.ppf(0.975, df=1) * stats.tstd(relative) / 2**0.5
+    assert result.mean_relative_gain == pytest.approx(mean)
+    assert (result.relative_ci_low, result.relative_ci_high) == pytest.approx(
+        (mean - half, mean + half)
+    )
+
+
+def test_the_relative_gain_is_unset_when_a_run_does_not_keep_up():
+    fixed, adaptive = _arms([10.0, 11.0], [9.0, 10.0])
+    adaptive[1] = _run(1, 10.0, storage_mode="demand", keeps_up=False)
+    result = compare_paired(fixed, adaptive)
+    assert result.mean_relative_gain is None
+    assert result.relative_ci_low is None and result.relative_ci_high is None
+
+
 def test_consistent_gain_shortens_service_time():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     result = compare_paired(fixed, adaptive)

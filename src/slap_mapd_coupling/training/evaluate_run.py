@@ -177,8 +177,8 @@ def evaluate_run(
 
 _SUMMARY_HEADER = (
     "| checkpoint | storage mode | seeds | all keep up | throughput F_fix | throughput mode "
-    "| service time F_fix | service time mode | mean gain | CI | shortens |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|\n"
+    "| service time F_fix | service time mode | mean gain | CI | relative gain [CI] | shortens |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
 # The columns an arrival run adds to every row: the put-away distance per update and the wait
 # for stock of both arms.
@@ -207,7 +207,7 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])
             except ValueError as error:
-                lines.append(f"| {role} | {mode} | {error} |" + " |" * (12 if arrival else 8))
+                lines.append(f"| {role} | {mode} | {error} |" + " |" * (13 if arrival else 9))
                 continue
             lines.append(_summary_row(role, result, arrival))
     return "\n".join(lines) + "\n"
@@ -217,10 +217,15 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
     def mean(summary: dict, name: str) -> str:
         return f"{summary[name].mean:.3f}" if name in summary else "n/a"
 
-    gain = ci = "n/a"
+    gain = ci = relative = "n/a"
     if result.mean_gain is not None:
         gain = f"{result.mean_gain:.3f}"
         ci = f"[{result.ci_low:.3f}, {result.ci_high:.3f}]"
+    if result.mean_relative_gain is not None:
+        relative = (
+            f"{result.mean_relative_gain:.3f} "
+            f"[{result.relative_ci_low:.3f}, {result.relative_ci_high:.3f}]"
+        )
     cells = [
         role,
         result.adaptive_storage_mode,
@@ -232,6 +237,7 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
         mean(result.adaptive_summary, "mean_service_time"),
         gain,
         ci,
+        relative,
         str(result.shortens_service_time),
     ]
     if arrival:

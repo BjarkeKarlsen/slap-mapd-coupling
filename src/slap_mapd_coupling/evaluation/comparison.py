@@ -108,6 +108,12 @@ class PairedComparison(BaseModel):
     mean_gain: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
+    # The relative gain, each seed's gain over the route time of its F_fix run, mean travel plus
+    # mean blocked time, with its interval as for the gain. Controllers are compared on it.
+    # None unless all_keep_up is True.
+    mean_relative_gain: float | None = None
+    relative_ci_low: float | None = None
+    relative_ci_high: float | None = None
     # eq:rqformal: all runs keep up and ci_low > 0.
     shortens_service_time: bool
 
@@ -174,14 +180,20 @@ def compare_paired(
         )
 
     gains = []
+    relative_gains = []
     for seed in seeds:
-        fixed_time = fixed_by_seed[seed].mean_service_time
+        fixed = fixed_by_seed[seed]
+        fixed_time = fixed.mean_service_time
         adaptive_time = adaptive_by_seed[seed].mean_service_time
-        # A run that keeps up has finished tasks, so both are set.
+        # A run that keeps up has finished tasks, so these are set.
         assert fixed_time is not None and adaptive_time is not None
-        gains.append(fixed_time - adaptive_time)
+        assert fixed.mean_travel_time is not None and fixed.mean_blocked_time is not None
+        gain = fixed_time - adaptive_time
+        gains.append(gain)
+        relative_gains.append(gain / (fixed.mean_travel_time + fixed.mean_blocked_time))
 
     mean_gain, ci_low, ci_high = _mean_and_interval(gains, confidence)
+    mean_relative, relative_low, relative_high = _mean_and_interval(relative_gains, confidence)
     return PairedComparison(
         adaptive_storage_mode=adaptive_mode,
         num_seeds=len(seeds),
@@ -193,6 +205,9 @@ def compare_paired(
         mean_gain=mean_gain,
         ci_low=ci_low,
         ci_high=ci_high,
+        mean_relative_gain=mean_relative,
+        relative_ci_low=relative_low,
+        relative_ci_high=relative_high,
         shortens_service_time=ci_low > 0.0,
     )
 
