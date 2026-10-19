@@ -174,6 +174,8 @@ class ArrivalSettings(BaseModel):
     # Order lines (tab:evalparams). None is one line of one unit per order.
     lines_per_order: LinesPerOrder | None = None
     units_per_line: tuple[PositiveInt, PositiveInt] | None = None
+    # The SKUs that count as popular in the cold-stock measure. None leaves it off.
+    cold_stock_top_k: PositiveInt | None = None
 
 
 class StockSizing(NamedTuple):
@@ -554,6 +556,7 @@ def build_experiment_config(
         stock_receiving=None if arrival is None else arrival.receiving,
         lines_per_order=None if arrival is None else arrival.lines_per_order,
         units_per_line=None if arrival is None else arrival.units_per_line,
+        cold_stock_top_k=None if arrival is None else arrival.cold_stock_top_k,
     )
 
 

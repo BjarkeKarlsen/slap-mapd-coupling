@@ -87,6 +87,9 @@ storage_rule:
 arrival:
   margin: 1.0
   receiving: delivery
+  # The cold-stock measure: a SKU outside the top 10 of the current ranking is cold, and the
+  # prime shelves are the nearest ones the starting placement gives the top 10. Evaluation only.
+  cold_stock_top_k: 10
 
 arm:
   num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)

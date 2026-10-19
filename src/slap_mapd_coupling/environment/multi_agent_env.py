@@ -225,6 +225,13 @@ class EpisodeLog:
     overflow_units_by_update: list[int] = field(default_factory=list)
     # Arrival stock model only: the SKUs held at more than one storage vertex after each arrival.
     split_skus_by_update: list[int] = field(default_factory=list)
+    # Arrival stock model with cold_stock_top_k only: after each arrival, the share of the prime
+    # shelves' capacity that holds units of SKUs outside the top k of the ranking at that step.
+    cold_prime_share_by_update: list[float] = field(default_factory=list)
+    # Arrival stock model only: the age of every unit taken for a task, summed, and the number
+    # of such units. A shelf gives up its oldest units first. Starting stock arrived at t = 0.
+    picked_unit_age_sum: int = 0
+    picked_units: int = 0
     # What each agent's episode return is made of, one running sum per term of the
     # reward (environment/reward_function.py::RewardTerms, each already signed, so the
     # six sums of an agent add up to its summed reward). overrides_by_agent counts the
@@ -314,6 +321,12 @@ class WarehouseMAPDEnv:
                 raise ValueError(
                     f"SKUs {missing} start with no units, so F_fix has no home shelf for them."
                 )
+        # The prime shelves of the cold-stock measure, empty while it is off.
+        self._prime_shelves: list[VertexId] = []
+        if config.cold_stock_top_k is not None:
+            self._prime_shelves = _prime_shelves(
+                graph, list(self._storage_capacities), len(self._skus), config.cold_stock_top_k
+            )
 
         self.fleet: FleetState
         self.tasks: list[Task]
@@ -377,6 +390,14 @@ class WarehouseMAPDEnv:
             capacities=self._storage_capacities,
             counts=self._initial_counts,
         )
+        # Arrival stock model only: the units on each shelf as [arrival step, units] lots, oldest
+        # first, for the age of a unit when it is picked. Never read by the simulation.
+        self._lots: dict[tuple[SkuId, VertexId], list[list[int]]] = {
+            (sku_id, v): [[0, count]]
+            for sku_id, per_vertex in self._initial_counts.items()
+            for v, count in per_vertex.items()
+            if count > 0
+        }
         self._t = 0
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
@@ -564,12 +585,56 @@ class WarehouseMAPDEnv:
             estimates.waiting,
             self.config.congestion_weight,
         )
+        arrival_t = self._t + 1  # stage 6 runs before t advances
+        for sku_id, per_vertex in result.storage.counts.items():
+            before = self.storage.counts.get(sku_id, {})
+            for v, count in per_vertex.items():
+                if count > before.get(v, 0):
+                    self._lots.setdefault((sku_id, v), []).append(
+                        [arrival_t, count - before.get(v, 0)]
+                    )
         self.storage = result.storage
+        if self.config.cold_stock_top_k is not None:
+            self.log.cold_prime_share_by_update.append(self._cold_prime_share(arrival_t))
         self.log.putaway_distance_by_update.append(result.putaway_distance)
         self.log.arrived_units_by_update.append(result.arrived_units)
         self.log.unplaced_units_by_update.append(result.unplaced_units)
         self.log.overflow_units_by_update.append(result.overflow_units)
         self.log.split_skus_by_update.append(_split_skus(self.storage))
+
+    def _cold_prime_share(self, t: int) -> float:
+        """The share of the prime shelves' capacity that holds units of SKUs outside the top
+        cold_stock_top_k of the popularity ranking at step t."""
+        assert self.config.cold_stock_top_k is not None
+        ranked = popularity_ranking(
+            self._sku_ids,
+            t,
+            self.config.demand_rotation_period,
+            self.config.demand_rotation_shift,
+        )
+        popular = set(ranked[: self.config.cold_stock_top_k])
+        prime = set(self._prime_shelves)
+        cold = sum(
+            count * self._skus[sku_id].unit_capacity
+            for sku_id, per_vertex in self.storage.counts.items()
+            if sku_id not in popular
+            for v, count in per_vertex.items()
+            if v in prime
+        )
+        return cold / sum(self._storage_capacities[v] for v in prime)
+
+    def _take_units(self, sku_id: SkuId, vertex: VertexId, units: int, t: int) -> None:
+        """Take `units` from the shelf's lots, oldest first, and log their ages. Units with no
+        lot, which only a test that sets the stock by hand leaves, are not counted."""
+        lots = self._lots.get((sku_id, vertex), [])
+        while units and lots:
+            taken = min(units, lots[0][1])
+            self.log.picked_unit_age_sum += taken * (t - lots[0][0])
+            self.log.picked_units += taken
+            lots[0][1] -= taken
+            units -= taken
+            if not lots[0][1]:
+                lots.pop(0)
 
     def _release_and_assign(self) -> None:
         """Stage 1 (orders become tasks entering Q_t) and stage 2 (the shared greedy
@@ -638,6 +703,7 @@ class WarehouseMAPDEnv:
                 quantity = min(missing, per_vertex[pickup])
                 per_vertex[pickup] -= quantity
                 missing -= quantity
+                self._take_units(line.sku, pickup, quantity, t)
                 task = Task(
                     task_id=self._next_task_id,
                     release_time=line.release_time,
@@ -931,6 +997,21 @@ def _home_shelves(counts: Mapping[SkuId, Mapping[VertexId, int]]) -> dict[SkuId,
         if held:
             home[sku_id] = min(held)[1]
     return home
+
+
+def _prime_shelves(
+    graph: WarehouseGraph, storage_vertices: list[VertexId], num_skus: int, top_k: int
+) -> list[VertexId]:
+    """The prime shelves of the cold-stock measure: the storage vertices nearest the delivery
+    vertices on average, ties by vertex id, the order the starting placement fills them in. As
+    many as hold the top_k SKUs when each holds ceil(|K| / |V_str|) of them."""
+    delivery = [v for v, vertex in graph.vertices.items() if vertex.role.delivery]
+    nearest_first = sorted(
+        storage_vertices,
+        key=lambda v: (sum(graph.distance(v, g) for g in delivery), v),  # the mean, times |D|
+    )
+    block = -(-num_skus // len(nearest_first))  # SKUs per vertex, the ceiling in integers
+    return nearest_first[: min(len(nearest_first), -(-top_k // block))]
 
 
 def _split_skus(storage: StorageState) -> int:
