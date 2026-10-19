@@ -40,7 +40,7 @@ def main() -> None:
         default_edge_cost=1.0,
         random_edge_costs=False,
         edge_cost_range=(0.5, 2.0),
-        wait_cost=5.0,
+        wait_cost=0.2,
         num_storage_vertices=4,
         num_delivery_vertices=4,
         num_endpoints=fleet_size,
