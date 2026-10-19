@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.evaluation.comparison import compare_paired
+from slap_mapd_coupling.environment.multi_agent_env import _prime_shelves
 from slap_mapd_coupling.evaluation.evaluator import _planner_run, _to_run_metrics
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
 from slap_mapd_coupling.training.evaluate_run import build_test_study
@@ -300,7 +301,13 @@ def test_there_is_an_arrival_config_for_every_medium_config():
 def test_an_arrival_config_differs_from_its_medium_namesake_in_the_stock_only(path):
     arrival = load_spec(path).model_dump()
     template = load_spec(ROOT / "configs" / "medium" / path.name).model_dump()
-    assert arrival.pop("arrival") == {"margin": 1.0, "receiving": "delivery"}
+    assert arrival.pop("arrival") == {
+        "margin": 1.0,
+        "receiving": "delivery",
+        "lines_per_order": None,
+        "units_per_line": None,
+        "cold_stock_top_k": 10,
+    }
     assert template.pop("arrival") is None
     assert arrival["storage"].pop("initial_placement") == "demand_sized_blocks"
     template["storage"].pop("initial_placement")
@@ -375,3 +382,69 @@ def test_a_template_test_study_has_the_training_stock_at_any_load():
     assert test_study.skus == study.skus
     assert test_study.instance.graph == study.instance.graph
     assert test_study.arm.zones == study.arm.zones
+
+
+# The cold-stock measure
+
+
+def test_the_prime_shelves_are_the_nearest_the_top_k_fill():
+    study = build_study(_spec())
+    graph = study.instance.graph
+    storage = list(study.capacities)
+    delivery = [v for v, x in graph.vertices.items() if x.role.delivery]
+    nearest = min(storage, key=lambda v: (sum(graph.distance(v, g) for g in delivery), v))
+    # 100 SKUs on 10 shelves is 10 SKUs a shelf, so the top 10 fill one shelf and the top 11 two.
+    assert _prime_shelves(graph, storage, 100, 10) == [nearest]
+    assert len(_prime_shelves(graph, storage, 100, 11)) == 2
+    assert len(_prime_shelves(graph, storage, 100, 1000)) == len(storage)
+
+
+def test_the_cold_share_counts_skus_outside_the_top_k_on_the_prime_shelves():
+    env, config = _episode(_spec(), "fixed", 1)
+    env.config = config.model_copy(update={"cold_stock_top_k": 10})
+    env._prime_shelves = _prime_shelves(env.graph, list(env._storage_capacities), 100, 10)
+    (prime,) = env._prime_shelves
+    ranked = env._sku_ids  # no rotation before the first period
+    hot, cold = ranked[0], ranked[50]
+    counts = {k: {} for k in env.storage.counts}
+    counts[hot] = {prime: 4}
+    counts[cold] = {prime: 6}
+    env.storage = env.storage.model_copy(update={"counts": counts})
+    volume = 6 * env._skus[cold].unit_capacity
+    assert env._cold_prime_share(1) == pytest.approx(volume / env._storage_capacities[prime])
+
+
+def test_a_shelf_gives_up_its_oldest_units_first_and_logs_their_age():
+    env, _ = _episode(_spec(), "fixed", 1)
+    env.log.picked_unit_age_sum = env.log.picked_units = 0
+    env._lots[("sku_000", 7)] = [[0, 2], [100, 3]]
+    env._take_units("sku_000", 7, 4, 150)
+    # Two units of age 150, then two of age 50.
+    assert (env.log.picked_unit_age_sum, env.log.picked_units) == (2 * 150 + 2 * 50, 4)
+    assert env._lots[("sku_000", 7)] == [[100, 1]]
+
+
+def test_an_arrival_episode_reports_the_cold_stock_measures():
+    spec = _spec()
+    data = spec.model_dump()
+    data["arrival"]["cold_stock_top_k"] = 10
+    env, config = _episode(type(spec).model_validate(data), "demand", 2 * DELTA + 10)
+    metrics = _to_run_metrics(env, config)
+    shares = env.log.cold_prime_share_by_update
+    assert len(shares) == metrics.num_storage_updates == 2
+    assert metrics.mean_cold_prime_share == pytest.approx(sum(shares) / 2)
+    assert env.log.picked_units > 0
+    assert metrics.mean_unit_age_at_pick == pytest.approx(
+        env.log.picked_unit_age_sum / env.log.picked_units
+    )
+
+
+def test_without_top_k_the_cold_share_is_off_and_the_template_keeps_the_defaults():
+    env, config = _episode(_spec(), "fixed", DELTA + 10)
+    assert _to_run_metrics(env, config).mean_cold_prime_share is None
+    spec = load_spec(ROOT / "configs" / "medium" / "decentralised.yaml")
+    env, config = _episode(spec, "fixed", 50)
+    metrics = _to_run_metrics(env, config)
+    assert metrics.mean_cold_prime_share is None and metrics.mean_unit_age_at_pick is None
+    with pytest.raises(ValidationError, match="only applies"):
+        ExperimentConfig.model_validate({**config.model_dump(), "cold_stock_top_k": 10})

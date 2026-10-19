@@ -115,6 +115,11 @@ class ExperimentConfig(BaseModel):
     # one unit, the order before lines existed. arrival_rate stays lines per timestep.
     lines_per_order: LinesPerOrder | None = None
     units_per_line: tuple[PositiveInt, PositiveInt] | None = None
+    # The cold-stock measure, arrival model only, evaluation only. A SKU is popular while it is
+    # among the top cold_stock_top_k of the current popularity ranking. The prime shelves are
+    # the storage vertices nearest the delivery vertices on average, as many as the starting
+    # placement fills with the top cold_stock_top_k SKUs. None leaves the measure off.
+    cold_stock_top_k: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -143,7 +148,7 @@ class ExperimentConfig(BaseModel):
         if self.units_per_line is not None and self.units_per_line[0] > self.units_per_line[1]:
             raise ValueError(f"units_per_line = {self.units_per_line} must be (low, high).")
         if self.stock_model == "template":
-            for name in ("lines_per_order", "units_per_line"):
+            for name in ("lines_per_order", "units_per_line", "cold_stock_top_k"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")
             for name in stock:
@@ -172,6 +177,8 @@ class ExperimentConfig(BaseModel):
                 raise ValueError("demand_rotation_period requires demand_rotation_shift.")
         elif self.demand_rotation_shift is not None:
             raise ValueError("demand_rotation_shift requires demand_rotation_period.")
+        if self.cold_stock_top_k is not None and self.demand_skew is None:
+            raise ValueError("cold_stock_top_k needs a popularity ranking, so demand_skew.")
         return self
 
     @model_validator(mode="after")

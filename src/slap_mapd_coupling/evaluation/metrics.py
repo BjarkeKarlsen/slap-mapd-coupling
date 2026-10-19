@@ -46,7 +46,14 @@ _ORDER_FIELDS = (
     "mean_tasks_per_line",
     "num_lines_waited",
 )
-_ARRIVAL_FIELDS = ("mean_stock_wait", "num_waiting_orders", *_PUTAWAY_FIELDS, *_ORDER_FIELDS)
+_COLD_STOCK_FIELDS = ("mean_cold_prime_share", "mean_unit_age_at_pick")
+_ARRIVAL_FIELDS = (
+    "mean_stock_wait",
+    "num_waiting_orders",
+    *_PUTAWAY_FIELDS,
+    *_ORDER_FIELDS,
+    *_COLD_STOCK_FIELDS,
+)
 
 
 class RunMetrics(BaseModel):
@@ -150,6 +157,15 @@ class RunMetrics(BaseModel):
     unplaced_units: NonNegativeInt = 0  # arriving units that fit on no shelf, over the episode
     # Units F_fix placed off their SKU's home shelf, over the episode. 0 under the adaptive rules.
     overflow_units: NonNegativeInt = 0
+
+    # --- cold stock, arrival stock model only, evaluation only ---
+    # The share of the prime shelves' capacity that holds SKUs no longer among the top
+    # cold_stock_top_k, averaged over arrivals. None unless cold_stock_top_k is set and an
+    # arrival happened.
+    mean_cold_prime_share: NonNegativeFloat | None = Field(default=None, le=1.0)
+    # The steps a unit had been on its shelf when it was taken for a task, averaged over the
+    # units taken. A shelf gives up its oldest units first. None if no unit was taken.
+    mean_unit_age_at_pick: NonNegativeFloat | None = None
 
     # --- controller cost, eq:runtime ---
     mean_decision_runtime_seconds: NonNegativeFloat  # kappa_T
