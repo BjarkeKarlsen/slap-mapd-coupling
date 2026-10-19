@@ -82,6 +82,7 @@ TERM_COLOURS = {
     "shaping": "#e87ba4",
     "deliver": "#008300",
     "override": "#e34948",
+    "move": "#2b9fb3",
     "wait": "#d9902b",
     "congestion": "#6250d6",
 }

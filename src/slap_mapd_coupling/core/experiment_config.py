@@ -72,6 +72,7 @@ class ExperimentConfig(BaseModel):
     discount: PositiveFloat | None = None  # gamma, learning objective
     deliver_reward: NonNegativeFloat | None = None  # n_deliver, reward
     override_penalty: NonNegativeFloat | None = None  # n_blocked, reward
+    move_cost: NonNegativeFloat | None = None  # c_move, reward
     congestion_reward_weight: NonNegativeFloat | None = None  # n_cng, reward
 
     # The order distribution P_ord (sec:pf:tasks). Without a skew the SKU of an order is drawn
@@ -166,6 +167,7 @@ class ExperimentConfig(BaseModel):
                 "discount",
                 "deliver_reward",
                 "override_penalty",
+                "move_cost",
                 "congestion_reward_weight",
             ):
                 if getattr(self, name) is None:

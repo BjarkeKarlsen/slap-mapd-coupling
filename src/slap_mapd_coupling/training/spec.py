@@ -174,6 +174,7 @@ class ExperimentSettings(BaseModel):
     discount: PositiveFloat
     deliver_reward: NonNegativeFloat
     override_penalty: NonNegativeFloat
+    move_cost: NonNegativeFloat
     congestion_reward_weight: NonNegativeFloat
     congestion_sensitive: bool = False
     seed: int = 0
@@ -504,6 +505,7 @@ def build_experiment_config(
         discount=experiment.discount,
         deliver_reward=experiment.deliver_reward,
         override_penalty=experiment.override_penalty,
+        move_cost=experiment.move_cost,
         congestion_reward_weight=experiment.congestion_reward_weight,
         demand_skew=None if demand is None else demand.skew,
         demand_rotation_period=None if demand is None else demand.rotation_period,

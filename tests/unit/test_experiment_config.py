@@ -54,6 +54,7 @@ def _reward_kwargs(**overrides) -> dict:
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     defaults.update(overrides)
@@ -72,7 +73,8 @@ def test_decentralised_controller_with_reward_parameters_is_valid():
 
 @pytest.mark.parametrize("controller", ["centralised", "section", "decentralised"])
 @pytest.mark.parametrize(
-    "missing", ["discount", "deliver_reward", "override_penalty", "congestion_reward_weight"]
+    "missing",
+    ["discount", "deliver_reward", "override_penalty", "move_cost", "congestion_reward_weight"],
 )
 def test_every_controller_requires_every_reward_parameter(controller, missing):
     """All three architectures learn from the same reward (sec:method:rl)."""

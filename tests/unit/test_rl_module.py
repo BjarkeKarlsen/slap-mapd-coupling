@@ -82,6 +82,7 @@ def test_gnn_action_masking_module_builds_and_masks_illegal_logits(communication
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     encoded = encode_all_observations(graph, fleet, [], 0, config, enc_config, d_max)
@@ -130,6 +131,7 @@ def _two_robot_batch(graph, enc_config, communication, d_max, pooling="none"):
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     encoded = encode_all_observations(

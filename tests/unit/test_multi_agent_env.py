@@ -1,5 +1,7 @@
 """Unit tests for slap_mapd_coupling.environment.multi_agent_env."""
 
+import random
+
 import pytest
 
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
@@ -258,6 +260,7 @@ def _decentralised_config(**overrides) -> ExperimentConfig:
         discount=0.99,
         deliver_reward=1.0,
         override_penalty=0.5,
+        move_cost=0.0,
         congestion_reward_weight=0.1,
     )
     defaults.update(overrides)
@@ -385,6 +388,31 @@ def test_every_arm_gets_a_reward_when_a_robot_delivers(controller):
             break
     assert delivered_reward is not None  # the fixture does deliver within the horizon
     assert delivered_reward > 50.0  # the delivery bonus, less at most the other terms
+
+
+def test_only_a_realised_move_pays_the_move_cost():
+    """A robot that moves pays c_move. One that chose to wait, or whose move conflict
+    resolution turned into a wait, pays nothing for moving."""
+    graph = _graph()
+    env = _env(graph, _decentralised_config(horizon=60, move_cost=0.3))
+    env.reset()
+    rng = random.Random(0)
+    seen = set()
+    for _ in range(59):
+        before = env.fleet.locations()
+        paid_before = dict(env.log.return_move_by_agent)
+        slots = {aid: rng.randrange(len(graph.legal_actions(v))) for aid, v in before.items()}
+        env.step(slots)
+        after = env.fleet.locations()
+        for aid in env.fleet.agents:
+            paid = env.log.return_move_by_agent.get(aid, 0.0) - paid_before.get(aid, 0.0)
+            if after[aid] != before[aid]:
+                seen.add("moved")
+                assert paid == pytest.approx(-0.3)
+            else:
+                seen.add("overridden" if aid in env.last_overridden else "waited")
+                assert paid == 0.0
+    assert seen == {"moved", "waited", "overridden"}
 
 
 def test_congestion_by_agent_equals_the_observation_builders_value():
