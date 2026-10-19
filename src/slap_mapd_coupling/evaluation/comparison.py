@@ -15,6 +15,11 @@ A run that does not keep up is not compared on service time
 unset because f_up is not configured, makes the comparison undecided
 rather than counting as a loss or a win. An unset check shows as
 all_keep_up = None, distinct from False for a run that falls behind.
+
+Runs of the arrival stock model (thesis wording pending) also report the
+put-away measures and the wait for stock. A template run and an arrival run
+are never a pair, and a comparison of template runs reports exactly what it
+did before the arrival model existed.
 """
 
 from __future__ import annotations
@@ -38,6 +43,9 @@ _MATCHED_FIELDS = (
     "horizon",
     # The window: runs with different fields of view are not a pair.
     "observation_depth",
+    # Template runs relocate stock that never runs out and arrival runs put away arriving stock,
+    # so a run of one model is not a pair with a run of the other.
+    "stock_model",
 )
 
 # Every scored quantity of sec:pf:measures that is a number per run. Each is
@@ -59,6 +67,12 @@ _SERVICE_QUANTITIES = (
     "mean_travel_time",
     "mean_blocked_time",
 )
+# The arrival stock model's own quantities. They are scored only when the runs are arrival
+# runs, since a template run has no put-away and no wait for stock. The put-away measures are
+# set for every run. The wait for stock is a part of the wait for an agent and, like it, exists
+# only for runs that finished a task, so it joins the service quantities.
+_ARRIVAL_SCORED_QUANTITIES = ("mean_putaway_distance", "mean_split_skus")
+_ARRIVAL_SERVICE_QUANTITIES = ("mean_stock_wait",)
 
 
 class Interval(BaseModel):
@@ -140,7 +154,11 @@ def compare_paired(
     else:
         all_keep_up = all(run.keeps_up for run in all_runs)
 
-    names = _SCORED_QUANTITIES + (_SERVICE_QUANTITIES if all_keep_up else ())
+    # Every pair agrees on the stock model (_MATCHED_FIELDS), so the first run tells it.
+    arrival = fixed_by_seed[seeds[0]].stock_model == "arrival"
+    names = _SCORED_QUANTITIES + (_ARRIVAL_SCORED_QUANTITIES if arrival else ())
+    if all_keep_up:
+        names += _SERVICE_QUANTITIES + (_ARRIVAL_SERVICE_QUANTITIES if arrival else ())
     fixed_summary = _summarise([fixed_by_seed[seed] for seed in seeds], names, confidence)
     adaptive_summary = _summarise([adaptive_by_seed[seed] for seed in seeds], names, confidence)
 
