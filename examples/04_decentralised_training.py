@@ -121,9 +121,9 @@ FLEET_SIZE = 3
 # can finish a little under the nominal count, and a threshold of 0.9 failed healthy Token Passing
 # runs (2 of 6 seeds at 0.15 and 3 of 6 at 0.25) where 0.8 passed them all.
 KEEP_UP_THRESHOLD = 0.8
-# Illustrative. The thesis leaves the wait cost c_wait open. One value, used by the
+# The wait cost c_wait, after van Knippenberg et al. (2021). One value, used by the
 # generated graph and by the experiment config, because it is one study parameter.
-WAIT_COST = 0.1
+WAIT_COST = 0.2
 # Illustrative. The default arrival rate, in tasks per step. About 80% of the capacity Token
 # Passing reaches on this instance (about 0.3), so the arms are loaded but can keep up. Earlier
 # runs used 1.0 (far above capacity) and 0.15 (too light to tell the arms apart).
@@ -169,7 +169,7 @@ def build_generated_instance() -> GeneratedInstance:
         max_num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        random_edge_costs=True,
+        random_edge_costs=False,
         edge_cost_range=(0.5, 2.0),
         wait_cost=WAIT_COST,
         num_storage_vertices=4,

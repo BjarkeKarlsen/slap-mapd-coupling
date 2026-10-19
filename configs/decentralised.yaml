@@ -19,7 +19,7 @@ horizon: 630
 
 experiment:
   num_agents: 3
-  wait_cost: 0.1            # c_wait, one value for the graph and the reward
+  wait_cost: 0.2            # c_wait, one value for the graph and the reward, after van Knippenberg et al. (2021)
   keep_up_threshold: 0.8    # f_up of eq:throughput
   observation_depth: 5      # d_obs
   discount: 0.99            # gamma
@@ -39,7 +39,7 @@ instance:
   max_num_cross_aisles: 6
   one_way_fraction: 0.0
   default_edge_cost: 1.0
-  random_edge_costs: true
+  random_edge_costs: false
   edge_cost_range: [0.5, 2.0]
   num_storage_vertices: 4
   num_delivery_vertices: 4

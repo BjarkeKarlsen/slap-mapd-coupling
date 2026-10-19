@@ -27,7 +27,7 @@ def show_experiment_configs() -> None:
         arrival_rate=1.0,
         seed=0,
         horizon=1000,
-        wait_cost=0.5,
+        wait_cost=0.2,
         observation_depth=illustrative_observation_depth,
     )
 

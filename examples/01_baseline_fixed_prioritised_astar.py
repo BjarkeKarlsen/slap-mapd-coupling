@@ -49,7 +49,7 @@ def _instance_params() -> GeneratorParams:
         num_cross_aisles=3,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
+        wait_cost=0.2,
         num_storage_vertices=8,
         num_delivery_vertices=3,
         num_endpoints=FLEET_SIZE,
@@ -106,7 +106,7 @@ def build_config(seed: int) -> ExperimentConfig:
         arrival_rate=ILLUSTRATIVE_ARRIVAL_RATE,
         seed=seed,
         horizon=ILLUSTRATIVE_HORIZON,
-        wait_cost=0.5,
+        wait_cost=0.2,
         observation_depth=ILLUSTRATIVE_OBSERVATION_DEPTH,
     )
 

@@ -22,6 +22,7 @@ from slap_mapd_coupling.training.spec import (
     StockSizing,
     StorageRuleSettings,
     build_experiment_config,
+    build_instance,
     build_storage,
     build_study,
     load_spec,
@@ -333,6 +334,16 @@ def test_an_arrival_config_builds_a_study_and_plays_every_rule(path):
 
 
 # The test stock of another load
+
+
+@pytest.mark.parametrize("path", ARRIVAL_CONFIGS, ids=lambda path: path.stem)
+def test_an_arrival_instance_has_unit_edge_costs_and_the_wait_cost_of_van_knippenberg(path):
+    """Every edge costs 1 and c_wait is 0.2, after van Knippenberg et al. (2021)."""
+    spec = load_spec(path)
+    graph = build_instance(spec).graph
+    assert {edge.cost for edge in graph.edges} == {1.0}
+    assert spec.experiment.wait_cost == 0.2
+    assert graph.wait_cost == 0.2
 
 
 def test_the_test_study_sizes_its_stock_at_the_load_it_plays():

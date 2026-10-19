@@ -45,7 +45,7 @@ def build_instance() -> WarehouseGraph:
         num_cross_aisles=3,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        wait_cost=0.5,
+        wait_cost=0.2,
         num_storage_vertices=8,
         num_delivery_vertices=3,
         num_endpoints=FLEET_SIZE,
@@ -82,7 +82,7 @@ def build_config(storage_mode: StorageMode, seed: int) -> ExperimentConfig:
         arrival_rate=0.1,
         seed=seed,
         horizon=150,
-        wait_cost=0.5,
+        wait_cost=0.2,
         observation_depth=ILLUSTRATIVE_OBSERVATION_DEPTH,
     )
     if storage_mode == "fixed":
