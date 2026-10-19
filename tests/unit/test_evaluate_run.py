@@ -293,7 +293,11 @@ def test_a_template_summary_keeps_its_columns(tmp_path, fake_episodes, monkeypat
     assert lines[2:4] == header
     rows = [line for line in lines if line.startswith("| chosen") or line.startswith("| last")]
     assert len(rows) == 2
-    assert all(len(_cells(row)) == 11 for row in rows)
+    assert all(len(_cells(row)) == 12 for row in rows)
+    # Every F_fix run takes 10 steps, 5 of them travel and blocked, so the relative gain is
+    # the gain over 5.
+    chosen = _cells(rows[0])
+    assert chosen[10].startswith(f"{float(chosen[8]) / 5:.3f} [")
     assert "putaway" not in "\n".join(lines) and "stock wait" not in "\n".join(lines)
 
 
@@ -303,8 +307,8 @@ def test_an_arrival_summary_adds_putaway_stock_wait_and_order_completion(
     fake_episodes([3, 9])
     lines = _summary_of(tmp_path, monkeypatch, _arrival_metrics, ARRIVAL_CONFIG)
     header = _cells(lines[2])
-    assert len(header) == 16 and len(_cells(lines[3])) == 16
-    assert header[11:] == [
+    assert len(header) == 17 and len(_cells(lines[3])) == 17
+    assert header[12:] == [
         "putaway per update F_fix",
         "putaway per update mode",
         "stock wait F_fix",
@@ -313,7 +317,7 @@ def test_an_arrival_summary_adds_putaway_stock_wait_and_order_completion(
     ]
     chosen = _cells(next(line for line in lines if line.startswith("| chosen")))
     assert chosen[:2] == ["chosen", "demand"]
-    assert chosen[11:] == ["110.000", "54.000", "1.000", "0.500", "12.000 / 9.000"]
+    assert chosen[12:] == ["110.000", "54.000", "1.000", "0.500", "12.000 / 9.000"]
 
 
 def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episodes, monkeypatch):
