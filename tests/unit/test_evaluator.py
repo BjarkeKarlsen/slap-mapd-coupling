@@ -129,6 +129,17 @@ def test_keeps_up_checks_the_completed_share_and_the_backlog_slope():
     )
 
 
+def test_stalled_compares_the_longest_stand_still_with_the_stall_length():
+    unset = _run(_graph(), _config(horizon=40, arrival_rate=1.5))
+    assert unset.stalled is None
+    longest = unset.longest_stand_still
+    assert longest > 0
+    at_longest = _config(horizon=40, arrival_rate=1.5, stall_length=longest)
+    assert _run(_graph(), at_longest).stalled is False
+    shorter = _config(horizon=40, arrival_rate=1.5, stall_length=max(longest - 1, 1))
+    assert _run(_graph(), shorter).stalled is (longest > 1)
+
+
 def test_completed_share_counts_the_released_tasks():
     assert completed_share(336, 378 - 336) == 336 / 378
     assert completed_share(0, 0) is None

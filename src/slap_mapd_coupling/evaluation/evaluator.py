@@ -201,6 +201,8 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
     share = completed_share(num_completed, backlog)
     slope = backlog_slope(env.log.backlog_by_t)
+    # Stalls: the longest time an agent holding a task stood still in a row.
+    longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
     throughput = num_completed / horizon  # Lambda_T
     keep_up_ratio = throughput / config.arrival_rate
 
@@ -290,6 +292,8 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         completed_share=share,
         backlog_slope=slope,
         keeps_up=keeps_up(share, slope, config.keep_up_threshold, config.backlog_slope_max),
+        longest_stand_still=longest_stand_still,
+        stalled=None if config.stall_length is None else longest_stand_still > config.stall_length,
         num_waiting_tasks=num_waiting,
         num_active_tasks=num_active,
         backlog=backlog,

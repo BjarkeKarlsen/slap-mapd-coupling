@@ -66,6 +66,9 @@ class ExperimentConfig(BaseModel):
     # Token Passing load sweep. RunMetrics.keeps_up stays unset unless both are given.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
     backlog_slope_max: float | None = None
+    # The stall length (tab:evalparams), TBD. An episode in which an agent holding a task stands
+    # still longer than this is a stall. None leaves RunMetrics.stalled unset.
+    stall_length: PositiveInt | None = None
 
     # Reward and learning objective (tab:rlparams, sec:method:rl). Required for
     # every controller, since all three learn from the same reward. A planner

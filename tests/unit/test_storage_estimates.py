@@ -315,6 +315,18 @@ def test_a_chosen_wait_is_charged_to_the_next_edge_of_the_shortest_route():
     assert env.log.blocked_ticks_by_task == {1: 1}
 
 
+def test_a_move_ends_a_run_of_blocked_ticks_and_the_longest_run_is_kept():
+    # Blocked for 3 ticks, one move from the hub to 1, then blocked for 5 ticks.
+    env, _ = _diamond_env({1: 0}, [_task(1, 1)])
+    for _ in range(3):
+        env.step({1: 0})
+    env.step({1: _move(env, 1, 1)})
+    for _ in range(5):
+        env.step({1: 0})
+    assert env.log.blocked_ticks_by_task == {1: 8}
+    assert env.log.longest_blocked_run_by_task == {1: 5}
+
+
 def test_after_pickup_the_wait_is_charged_towards_the_delivery_vertex():
     env, _ = _diamond_env({1: 0}, [_task(1, 1, picked_up=True)])
     env.step({1: 0})

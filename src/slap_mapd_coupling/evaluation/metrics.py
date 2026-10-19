@@ -84,6 +84,11 @@ class RunMetrics(BaseModel):
     # The keep-up check: completed_share >= f_up and backlog_slope <= chi_max. None unless
     # both thresholds are configured, since tab:evalparams leaves chi_max TBD.
     keeps_up: bool | None = None
+    # The longest run of consecutive blocked ticks of any task, finished or still active at T.
+    longest_stand_still: NonNegativeInt = 0
+    # longest_stand_still > the stall length, a jam the fleet may have caught up from. None
+    # unless the stall length is configured, since tab:evalparams leaves it TBD.
+    stalled: bool | None = None
     num_waiting_tasks: NonNegativeInt  # |Q_T|
     num_active_tasks: NonNegativeInt  # |B_T|
     # Arrival stock model only: orders released and still waiting for a unit of their SKU at

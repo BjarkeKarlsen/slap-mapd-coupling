@@ -9,7 +9,7 @@ from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuType
-from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
+from slap_mapd_coupling.environment.multi_agent_env import EpisodeLog, WarehouseMAPDEnv
 from slap_mapd_coupling.environment.observation import build_observation
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 from slap_mapd_coupling.planners import PrioritisedAStarPlanner
@@ -446,3 +446,17 @@ def test_crowding_log_has_one_entry_per_timestep_and_sums_the_mapping():
     _step(env)  # the step that ends the episode logs nothing
     assert env.t == 6
     assert len(env.log.crowding_sum_by_t) == 6  # horizon entries
+
+
+def test_the_log_keeps_the_longest_run_of_blocked_ticks_per_task():
+    log = EpisodeLog()
+    for _ in range(3):
+        log.record_blocked_tick(1)
+    log.record_moving_tick(1)
+    for _ in range(5):
+        log.record_blocked_tick(1)
+    log.record_moving_tick(1)
+    log.record_blocked_tick(1)
+    log.record_blocked_tick(2)
+    assert log.blocked_ticks_by_task == {1: 9, 2: 1}
+    assert log.longest_blocked_run_by_task == {1: 5, 2: 1}
