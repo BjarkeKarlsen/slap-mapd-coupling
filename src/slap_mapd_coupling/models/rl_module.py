@@ -110,6 +110,13 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
     through as a dict, not the pydantic model itself.
     """
 
+    def __init__(self, *args: Any, catalog_class: Any = None, **kwargs: Any) -> None:
+        # No Catalog, since setup() builds every network. DefaultPPOTorchRLModule.__init__ only
+        # swaps a missing catalog_class for PPOCatalog, which cannot read the graph observation
+        # and logs "Didn't create a Catalog object" for every module built, so it is skipped.
+        # A checkpoint that names PPOCatalog loads the same way.
+        super(DefaultPPOTorchRLModule, self).__init__(*args, catalog_class=None, **kwargs)
+
     @override(DefaultPPOTorchRLModule)
     def setup(self) -> None:
         # Deliberately does NOT call super().setup(): that builds

@@ -271,6 +271,8 @@ def build_ppo_config(
 
     config = (
         PPOConfig()
+        # RLlib's new API stack, its default, set here so the config states it.
+        .api_stack(enable_rl_module_and_learner=True, enable_env_runner_and_connector_v2=True)
         # disable_env_checking: RLlib's generic multi-agent env pre-check
         # samples straight from action_space.sample(), ignoring
         # action_mask entirely -- it isn't mask-aware, and the action

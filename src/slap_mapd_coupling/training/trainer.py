@@ -139,7 +139,10 @@ def train(
         f"(budget {budget_env_steps} environment steps) ==="
     )
     results = tune.Tuner(
-        "PPO",
+        # The class, not the name "PPO". Looking a name up makes Tune import every RLlib
+        # algorithm, and DreamerV3's import prints four gymnasium warnings. The trials are
+        # still named PPO_*.
+        ppo_config.algo_class,
         # The PPOConfig object itself, as Tune's docs show, though the stub says dict.
         param_space=ppo_config.callbacks(TrainingProgressCallbacks),  # type: ignore[arg-type]
         run_config=tune.RunConfig(

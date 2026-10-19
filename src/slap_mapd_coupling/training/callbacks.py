@@ -31,8 +31,7 @@ import numbers
 from typing import Any, Mapping, Optional
 
 import gymnasium as gym
-from ray.rllib.env.base_env import BaseEnv
-from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.callbacks.callbacks import RLlibCallback
 
 from slap_mapd_coupling.core.agents import FleetState, is_collision_free
 from slap_mapd_coupling.core.storage_state import is_feasible
@@ -50,7 +49,7 @@ def _unwrap(env: gym.Env, env_index: int) -> WarehouseMAPDMultiAgentEnv:
     return sub_env
 
 
-class CorrectnessInvariantCallbacks(DefaultCallbacks):
+class CorrectnessInvariantCallbacks(RLlibCallback):
     """Checks is_collision_free and is_feasible on the realised trace at
     every timestep of every training rollout, not at the turns inside one. The
     vertex rule and the swap rule are about a transition, so the fleet before
@@ -70,9 +69,6 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
         env: Optional[gym.Env] = None,
         env_index: int,
         rl_module=None,
-        worker=None,
-        base_env: Optional["BaseEnv"] = None,
-        policies=None,
         **kwargs: Any,
     ) -> None:
         if env is None:
@@ -88,9 +84,6 @@ class CorrectnessInvariantCallbacks(DefaultCallbacks):
         env: Optional[gym.Env] = None,
         env_index: int,
         rl_module=None,
-        worker=None,
-        base_env: Optional["BaseEnv"] = None,
-        policies=None,
         **kwargs: Any,
     ) -> None:
         if env is None:
