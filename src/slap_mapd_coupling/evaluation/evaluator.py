@@ -196,6 +196,9 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
 
     num_waiting = sum(1 for task in env.tasks if task.status(horizon) == "waiting")
     num_active = sum(1 for task in env.tasks if task.status(horizon) == "active")
+    # Under the arrival model, orders released and still waiting for stock. They count in B_T.
+    # Always 0 under the template model.
+    num_waiting_orders = len(env.waiting_orders)
     backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
 
     # The mean crowding: the mean of delta_i(t) over agents and
@@ -208,6 +211,32 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     mean_relocated = sum(relocations) / len(relocations) if relocations else 0.0
     distances = env.log.relocation_distance_by_update
     mean_relocation_distance = sum(distances) / len(distances) if distances else 0.0
+
+    # The arrival stock model: the wait for stock, part of the wait before assignment, and
+    # the put-away of each arrival. The template model logs none of them and keeps the
+    # defaults, so its rows are what they were before these fields existed.
+    arrival_fields: dict[str, Any] = {}
+    num_storage_updates = len(relocations)
+    if config.stock_model == "arrival":
+        arrived = env.log.arrived_units_by_update
+        num_storage_updates = len(arrived)  # the arrivals, under every storage rule
+
+        def per_arrival(values: Sequence[float]) -> float:
+            return sum(values) / num_storage_updates if num_storage_updates else 0.0
+
+        arrival_fields = dict(
+            mean_stock_wait=(
+                sum(env.log.stock_wait_by_task[task.task_id] for task in completed) / num_completed
+                if num_completed
+                else None
+            ),
+            num_waiting_orders=num_waiting_orders,
+            mean_putaway_distance=per_arrival(env.log.putaway_distance_by_update),
+            mean_arrived_units=per_arrival(arrived),
+            mean_split_skus=per_arrival(env.log.split_skus_by_update),
+            unplaced_units=sum(env.log.unplaced_units_by_update),
+            overflow_units=sum(env.log.overflow_units_by_update),
+        )
 
     # Routing time is whatever produced the actions: planning for a planner, and the
     # observation build, forward pass and sampling for a learned arm.
@@ -236,8 +265,10 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         mean_travel_time=mean_travel,
         mean_blocked_time=mean_blocked,
         mean_crowding=mean_crowding,
-        num_storage_updates=len(relocations),
+        num_storage_updates=num_storage_updates,
         mean_relocated_units=mean_relocated,
         mean_relocation_distance=mean_relocation_distance,
         mean_decision_runtime_seconds=mean_decision_runtime,
+        stock_model=config.stock_model,
+        **arrival_fields,
     )

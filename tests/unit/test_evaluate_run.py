@@ -242,3 +242,97 @@ def test_the_command_names_the_output_after_the_load(tmp_path, fake_episodes):
     result = CliRunner().invoke(cli, ["evaluate", str(run), "--arrival-rate", "0.3"])
     assert result.exit_code == 0, result.output
     assert (run / "evaluation_rate0.3" / "test.jsonl").exists()
+
+
+ARRIVAL_CONFIG = (
+    Path(__file__).resolve().parents[2] / "configs" / "medium_arrival" / "decentralised.yaml"
+)
+
+
+def _arrival_metrics(seed, storage_mode, service_time):
+    """An arrival run that keeps up: its put-away and its wait for stock are reported."""
+    values = _real_metrics(seed, storage_mode, service_time).model_dump()
+    values.update(
+        stock_model="arrival",
+        num_storage_updates=1,
+        mean_relocated_units=0.0,
+        mean_stock_wait=1.0 if storage_mode == "fixed" else 0.5,
+        mean_putaway_distance=110.0 if storage_mode == "fixed" else 54.0,
+        mean_arrived_units=30.0,
+        mean_split_skus=0.0 if storage_mode == "fixed" else 4.0,
+    )
+    return RunMetrics(**values)
+
+
+def _summary_of(tmp_path, monkeypatch, metrics, spec_path):
+    def play(study, spec, checkpoint, seed, storage_mode=None):
+        if storage_mode is None:
+            return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
+        return metrics(seed, storage_mode, 10.0 if storage_mode == "fixed" else 8.0 + seed % 3)
+
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    run = _run_dir(tmp_path, 2)
+    next(run.glob("*_spec.json")).write_text(
+        load_spec(spec_path).model_dump_json(), encoding="utf-8"
+    )
+    evaluate_run(run, tmp_path / "out", ["fixed", "demand"])
+    return (tmp_path / "out" / "summary.md").read_text().splitlines()
+
+
+def _cells(line):
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def test_a_template_summary_keeps_its_columns(tmp_path, fake_episodes, monkeypatch):
+    fake_episodes([3, 9])
+    run_spec = Path(__file__).resolve().parents[2] / "configs" / "medium" / "decentralised.yaml"
+    lines = _summary_of(tmp_path, monkeypatch, _real_metrics, run_spec)
+    header = evaluate_run_module._SUMMARY_HEADER.rstrip("\n").split("\n")
+    assert lines[2:4] == header
+    rows = [line for line in lines if line.startswith("| chosen") or line.startswith("| last")]
+    assert len(rows) == 2
+    assert all(len(_cells(row)) == 11 for row in rows)
+    assert "putaway" not in "\n".join(lines) and "stock wait" not in "\n".join(lines)
+
+
+def test_an_arrival_summary_adds_putaway_and_stock_wait(tmp_path, fake_episodes, monkeypatch):
+    fake_episodes([3, 9])
+    lines = _summary_of(tmp_path, monkeypatch, _arrival_metrics, ARRIVAL_CONFIG)
+    header = _cells(lines[2])
+    assert len(header) == 15 and len(_cells(lines[3])) == 15
+    assert header[11:] == [
+        "putaway per update F_fix",
+        "putaway per update mode",
+        "stock wait F_fix",
+        "stock wait mode",
+    ]
+    chosen = _cells(next(line for line in lines if line.startswith("| chosen")))
+    assert chosen[:2] == ["chosen", "demand"]
+    assert chosen[11:] == ["110.000", "54.000", "1.000", "0.500"]
+
+
+def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episodes, monkeypatch):
+    """The study is built at the training load for validation and again at the test load."""
+    fake_episodes([1, 1])
+    split = SeedSplitConfig(
+        training_seed=0, train_seed_count=5, validation_seed_count=2, test_seed_count=3
+    )
+    monkeypatch.setattr(
+        evaluate_run_module,
+        "build_study",
+        lambda spec: SimpleNamespace(seed_split=split, rate=spec.arrival_rate),
+    )
+    rates = []
+
+    def play(study, spec, checkpoint, seed, storage_mode=None):
+        rates.append((seed >= TEST_SEED_START, study.rate, spec.arrival_rate))
+        return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
+
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    run = _run_dir(tmp_path, 2)
+    training_rate = load_spec(CONFIG).arrival_rate
+    evaluate_run(run, tmp_path / "out", arrival_rate=0.3)
+    assert {(rate, spec_rate) for is_test, rate, spec_rate in rates if not is_test} == {
+        (training_rate, training_rate)
+    }
+    assert {(rate, spec_rate) for is_test, rate, spec_rate in rates if is_test} == {(0.3, 0.3)}
