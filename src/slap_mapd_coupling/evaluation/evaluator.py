@@ -11,7 +11,7 @@ meaningful (sec:impl:instances, evaluation/comparison.py).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Sequence
 
 import numpy as np
 
@@ -19,7 +19,8 @@ from slap_mapd_coupling.controllers.assignment import Assigner
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
-from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
+from slap_mapd_coupling.core.tasks import Task, TaskId
+from slap_mapd_coupling.environment.multi_agent_env import OrderLine, WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
 from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter
 from slap_mapd_coupling.planners import get_planner
@@ -192,6 +193,44 @@ def keeps_up(
     return share >= keep_up_threshold and slope <= backlog_slope_max
 
 
+def order_metrics(
+    tasks: Sequence[Task],
+    order_line_by_task: Mapping[TaskId, tuple[int, int]],
+    waiting_lines: Sequence[OrderLine],
+    lines_waited: Collection[tuple[int, int]],
+) -> dict[str, Any]:
+    """The order measures of the arrival model. An order is complete when none of its lines
+    still waits and all its tasks are completed. Its completion time is the longest service time
+    among its tasks, the order completion time. Tasks per line are counted over the lines with
+    no units still missing."""
+    waiting_orders = {line.order_id for line in waiting_lines}
+    waiting = {(line.order_id, line.line_index) for line in waiting_lines}
+    tasks_by_order: dict[int, list[Task]] = {}
+    tasks_per_line: dict[tuple[int, int], int] = {}
+    for task in tasks:
+        order_line = order_line_by_task.get(task.task_id)
+        if order_line is None:
+            continue
+        tasks_by_order.setdefault(order_line[0], []).append(task)
+        if order_line not in waiting:
+            tasks_per_line[order_line] = tasks_per_line.get(order_line, 0) + 1
+    completions = []
+    for order_id, order_tasks in tasks_by_order.items():
+        if order_id in waiting_orders:
+            continue
+        times = [task.service_time for task in order_tasks]
+        if all(time is not None for time in times):
+            completions.append(max(time for time in times if time is not None))
+    return dict(
+        mean_order_completion=sum(completions) / len(completions) if completions else None,
+        num_completed_orders=len(completions),
+        mean_tasks_per_line=(
+            sum(tasks_per_line.values()) / len(tasks_per_line) if tasks_per_line else None
+        ),
+        num_lines_waited=len(lines_waited),
+    )
+
+
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
     horizon = config.horizon
     completed = [task for task in env.tasks if task.finish_time is not None]
@@ -269,6 +308,9 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
             mean_split_skus=per_arrival(env.log.split_skus_by_update),
             unplaced_units=sum(env.log.unplaced_units_by_update),
             overflow_units=sum(env.log.overflow_units_by_update),
+            **order_metrics(
+                env.tasks, env.log.order_line_by_task, env.waiting_orders, env.log.lines_waited
+            ),
         )
 
     # Routing time is whatever produced the actions: planning for a planner, and the
