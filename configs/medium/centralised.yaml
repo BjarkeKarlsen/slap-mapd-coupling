@@ -57,6 +57,9 @@ instance:
 # See StorageSettings and DemandSettings.
 storage:
   num_skus: 100
+  # One name per SKU, e.g. [tea, coffee, mugs, ...]. The first is the most popular at t = 0.
+  # null names them sku_000, sku_001 and so on.
+  sku_names: null
   unit_capacities: [0.5, 1.0, 2.0]
   vertex_capacity: 200.0
   initial_units: 8
