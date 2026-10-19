@@ -1,11 +1,11 @@
-"""Tasks tau_j = (t_j^released, s_j, g_j, k_j) and the lifecycle sets Q_t, B_t, C_t."""
+"""Tasks tau_j = (t_j^released, s_j, g_j, k_j, q_j) and the lifecycle sets Q_t, B_t, C_t."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, model_validator
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, model_validator
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.graph import VertexId
@@ -15,7 +15,7 @@ TaskId = int
 
 
 class Task(BaseModel):
-    """tau_j = (t_j^released, s_j, g_j, k_j), the task definition, plus
+    """tau_j = (t_j^released, s_j, g_j, k_j, q_j), the task definition, plus
     t_j^assigned/t_j^pickup/t_j^finish.
 
     Status is a method computed from the timestamps (the task stages),
@@ -40,6 +40,10 @@ class Task(BaseModel):
     pickup_vertex: VertexId  # s_j, caller-checked to be in V_str
     delivery_vertex: VertexId  # g_j, caller-checked to be in V_del
     sku: SkuId  # k_j
+    quantity: PositiveInt = 1  # q_j, the units the task carries
+    # The order and the line of the order the task serves, arrival model only.
+    order_id: NonNegativeInt | None = None
+    line_index: NonNegativeInt | None = None
     assigned_agent: AgentId | None = None  # sigma(j)
     assignment_time: NonNegativeInt | None = None  # t_j^assigned
     pickup_time: NonNegativeInt | None = None  # t_j^pickup

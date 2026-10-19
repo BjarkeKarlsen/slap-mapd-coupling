@@ -10,10 +10,13 @@ put-away are tested in test_arrival_rules.py.
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 import slap_mapd_coupling.storage.congestion  # noqa: F401 -- registers "congestion"
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
-from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.environment.multi_agent_env import Order, WarehouseMAPDEnv
+from slap_mapd_coupling.core.experiment_config import ExperimentConfig, LinesPerOrder
+from slap_mapd_coupling.environment.multi_agent_env import OrderLine, WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.evaluator import _planner_run
 from slap_mapd_coupling.training.spec import (
     ArrivalSettings,
@@ -46,7 +49,7 @@ def _template(spec):
     return type(spec).model_validate(data)
 
 
-def _run(spec, mode="fixed", seed=200_000, steps=STEPS, rate=0.6):
+def _run(spec, mode="fixed", seed=200_000, steps=STEPS, rate=0.6, **config_overrides):
     study = build_study(spec)
     config = build_experiment_config(spec, seed, mode)
     config = ExperimentConfig.model_validate(
@@ -55,6 +58,7 @@ def _run(spec, mode="fixed", seed=200_000, steps=STEPS, rate=0.6):
             "controller": None,
             "planner": "token_passing",
             "arrival_rate": rate,
+            **config_overrides,
         }
     )
     env, step = _planner_run(
@@ -68,7 +72,7 @@ def _run(spec, mode="fixed", seed=200_000, steps=STEPS, rate=0.6):
 def _orders(env):
     """Every order released so far, served or waiting, as (release time, SKU, delivery)."""
     served = [(t.release_time, t.sku, t.delivery_vertex) for t in env.tasks]
-    waiting = [tuple(order) for order in env._waiting_orders]
+    waiting = [(o.release_time, o.sku, o.delivery_vertex) for o in env._waiting_orders]
     return sorted(served + waiting)
 
 
@@ -131,11 +135,11 @@ def test_the_queue_is_served_in_release_order():
     counts[sku_id] = {vertex: 1}
     env.storage = env.storage.model_copy(update={"counts": counts})
     delivery = env._delivery_vertices[0]
-    env._waiting_orders = [Order(0, sku_id, delivery), Order(1, sku_id, delivery)]
+    env._waiting_orders = [OrderLine(0, sku_id, delivery), OrderLine(1, sku_id, delivery)]
     env._t = 5
     (task,) = env._release_orders()
     assert task.release_time == 0
-    assert env._waiting_orders == [Order(1, sku_id, delivery)]
+    assert env._waiting_orders == [OrderLine(1, sku_id, delivery)]
     assert env.log.stock_wait_by_task[task.task_id] == 5
 
 
@@ -149,7 +153,7 @@ def test_the_pickup_is_the_holder_nearest_the_delivery_vertex_ties_by_id():
     counts[sku_id] = {v: 1 for v in storage}
     env.storage = env.storage.model_copy(update={"counts": counts})
     for delivery in env._delivery_vertices:
-        env._waiting_orders = [Order(env.t, sku_id, delivery)]
+        env._waiting_orders = [OrderLine(env.t, sku_id, delivery)]
         (task,) = env._release_orders()
         expected = min(
             (v for v, c in env.storage.counts[sku_id].items() if c > 0 or v == task.pickup_vertex),
@@ -200,3 +204,68 @@ class _NoOrders:
 
     def poisson(self, _rate):
         return 0
+
+
+# Order lines
+
+LINES = dict(
+    lines_per_order=LinesPerOrder(distribution="shifted_poisson", mean=5.0),
+    units_per_line=(1, 5),
+)
+
+
+def _lines(env):
+    """Every order line released so far, as (release time, order, line, SKU, delivery). A line
+    served over several tasks appears once."""
+    served = {
+        (t.release_time, t.order_id, t.line_index, t.sku, t.delivery_vertex) for t in env.tasks
+    }
+    waiting = {
+        (o.release_time, o.order_id, o.line_index, o.sku, o.delivery_vertex)
+        for o in env._waiting_orders
+    }
+    return sorted(served | waiting)
+
+
+def test_the_order_lines_do_not_depend_on_the_storage_rule():
+    fixed = _run(_spec(), mode="fixed", **LINES)
+    demand = _run(_spec(), mode="demand", **LINES)
+    assert _lines(fixed)
+    assert _lines(fixed) == _lines(demand)
+
+
+def test_the_lines_of_an_order_share_its_release_and_delivery_and_have_distinct_skus():
+    env = _run(_spec(), **LINES)
+    by_order: dict[int, list[tuple]] = {}
+    for line in _lines(env):
+        by_order.setdefault(line[1], []).append(line)
+    assert any(len(lines) > 1 for lines in by_order.values())
+    for lines in by_order.values():
+        assert len({(line[0], line[4]) for line in lines}) == 1
+        assert len({line[3] for line in lines}) == len(lines)
+        assert sorted(line[2] for line in lines) == list(range(len(lines)))
+
+
+def test_a_line_asks_for_units_in_the_configured_range():
+    env = _run(_spec(), steps=1, **LINES)
+    ranked = sorted(env._sku_ids)
+    quantities = [line.missing for t in range(500) for line in env._draw_order_lines(t, ranked)]
+    assert set(quantities) == {1, 2, 3, 4, 5}
+
+
+def test_arrival_rate_is_order_lines_per_timestep():
+    env = _run(_spec(), steps=1, rate=0.6, **LINES)
+    ranked = sorted(env._sku_ids)
+    steps = 20_000
+    num_lines = sum(len(env._draw_order_lines(t, ranked)) for t in range(steps))
+    assert num_lines / steps == pytest.approx(0.6, rel=0.05)
+
+
+def test_order_lines_only_apply_to_the_arrival_model():
+    config = build_experiment_config(_template(_spec()), 0, "fixed")
+    for name, value in LINES.items():
+        with pytest.raises(ValidationError, match=name):
+            ExperimentConfig.model_validate({**config.model_dump(), name: value})
+    arrival = build_experiment_config(_spec(), 0, "fixed")
+    with pytest.raises(ValidationError, match="units_per_line"):
+        ExperimentConfig.model_validate({**arrival.model_dump(), "units_per_line": (5, 1)})
