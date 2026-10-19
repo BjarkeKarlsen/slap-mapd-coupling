@@ -32,7 +32,7 @@ def make_params(seed: int) -> GeneratorParams:
         max_num_cross_aisles=6,
         one_way_fraction=0.0,
         default_edge_cost=1.0,
-        random_edge_costs=True,
+        random_edge_costs=False,
         edge_cost_range=(0.5, 2.0),
         wait_cost=5.0,
         num_storage_vertices=4,
