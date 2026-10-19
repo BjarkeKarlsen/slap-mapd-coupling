@@ -187,6 +187,10 @@ class EpisodeLog:
     edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)
     backlog_by_t: list[int] = field(default_factory=list)  # B_t, every timestep
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
+    # The blocked ticks in a row of each task so far, and the longest such run, for the stall
+    # count. A tick in which the task's agent moves ends the run.
+    blocked_run_by_task: dict[TaskId, int] = field(default_factory=dict)
+    longest_blocked_run_by_task: dict[TaskId, int] = field(default_factory=dict)
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)  # set by whoever acts
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
@@ -245,6 +249,14 @@ class EpisodeLog:
 
     def record_blocked_tick(self, task_id: TaskId) -> None:
         self.blocked_ticks_by_task[task_id] = self.blocked_ticks_by_task.get(task_id, 0) + 1
+        run = self.blocked_run_by_task.get(task_id, 0) + 1
+        self.blocked_run_by_task[task_id] = run
+        if run > self.longest_blocked_run_by_task.get(task_id, 0):
+            self.longest_blocked_run_by_task[task_id] = run
+
+    def record_moving_tick(self, task_id: TaskId) -> None:
+        """The task's agent moved, which ends its run of blocked ticks."""
+        self.blocked_run_by_task.pop(task_id, None)
 
     def record_routing_runtime(self, seconds: float) -> None:
         """Whoever produces the actions times itself and records it here."""
@@ -455,6 +467,8 @@ class WarehouseMAPDEnv:
             if before_locations[agent_id] == realised_locations[agent_id]:
                 self.log.record_blocked_tick(task.task_id)  # omega_j(t): realised wait
                 self._record_wait(realised_locations[agent_id], tasks_by_id[task.task_id])
+            else:
+                self.log.record_moving_tick(task.task_id)
 
         self.log.backlog_by_t.append(self._backlog(next_t))
 
