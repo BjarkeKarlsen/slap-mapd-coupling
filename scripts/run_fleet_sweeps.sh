@@ -13,7 +13,14 @@ echo "========================================================================"
 echo ""
 
 # Configuration
-RATES="0.1 0.2 0.3 0.4"
+# Rates scaled by fleet size (direct multiplication for comparability)
+# Base: 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8
+declare -A RATES_BY_SIZE
+RATES_BY_SIZE[8]="0.2 0.3 0.4 0.5 0.6 0.7 0.8"
+RATES_BY_SIZE[16]="0.4 0.6 0.8 1.0 1.2 1.4 1.6"
+RATES_BY_SIZE[32]="0.8 1.2 1.6 2.0 2.4 2.8 3.2"
+RATES_BY_SIZE[64]="1.6 2.4 3.2 4.0 4.8 5.6 6.4"
+
 SEEDS=6
 VENV="${HOME}/.venvs/rl/bin"
 
@@ -31,6 +38,7 @@ mkdir -p DIR
 for SIZE in 8 16 32 64; do
     CONFIG="configs/fleet_$SIZE/centralised.yaml"
     OUTPUT_DIR="DIR/sweep_${SIZE}_agents"
+    RATES="${RATES_BY_SIZE[$SIZE]}"
 
     if [ ! -f "$CONFIG" ]; then
         echo "✗ Config not found: $CONFIG"
@@ -40,6 +48,7 @@ for SIZE in 8 16 32 64; do
     echo "========== Fleet size: $SIZE agents =========="
     echo "Config: $CONFIG"
     echo "Output: $OUTPUT_DIR"
+    echo "Rates: $RATES"
     echo ""
 
     $VENV/python scripts/load_sweep.py \
