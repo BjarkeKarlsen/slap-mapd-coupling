@@ -53,6 +53,11 @@ Each observation build that feeds a decision is timed and recorded on the
 core's log as routing time, one record per turn, so the mean decision runtime
 of a learned arm covers producing the joint action and not only decoding slots.
 
+With communication on, every sample carries the key of its own row and the keys of its
+senders' rows (models/window_tables.py). A key packs the runner (`key_prefix`, which the
+training config sets from the runner's index), the episode count of this adapter, the
+timestep and the robot, so it is unique within a train batch.
+
 Training episodes cycle through `train_seeds` in order, so every training
 seed is used equally often. The thesis fixes the split, not the order.
 
@@ -93,10 +98,32 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
     check_slot_targets,
     check_windows,
     encode_all_observations,
-    encoded_observation_space,
+)
+from slap_mapd_coupling.models.window_tables import (
+    WindowTables,
+    build_window_tables,
+    compact_observation_space,
+    compact_rllib_dict,
 )
 
 Zones = Sequence[frozenset[VertexId]]
+
+# The bits of a row key (models/window_tables.py), from the lowest. A key is
+# ((prefix * 2^16 + episode) * 2^20 + t) * 2^8 + robot. The 62 bits keep it at most
+# window_tables.MAX_ROW_KEY.
+_ROBOT_BITS, _STEP_BITS, _EPISODE_BITS, _PREFIX_BITS = 8, 20, 16, 18
+
+
+def row_key(prefix: int, episode: int, t: int, agent_id: int) -> int:
+    """The key of the row of robot `agent_id` at timestep t of the adapter's
+    episode `episode`. The episode count wraps, so keys repeat only after
+    2^16 episodes of one adapter, far apart from any one train batch."""
+    if not 0 <= agent_id < 1 << _ROBOT_BITS or not 0 <= t < 1 << _STEP_BITS:
+        raise ValueError(f"row key out of range: robot {agent_id}, step {t}.")
+    if not 0 <= prefix < 1 << _PREFIX_BITS:
+        raise ValueError(f"row key prefix {prefix} is out of range.")
+    key = (prefix << _EPISODE_BITS) | (episode % (1 << _EPISODE_BITS))
+    return (((key << _STEP_BITS) | t) << _ROBOT_BITS) | agent_id
 
 
 @dataclass(frozen=True)
@@ -189,6 +216,28 @@ def arm_windows(
     return arm
 
 
+def arm_window_tables(
+    graph: WarehouseGraph,
+    controller: ControllerArchitecture,
+    observation_depth: int,
+    encoding_config: LocalSubgraphEncodingConfig,
+    zones: Optional[Zones],
+    pooling: Pooling,
+) -> WindowTables:
+    """The window tables of the arm (models/window_tables.py), one row per
+    movable vertex. The adapter and the module's model config both build them
+    here, so they always agree."""
+    arm = arm_windows(graph, controller, observation_depth, encoding_config, zones)
+    if arm is None:
+        windows = {v: local_subgraph(graph, v, observation_depth) for v in _movable(graph)}
+    else:
+        windows = dict(arm.window)
+    pools = None
+    if pooling != "none":
+        pools = dict(arm.pool) if arm is not None else dict(windows)
+    return build_window_tables(graph, windows, max_out_degree(graph), encoding_config, pools)
+
+
 def team_mean(
     rewards: Mapping[AgentId, float], groups: Mapping[AgentId, int]
 ) -> dict[AgentId, float]:
@@ -222,6 +271,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         zones: Optional[Zones] = None,
         first_seed_index: int = 0,
         seed_from_cycle: bool = False,
+        key_prefix: int = 0,
     ) -> None:
         check_arm(config.controller, pooling, zones)
         assert config.controller is not None  # check_arm rejects a planner
@@ -242,10 +292,18 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         # number of seeds, so more runners than seeds wrap around.
         self._next_train_seed_index = first_seed_index % len(self._train_seeds)
         self._seed_from_cycle = seed_from_cycle
+        self._key_prefix = key_prefix
+        self._episode_count = -1  # reset() starts episode 0
 
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
-        base_observation_space = encoded_observation_space(
-            encoding_config, self._d_max, config.communication, pooling
+        # The samples are compact (models/window_tables.py). The module rebuilds the padded
+        # arrays from the same tables, which build_ppo_config puts in its model config.
+        self.window_tables = arm_window_tables(
+            graph, config.controller, config.observation_depth, encoding_config, zones, pooling
+        )
+        self._position = self.window_tables.position()
+        base_observation_space = compact_observation_space(
+            encoding_config, len(self.window_tables.vertices), self._d_max, config.communication
         )
         per_agent_observation_space = masked_observation_space(
             base_observation_space, self._d_max + 1
@@ -280,6 +338,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             seed = self._train_seeds[self._next_train_seed_index % len(self._train_seeds)]
             self._next_train_seed_index += 1
         self.last_seed = seed
+        self._episode_count += 1
         super().reset(seed=seed, options=options)
         self.core.reset(seed=seed)
         self.timestep_completed = False
@@ -404,8 +463,29 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             pool_vertices=pool_vertices,
             acting=acting,
             chosen=chosen,
+            # The compact sample keeps the window arrays in tables (models/window_tables.py).
+            padded=False,
         )
-        observations = {str(agent_id): item.as_rllib_dict() for agent_id, item in encoded.items()}
+        if self._config.communication:
+            agent_at = {v: agent_id for agent_id, v in locations.items()}
+            keys = {
+                agent_id: row_key(self._key_prefix, self._episode_count, self.core.t, agent_id)
+                for agent_id in locations
+            }
+            observations = {
+                str(agent_id): compact_rllib_dict(
+                    item,
+                    self._position,
+                    keys[agent_id],
+                    [keys[agent_at[v]] for v in item.sender_locations or ()],
+                )
+                for agent_id, item in encoded.items()
+            }
+        else:
+            observations = {
+                str(agent_id): compact_rllib_dict(item, self._position)
+                for agent_id, item in encoded.items()
+            }
         # The build is part of producing the joint action, so it counts as routing time
         # (sec:impl:cost). The observation after the last step feeds no decision.
         if self.core.t < self._config.horizon:
