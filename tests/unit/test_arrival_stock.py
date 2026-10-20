@@ -105,13 +105,18 @@ def _key(task):
     return (task.task_id, task.release_time, task.sku, task.pickup_vertex, task.delivery_vertex)
 
 
-def test_every_task_takes_one_unit_when_it_is_released():
+def test_every_task_reserves_its_units_at_release_and_takes_them_at_pickup():
     spec = _spec(initial_units=30, vertex_capacity=1000.0)
     start = build_study(spec).counts
     env = _run(spec)
     for sku_id, per_vertex in start.items():
-        taken = sum(t.quantity for t in env.tasks if t.sku == sku_id)
-        assert sum(env.storage.counts[sku_id].values()) == sum(per_vertex.values()) - taken
+        picked = sum(
+            t.quantity for t in env.tasks if t.sku == sku_id and t.pickup_time is not None
+        )
+        promised = sum(t.quantity for t in env.tasks if t.sku == sku_id and t.pickup_time is None)
+        assert sum(env.storage.counts[sku_id].values()) == sum(per_vertex.values()) - picked
+        assert sum(env._reserved.get(sku_id, {}).values()) == promised
+    assert any(t.pickup_time is None for t in env.tasks)  # some units are still only reserved
     assert set(env.log.stock_wait_by_task.values()) == {0}
 
 
@@ -119,8 +124,9 @@ def test_an_order_with_no_stock_waits_and_counts_in_the_backlog():
     env = _run(_spec(initial_units=1))
     waiting = env._waiting_orders
     assert waiting
+    free = env._unreserved(env.storage)
     for order in waiting:
-        assert sum(env.storage.counts[order.sku].values()) == 0
+        assert sum(free.counts[order.sku].values()) == 0
     unfinished = sum(1 for t in env.tasks if t.status(env.t) in ("waiting", "active"))
     assert env._backlog(env.t) == unfinished + len(waiting)
     # Without arrivals no unit comes back, so every task was served at release.
