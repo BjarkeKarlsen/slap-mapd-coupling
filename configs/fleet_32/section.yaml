@@ -41,16 +41,16 @@ experiment:
 
 # GeneratorParams without wait_cost and num_endpoints, which follow the experiment section.
 instance:
-  max_num_aisles: 20
-  max_aisle_length: 17
-  max_num_cross_aisles: 13
+  max_num_aisles: 24
+  max_aisle_length: 20
+  max_num_cross_aisles: 16
   one_way_fraction: 0.0
   default_edge_cost: 1.0
   random_edge_costs: false
   edge_cost_range: [0.5, 2.0]
-  num_storage_vertices: 40
-  num_delivery_vertices: 16
-  num_receiving_vertices: 16       # V_rcv on row 0, as many as the delivery vertices
+  num_storage_vertices: 50
+  num_delivery_vertices: 10
+  num_receiving_vertices: 10       # V_rcv on row 0, as many as the delivery vertices
   min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
   seed: 42
 
