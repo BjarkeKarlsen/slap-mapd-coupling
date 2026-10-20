@@ -1,0 +1,45 @@
+# 32-agent warehouse, 4.0x scale
+controller: decentralised
+regime: fixed_only
+communication: false
+evaluation_storage_mode: fixed
+arrival_rate: 0.6  # TBD, from load sweep
+horizon: 2000
+
+experiment:
+  num_agents: 32
+  wait_cost: 0.2
+  keep_up_threshold: 0.8
+  observation_depth: 5
+  discount: 0.99
+  deliver_reward: 10.0
+  override_penalty: 0.5
+  move_cost: 0.1
+  congestion_reward_weight: 0.1
+  congestion_sensitive: false
+  seed: 0
+
+instance:
+  max_num_aisles: 24
+  max_aisle_length: 20
+  max_num_cross_aisles: 16
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: false
+  edge_cost_range: [0.5, 2.0]
+  num_storage_vertices: 40
+  num_delivery_vertices: 8
+  num_receiving_vertices: 8
+  min_internal_role_vertices: 2
+  seed: 42
+
+storage:
+  period: 5
+  margin: 0.3
+
+arrival:
+  receiving: receiving
+  putaway: robots
+
+demand:
+  distribution: random
