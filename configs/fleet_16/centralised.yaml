@@ -49,8 +49,8 @@ instance:
   random_edge_costs: false
   edge_cost_range: [0.5, 2.0]
   num_storage_vertices: 20
-  num_delivery_vertices: 5
-  num_receiving_vertices: 5       # V_rcv on row 0, as many as the delivery vertices
+  num_delivery_vertices: 8
+  num_receiving_vertices: 8       # V_rcv on row 0, as many as the delivery vertices
   min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
   seed: 42
 
