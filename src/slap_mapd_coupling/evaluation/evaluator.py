@@ -13,8 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Sequence
 
-import numpy as np
-
 from slap_mapd_coupling.controllers.assignment import Assigner
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -168,29 +166,13 @@ def completed_share(num_completed: int, backlog: int) -> float | None:
     return num_completed / released if released else None
 
 
-def backlog_slope(backlog_by_t: Sequence[int]) -> float | None:
-    """chi_T, the slope of a least-squares line through B_t over the second half of the run,
-    T/2 <= t <= T, where entry t of `backlog_by_t` is B_t. None with fewer than two points."""
-    horizon = len(backlog_by_t) - 1
-    t = np.arange(-(-horizon // 2), horizon + 1)  # ceil(T/2) .. T
-    if len(t) < 2:
+def keeps_up(num_completed: int, backlog: int, keep_up_threshold: float | None) -> bool | None:
+    """The keep-up check, eq:throughput, Lambda_T >= f_up (|C_T| + B_T) / T. Both sides are
+    multiplied by T, so no rounding of the division decides a run on the threshold. None
+    unless f_up is set."""
+    if keep_up_threshold is None:
         return None
-    return float(np.polyfit(t, np.asarray(backlog_by_t, dtype=float)[t], 1)[0])
-
-
-def keeps_up(
-    share: float | None,
-    slope: float | None,
-    keep_up_threshold: float | None,
-    backlog_slope_max: float | None,
-) -> bool | None:
-    """The keep-up check, share >= f_up and slope <= chi_max. None unless both thresholds
-    are set and both measures exist."""
-    if None in (share, slope, keep_up_threshold, backlog_slope_max):
-        return None
-    assert share is not None and slope is not None  # narrowed by the check above
-    assert keep_up_threshold is not None and backlog_slope_max is not None
-    return share >= keep_up_threshold and slope <= backlog_slope_max
+    return num_completed >= keep_up_threshold * (num_completed + backlog)
 
 
 def order_metrics(
@@ -270,7 +252,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     # The keep-up check, against the tasks released in the run, and throughput, reported.
     backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
     share = completed_share(num_completed, backlog)
-    slope = backlog_slope(env.log.backlog_by_t)
     # Stalls: the longest time an agent holding a task stood still in a row.
     longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
     throughput = num_completed / horizon  # Lambda_T
@@ -350,7 +331,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 if putaways
                 else None
             ),
-            mean_putaway_distance=per_arrival(env.log.putaway_distance_by_update),
             mean_arrived_units=per_arrival(arrived),
             mean_split_skus=per_arrival(env.log.split_skus_by_update),
             unplaced_units=sum(env.log.unplaced_units_by_update),
@@ -389,8 +369,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         throughput=throughput,
         keep_up_ratio=keep_up_ratio,
         completed_share=share,
-        backlog_slope=slope,
-        keeps_up=keeps_up(share, slope, config.keep_up_threshold, config.backlog_slope_max),
+        keeps_up=keeps_up(num_completed, backlog, config.keep_up_threshold),
         longest_stand_still=longest_stand_still,
         stalled=None if config.stall_length is None else longest_stand_still > config.stall_length,
         num_waiting_tasks=num_waiting,

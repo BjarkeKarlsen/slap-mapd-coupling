@@ -33,15 +33,9 @@ SEED = 300_000
 # What a 300-step Token Passing episode of configs/medium_arrival gave on feat/cold-stock, before
 # robot put-away existed: a digest of its tasks and of its final stock, and its measures.
 INSTANT = {
-    "fixed": ("5561c3634c19d979", "b1be2db23db50a1d", 125, 37.144, 150.33333333333334),
-    "demand": ("3d4688f7c1143c6a", "6e11f2df940c8a2d", 126, 33.29365079365079, 77.33333333333333),
-    "congestion": (
-        "3d4688f7c1143c6a",
-        "6e11f2df940c8a2d",
-        126,
-        33.29365079365079,
-        77.33333333333333,
-    ),
+    "fixed": ("5561c3634c19d979", "b1be2db23db50a1d", 125, 37.144),
+    "demand": ("3d4688f7c1143c6a", "6e11f2df940c8a2d", 126, 33.29365079365079),
+    "congestion": ("3d4688f7c1143c6a", "6e11f2df940c8a2d", 126, 33.29365079365079),
 }
 
 
@@ -88,12 +82,11 @@ def test_instant_put_away_replays_the_episode_it_gave_before(mode):
         step()
     metrics = _to_run_metrics(env, env.config)
     stock = sorted((k, sorted(v.items())) for k, v in env.storage.counts.items())
-    tasks, storage, completed, service, putaway = INSTANT[mode]
+    tasks, storage, completed, service = INSTANT[mode]
     assert _digest(_task_rows(env)) == tasks
     assert _digest(stock) == storage
     assert metrics.num_completed_tasks == completed
     assert metrics.mean_service_time == pytest.approx(service)
-    assert metrics.mean_putaway_distance == pytest.approx(putaway)
     assert all(task.kind == "pick" for task in env.tasks)
 
 
@@ -294,7 +287,6 @@ def test_the_demand_rule_puts_away_by_the_trip_under_robots(trip, shelf):
     result = putaway_demand(
         shelves, graph, {"tea": 3}, {}, {"tea": 1.0}, {}, {}, None, receiving=[0], trip=trip
     )
-    assert result.putaway_distance == 3 * (7 if shelf == 9 else 4)
     assert result.storage.counts["tea"] == {shelf: 3}
 
 

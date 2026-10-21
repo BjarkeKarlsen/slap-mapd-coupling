@@ -5,14 +5,23 @@ spec's instance, stock model and horizon. The test seeds are the first `--seeds`
 seed split. Each episode is one JSON row of the RunMetrics fields in `OUT/load_sweep.jsonl`,
 written as soon as it ends, so a sweep started again skips the rows already there.
 
-    python scripts/load_sweep.py --config configs/medium_putaway/decentralised.yaml \\
-        --rates 0.1 0.2 0.3 0.4 --seeds 6 --storage-modes fixed demand congestion --out DIR
+    python scripts/load_sweep.py --config configs/fleet_8/centralised.yaml \\
+        --rates-per-agent 0.025 0.05 0.075 0.1 --seeds 6 --out DIR
+
+`--rates-per-agent` gives the rates as a share of the fleet size m of the spec, so one grid
+serves every fleet. The sweep runs F_fix only unless `--storage-modes` says otherwise, since
+the main load is read off fixed storage and every rule and controller of a fleet then runs at
+that one rate, as the paired comparison needs.
 
 `OUT/summary.md` is written again after every sweep. It starts with the trip distance
 d^trip(v) of every storage vertex, then gives per rule and rate the means over seeds of the
-measures the author reads the main load, chi_max and the stall length off. The capacity of a
-rule is its highest mean throughput over the rates, and the arrival rate at 0.6 of it is given
-next to it. Throughput counts put-aways as well as picks. Nothing is chosen here.
+measures the author reads the main load and the stall length off. The capacity of a rule is
+the highest rate at which it, and every lower rate, keeps up on every seed (eq:throughput,
+f_up of the spec). Throughput is not used for it, because it counts put-aways, which grow with
+the rate, so it keeps rising after the fleet has fallen behind. The first rate that fails is
+given next to it, so a finer grid between the two can be added to the same OUT. The rate at
+0.6 of the capacity is the main load, and `OUT/capacity.json` holds the same numbers.
+Nothing is chosen here.
 """
 
 from __future__ import annotations
@@ -26,7 +35,7 @@ from typing import Any, Sequence
 
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageMode
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
-from slap_mapd_coupling.evaluation.evaluator import run_episode
+from slap_mapd_coupling.evaluation.evaluator import keeps_up, run_episode
 from slap_mapd_coupling.storage.arrival import trip_distance
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.spec import (
@@ -39,20 +48,19 @@ from slap_mapd_coupling.training.spec import (
 
 ROWS = "load_sweep.jsonl"
 SUMMARY = "summary.md"
+CAPACITY = "capacity.json"
 # The share of capacity the main load is read at.
 LOAD_SHARE = 0.6
 # The summary columns, the RunMetrics field of each, averaged over seeds.
 _COLUMNS = (
     ("throughput", "throughput"),
     ("completed share", "completed_share"),
-    ("backlog slope", "backlog_slope"),
     ("longest stand-still", "longest_stand_still"),
     ("total service", "total_service_time"),
     ("total service finished", "total_service_time_finished"),
     ("mean pick service", "mean_service_time"),
     ("put-aways per arrival", None),
     ("put-away service", "mean_putaway_service_time"),
-    ("put-away distance", "mean_putaway_distance"),
     ("unplaced units", "unplaced_units"),
 )
 
@@ -60,11 +68,13 @@ _COLUMNS = (
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--config", type=Path, required=True, help="a training spec (YAML)")
-    parser.add_argument("--rates", type=float, nargs="+", required=True)
-    parser.add_argument("--seeds", type=int, required=True, help="how many test seeds")
-    parser.add_argument(
-        "--storage-modes", nargs="+", default=["fixed", "demand", "congestion"], dest="modes"
+    rates = parser.add_mutually_exclusive_group(required=True)
+    rates.add_argument("--rates", type=float, nargs="+", help="arrival rates")
+    rates.add_argument(
+        "--rates-per-agent", type=float, nargs="+", help="arrival rates over the fleet size m"
     )
+    parser.add_argument("--seeds", type=int, required=True, help="how many test seeds")
+    parser.add_argument("--storage-modes", nargs="+", default=["fixed"], dest="modes")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--horizon", type=int, default=None, help="overrides the spec's T")
     args = parser.parse_args(argv)
@@ -76,8 +86,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     rows_path = args.out / ROWS
     rows = _read_rows(rows_path)
     done = {(row["storage_mode"], row["arrival_rate"], row["seed"]) for row in rows}
+    num_agents = spec.experiment.num_agents
+    sweep_rates = args.rates or [round(share * num_agents, 6) for share in args.rates_per_agent]
 
-    for rate in args.rates:
+    for rate in sweep_rates:
         # The starting stock is sized by the load, so every rate builds its own study.
         rated = override_spec(spec, arrival_rate=rate)
         study = build_study(rated)
@@ -98,8 +110,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"{mode} rate {rate} seed {seed}: throughput {metrics.throughput:.3f}")
 
     study = build_study(spec)
-    (args.out / SUMMARY).write_text(_summary(spec, study.instance.graph, rows), encoding="utf-8")
+    f_up = spec.experiment.keep_up_threshold
+    capacities = {mode: capacity(runs, f_up) for mode, runs in _by_mode(rows).items()}
+    (args.out / SUMMARY).write_text(
+        _summary(spec, study.instance.graph, rows, capacities), encoding="utf-8"
+    )
+    (args.out / CAPACITY).write_text(
+        json.dumps({"num_agents": num_agents, "f_up": f_up, "by_mode": capacities}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
     return 0
+
+
+def capacity(rows: list[dict[str, Any]], f_up: float) -> dict[str, float | None]:
+    """The capacity of one rule from its rows: the highest rate at which it, and every lower
+    rate, keeps up on every seed, the first rate that fails, and the main load, LOAD_SHARE of
+    the capacity. The check is eq:throughput with f_up, worked out from the row's counts so
+    a row written before the check changed is read the same way. A value is None when no
+    rate passes or none fails."""
+    passes_by_rate: dict[float, bool] = {}
+    for row in rows:
+        passed = keeps_up(row["num_completed_tasks"], row["backlog"], f_up)
+        rate = row["arrival_rate"]
+        passes_by_rate[rate] = passes_by_rate.get(rate, True) and bool(passed)
+    highest = first_failing = None
+    for rate in sorted(passes_by_rate):
+        if not passes_by_rate[rate]:
+            first_failing = rate
+            break
+        highest = rate
+    return {
+        "capacity": highest,
+        "first_failing_rate": first_failing,
+        "main_load": None if highest is None else round(LOAD_SHARE * highest, 6),
+    }
+
+
+def _by_mode(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_mode: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_mode.setdefault(row["storage_mode"], []).append(row)
+    return by_mode
 
 
 def _planner_config(spec: TrainingSpec, seed: int, mode: StorageMode) -> ExperimentConfig:
@@ -123,7 +175,13 @@ def receiving_vertices(spec: TrainingSpec, graph: WarehouseGraph) -> list[Vertex
     return sorted(v for v, vertex in graph.vertices.items() if getattr(vertex.role, role))
 
 
-def _summary(spec: TrainingSpec, graph: WarehouseGraph, rows: list[dict[str, Any]]) -> str:
+def _summary(
+    spec: TrainingSpec,
+    graph: WarehouseGraph,
+    rows: list[dict[str, Any]],
+    capacities: dict[str, dict[str, float | None]],
+) -> str:
+    f_up = spec.experiment.keep_up_threshold
     receiving = receiving_vertices(spec, graph)
     delivery = sorted(v for v, vertex in graph.vertices.items() if vertex.role.delivery)
     trips = {
@@ -145,14 +203,17 @@ def _summary(spec: TrainingSpec, graph: WarehouseGraph, rows: list[dict[str, Any
         "",
         "## Means over seeds",
         "",
-        "| rule | rate | seeds | " + " | ".join(name for name, _ in _COLUMNS) + " |",
-        "|---|---|---|" + "---|" * len(_COLUMNS),
+        "| rule | rate | seeds | keep up | " + " | ".join(name for name, _ in _COLUMNS) + " |",
+        "|---|---|---|---|" + "---|" * len(_COLUMNS),
     ]
     by_condition: dict[tuple[str, float], list[dict[str, Any]]] = {}
     for row in rows:
         by_condition.setdefault((row["storage_mode"], row["arrival_rate"]), []).append(row)
     for (mode, rate), runs in sorted(by_condition.items()):
-        cells = [mode, f"{rate:g}", str(len(runs))]
+        passed = sum(
+            bool(keeps_up(run["num_completed_tasks"], run["backlog"], f_up)) for run in runs
+        )
+        cells = [mode, f"{rate:g}", str(len(runs)), f"{passed} / {len(runs)}"]
         for _, field in _COLUMNS:
             if field is None:
                 values = [
@@ -169,20 +230,16 @@ def _summary(spec: TrainingSpec, graph: WarehouseGraph, rows: list[dict[str, Any
         "",
         "## Capacity",
         "",
-        f"The highest mean throughput over the rates, and the arrival rate at {LOAD_SHARE} of it.",
+        f"The highest rate that keeps up on every seed with f_up = {f_up:g}, every lower rate",
+        f"too, the first rate that fails, and the main load at {LOAD_SHARE} of the capacity.",
         "",
-        "| rule | capacity | at rate | rate at 0.6 |",
+        "| rule | capacity | first failing rate | main load |",
         "|---|---|---|---|",
     ]
-    for mode in sorted({mode for mode, _ in by_condition}):
-        means = {
-            rate: statistics.fmean(run["throughput"] for run in runs)
-            for (m, rate), runs in by_condition.items()
-            if m == mode
-        }
-        best = max(means, key=lambda rate: (means[rate], -rate))
+    for mode, found in sorted(capacities.items()):
+        cells = [found[key] for key in ("capacity", "first_failing_rate", "main_load")]
         lines.append(
-            f"| {mode} | {means[best]:.3f} | {best:g} | {LOAD_SHARE * means[best]:.3f} |"
+            f"| {mode} | " + " | ".join("n/a" if c is None else f"{c:g}" for c in cells) + " |"
         )
     return "\n".join(lines) + "\n"
 
