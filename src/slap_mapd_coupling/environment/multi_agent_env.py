@@ -62,6 +62,11 @@ and the put-away rule of the storage mode decides which shelves it goes to, with
 already on a shelf (storage/arrival.py). An order waiting for stock is served by stage 1 of the
 next step, after the arrival.
 
+A pick task promises its units when it is created and takes them at pickup. Until then they are
+reserved, r_t: they stay on the shelf and take up its room, but no other line can take them. So
+the pickup rule serves lines from x_t - r_t, and the shelf room frees only when the robot picks
+the units up. The arrival amounts count x_t - r_t, the units still free to promise.
+
 When robots carry the put-away (config.stock_putaway == "robots", sec:pf:storage) the arriving
 units do not reach the shelf at the arrival. Every (SKU, shelf) the rule put units on gives one
 put-away task, released at the arrival, from the receiving vertex nearest the shelf (ties by
@@ -421,6 +426,9 @@ class WarehouseMAPDEnv:
         }
         # Robot put-away only: x^in_t, the units on their way to each shelf.
         self._in_transit: dict[SkuId, dict[VertexId, int]] = {}
+        # Arrival stock model only: r_t, the units on each shelf promised to picks not yet
+        # picked up.
+        self._reserved: dict[SkuId, dict[VertexId, int]] = {}
         self._t = 0
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
@@ -593,8 +601,10 @@ class WarehouseMAPDEnv:
         robots = self.config.stock_putaway == "robots"
         # The arrivals count the stock on its way as stock, so it is not ordered again.
         given = self._shelf_and_transit() if robots else self.storage
+        # Reserved units are already promised, so the amounts count only the free ones. The
+        # rule still sees them, because they take up room until they are picked up.
         amounts = arrival_amounts(
-            given,
+            self._unreserved(given),
             estimates.units,
             delta,
             self.config.stock_margin,
@@ -664,6 +674,29 @@ class WarehouseMAPDEnv:
             for v, units in per_vertex.items():
                 target[v] = target.get(v, 0) + units
         return StorageState(skus=self._skus, capacities=self._storage_capacities, counts=counts)
+
+    def _unreserved(self, storage: StorageState) -> StorageState:
+        """`storage` less r_t, the units promised to picks not yet picked up."""
+        counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in storage.counts.items()}
+        for sku_id, per_vertex in self._reserved.items():
+            target = counts[sku_id]
+            for v, units in per_vertex.items():
+                target[v] -= units
+        return StorageState(skus=self._skus, capacities=self._storage_capacities, counts=counts)
+
+    def _pick_up_units(self, task: Task, t: int) -> None:
+        """A pick picked up at t under the arrival stock model: its units leave the shelf and
+        their reservation."""
+        reserved = self._reserved[task.sku]
+        reserved[task.pickup_vertex] -= task.quantity
+        if not reserved[task.pickup_vertex]:
+            del reserved[task.pickup_vertex]
+        counts = {sku_id: dict(units) for sku_id, units in self.storage.counts.items()}
+        counts[task.sku][task.pickup_vertex] -= task.quantity
+        self.storage = StorageState(
+            skus=self._skus, capacities=self._storage_capacities, counts=counts
+        )
+        self._take_units(task.sku, task.pickup_vertex, task.quantity, t)
 
     def _shelve(self, task: Task, t: int) -> None:
         """A put-away delivered at t: its units move from x^in_t onto the shelf, as a lot that
@@ -763,7 +796,11 @@ class WarehouseMAPDEnv:
             self._estimator.record_order(line.sku, line.missing)
         self._waiting_orders.extend(lines)
 
-        counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in self.storage.counts.items()}
+        # The lines are served from the free units, x_t - r_t.
+        counts = {
+            sku_id: dict(per_vertex)
+            for sku_id, per_vertex in self._unreserved(self.storage).counts.items()
+        }
         still_waiting: list[OrderLine] = []
         new_tasks: list[Task] = []
         for line in self._waiting_orders:
@@ -781,7 +818,8 @@ class WarehouseMAPDEnv:
                 quantity = min(missing, per_vertex[pickup])
                 per_vertex[pickup] -= quantity
                 missing -= quantity
-                self._take_units(line.sku, pickup, quantity, t)
+                reserved = self._reserved.setdefault(line.sku, {})
+                reserved[pickup] = reserved.get(pickup, 0) + quantity
                 task = Task(
                     task_id=self._next_task_id,
                     release_time=line.release_time,
@@ -800,10 +838,6 @@ class WarehouseMAPDEnv:
                 still_waiting.append(line._replace(missing=missing))
                 self.log.lines_waited.add((line.order_id, line.line_index))
         self._waiting_orders = still_waiting
-        if new_tasks:
-            self.storage = StorageState(
-                skus=self._skus, capacities=self._storage_capacities, counts=counts
-            )
         return new_tasks
 
     def _draw_single_line_orders(self, t: int, ranked: list[SkuId]) -> list[OrderLine]:
@@ -980,6 +1014,8 @@ class WarehouseMAPDEnv:
             location = locations[task.assigned_agent]
             if task.pickup_time is None and location == task.pickup_vertex:
                 task = task.pick_up(next_t)
+                if task.kind == "pick" and self.config.stock_model == "arrival":
+                    self._pick_up_units(task, next_t)
             if task.pickup_time is not None and location == task.delivery_vertex:
                 task = task.complete(next_t)
                 if task.kind == "putaway":

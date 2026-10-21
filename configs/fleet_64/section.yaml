@@ -43,7 +43,7 @@ experiment:
 instance:
   max_num_aisles: 32
   max_aisle_length: 28
-  max_num_cross_aisles: 20
+  max_num_cross_aisles: 28
   one_way_fraction: 0.0
   default_edge_cost: 1.0
   random_edge_costs: false
