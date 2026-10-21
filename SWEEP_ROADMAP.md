@@ -5,20 +5,18 @@
 ## What needs to be done
 
 The thesis plan (Section 4.3, RQ4) requires Token Passing load sweeps on all four fleet-size warehouses to:
-1. Determine the capacity for each warehouse
-2. Confirm that **0.6 of capacity** is a good main load that all arms can keep up with
-3. Extract **chi_max** (the maximum healthy backlog slope) from the sweeps
-4. Determine **stall_length** (agents standing still threshold) for the keep-up check
+1. Determine the capacity for each warehouse, the highest arrival rate at which fixed storage
+   keeps up on every seed (`eq:throughput`, `f_up`)
+2. Set the main load of each fleet to **0.6 of capacity**, one rate for every rule and controller
+3. Determine **stall_length** (agents standing still threshold)
+
+The backlog slope and `chi_max` are gone from the keep-up check ([A49]).
 
 ## Current state
 
-✓ **8-agent warehouse**: Sweep completed
-- Location: `DIR/load_sweep.jsonl`
-- Capacity: ~0.515 tasks/timestep
-- Rate at 0.6 of capacity: ~0.309 tasks/timestep
-- Chi_max: ~0.102 (needs verification from data)
+⏳ **Every fleet size (8, 16, 32, 64)**: the earlier sweeps in `DIR/` ran on the warehouse graphs
+before the graph fix and read capacity off throughput, so they are run again.
 
-⏳ **16, 32, 64-agent warehouses**: Configs created, sweeps need to run
 - Configs: `configs/fleet_{8,16,32,64}/{centralised,section,decentralised}.yaml`
 - Visualizations: being generated in `DIR/warehouse_images/`
 
@@ -102,7 +100,7 @@ cd /home/bjarkek/Documents/thesis/slap-mapd-coupling
 
 This will:
 1. Read results from `DIR/sweep_{N}_agents/load_sweep.jsonl`
-2. Extract capacity, chi_max, and rate_at_0_6 for each
+2. Collect capacity, first failing rate and main load for each
 3. Save to `DIR/fleet_parameters.json`
 4. Print recommendations for thesis parameters
 
@@ -140,10 +138,9 @@ DIR/
 
 Once all sweeps are complete and parameters extracted:
 
-1. **Update code with chi_max** — set the keep-up check threshold
-2. **Use rate_at_0_6 for each fleet size** — update arrival rates in configs
-3. **Start long training runs** — RQ1 and RQ2 with confirmed parameters
-4. **Run RQ3, RQ4, RQ5** — remaining research questions
+1. **Use the main load for each fleet size** — update arrival rates in configs
+2. **Start long training runs** — RQ1 and RQ2 with confirmed parameters
+3. **Run RQ3, RQ4, RQ5** — remaining research questions
 
 ## Notes
 

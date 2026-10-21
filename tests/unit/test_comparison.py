@@ -68,13 +68,13 @@ def _split_run(seed, storage_mode, wait, travel, blocked):
     )
 
 
-def test_the_relative_gain_is_the_gain_over_the_route_time_under_fixed_storage():
-    # Route time under F_fix, total travel plus blocked, is 80 and 120. The gains are 20 and 20.
+def test_the_relative_gain_is_a_percentage_of_the_mean_service_time_under_fixed_storage():
+    # The mean service time under F_fix is 10 and 12. The gains are 2 and 2.
     fixed = [_split_run(0, "fixed", 2.0, 6.0, 2.0), _split_run(1, "fixed", 0.0, 8.0, 4.0)]
     adaptive = [_split_run(0, "demand", 1.0, 5.0, 2.0), _split_run(1, "demand", 0.0, 7.0, 3.0)]
     result = compare_paired(fixed, adaptive)
-    assert result.gains == pytest.approx((20.0, 20.0))
-    relative = [2.0 / 8.0, 2.0 / 12.0]
+    assert result.gains == pytest.approx((2.0, 2.0))
+    relative = [100 * 2.0 / 10.0, 100 * 2.0 / 12.0]
     mean = sum(relative) / 2
     half = stats.t.ppf(0.975, df=1) * stats.tstd(relative) / 2**0.5
     assert result.mean_relative_gain == pytest.approx(mean)
@@ -95,13 +95,13 @@ def test_consistent_gain_shortens_service_time():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     result = compare_paired(fixed, adaptive)
     assert result.all_keep_up
-    assert result.gains == pytest.approx((10.0, 12.0, 9.0, 11.0))
-    assert result.mean_gain == pytest.approx(10.5)
+    assert result.gains == pytest.approx((1.0, 1.2, 0.9, 1.1))
+    assert result.mean_gain == pytest.approx(1.05)
     assert result.ci_low > 0.0
     assert result.shortens_service_time
 
 
-def test_the_gain_is_in_total_service_time_and_the_mean_pick_gain_is_reported_next_to_it():
+def test_the_gain_is_in_mean_pick_service_time_not_total_service_time():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     # The adaptive arm makes more tasks, so its total grows while its picks get faster.
     adaptive = [
@@ -114,19 +114,15 @@ def test_the_gain_is_in_total_service_time_and_the_mean_pick_gain_is_reported_ne
         for run in adaptive
     ]
     result = compare_paired(fixed, adaptive)
-    assert result.gains == pytest.approx((-10.0, -8.0, -11.0, -9.0))
-    assert not result.shortens_service_time
-    assert result.mean_pick_gain == pytest.approx(1.05)
-    gains = [1.0, 1.2, 0.9, 1.1]
-    expected = stats.t.interval(0.95, df=3, loc=1.05, scale=stats.sem(gains))
-    assert (result.pick_ci_low, result.pick_ci_high) == pytest.approx(expected)
+    assert result.gains == pytest.approx((1.0, 1.2, 0.9, 1.1))
+    assert result.shortens_service_time
 
 
 def test_interval_matches_a_paired_t_test():
     fixed, adaptive = _arms([10.0, 11.0, 12.0, 10.5], [9.0, 9.8, 11.1, 9.4])
     result = compare_paired(fixed, adaptive)
-    gains = [10.0, 12.0, 9.0, 11.0]
-    expected = stats.t.interval(0.95, df=3, loc=10.5, scale=stats.sem(gains))
+    gains = [1.0, 1.2, 0.9, 1.1]
+    expected = stats.t.interval(0.95, df=3, loc=1.05, scale=stats.sem(gains))
     assert (result.ci_low, result.ci_high) == pytest.approx(expected)
 
 

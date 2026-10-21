@@ -21,8 +21,7 @@ are sampled, as in every reported result.
 
 `summary.md` compares every adaptive mode with F_fix over the test seeds, pairing the runs seed
 by seed (evaluation/comparison.py::compare_paired), once for the chosen and once for the last
-checkpoint. For an arrival run it also gives the put-away distance per update and the wait for
-stock of both arms.
+checkpoint. For an arrival run it also gives the wait for stock of both arms.
 """
 
 from __future__ import annotations
@@ -175,26 +174,25 @@ def evaluate_run(
     return RunEvaluation(chosen, last, validation_rows, test_rows)
 
 
-# The total gain and the relative gain lead. The mean pick gain and the order completion time
-# (arrival runs) follow.
+# The gain in mean pick service time and the relative gain lead. The order completion time
+# (arrival runs) follows.
 _SUMMARY_HEADER = (
-    "| checkpoint | storage mode | seeds | all keep up | total gain | CI | relative gain [CI] "
-    "| shortens | mean pick gain [CI] | throughput F_fix | throughput mode "
+    "| checkpoint | storage mode | seeds | all keep up | gain | CI | relative gain % [CI] "
+    "| shortens | throughput F_fix | throughput mode "
     "| total service F_fix | total service mode | pick service F_fix | pick service mode |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
-# The columns an arrival run adds to every row: the put-away distance per update and the wait
-# for stock of both arms, and the order completion time under each rule, F_fix / mode.
+# The columns an arrival run adds to every row: the wait for stock of both arms, and the order
+# completion time under each rule, F_fix / mode.
 _ARRIVAL_HEADER = (
-    " putaway per update F_fix | putaway per update mode | stock wait F_fix | stock wait mode "
-    "| order completion F_fix / mode |",
-    "---|---|---|---|---|",
+    " stock wait F_fix | stock wait mode | order completion F_fix / mode |",
+    "---|---|---|",
 )
 
 
 def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMetrics]]) -> str:
     """The markdown of `summary.md`. Each adaptive mode is paired with F_fix over the same test
-    seeds. The gain is F_fix minus the mode in total service time, so a positive gain means the
+    seeds. The gain is F_fix minus the mode in mean pick service time, so a positive gain means the
     adaptive rule is faster, and it is only given when every run keeps up."""
     lines = ["# Adaptive storage against fixed storage on the test seeds", ""]
     adaptive = [mode for mode in modes if mode != "fixed"]
@@ -211,7 +209,7 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])
             except ValueError as error:
-                lines.append(f"| {role} | {mode} | {error} |" + " |" * (17 if arrival else 12))
+                lines.append(f"| {role} | {mode} | {error} |" + " |" * (14 if arrival else 11))
                 continue
             row = _summary_row(role, result, arrival)
             if arrival:
@@ -226,9 +224,7 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
     def mean(summary: dict, name: str) -> str:
         return f"{summary[name].mean:.3f}" if name in summary else "n/a"
 
-    gain = ci = relative = pick = "n/a"
-    if result.mean_pick_gain is not None:
-        pick = f"{result.mean_pick_gain:.3f} [{result.pick_ci_low:.3f}, {result.pick_ci_high:.3f}]"
+    gain = ci = relative = "n/a"
     if result.mean_gain is not None:
         gain = f"{result.mean_gain:.3f}"
         ci = f"[{result.ci_low:.3f}, {result.ci_high:.3f}]"
@@ -246,7 +242,6 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
         ci,
         relative,
         str(result.shortens_service_time),
-        pick,
         mean(result.fixed_summary, "throughput"),
         mean(result.adaptive_summary, "throughput"),
         mean(result.fixed_summary, "total_service_time"),
@@ -256,8 +251,6 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
     ]
     if arrival:
         cells += [
-            mean(result.fixed_summary, "mean_putaway_distance"),
-            mean(result.adaptive_summary, "mean_putaway_distance"),
             mean(result.fixed_summary, "mean_stock_wait"),
             mean(result.adaptive_summary, "mean_stock_wait"),
         ]

@@ -80,10 +80,8 @@ class ExperimentConfig(BaseModel):
     # congestion feature it bounds, are read by all three architectures
     # (sec:pf:env, sec:pf:controllers), not only the decentralised one.
     observation_depth: PositiveInt
-    # f_up and chi_max in the keep-up check (tab:evalparams). chi_max is TBD, set from the
-    # Token Passing load sweep. RunMetrics.keeps_up stays unset unless both are given.
+    # f_up in the keep-up check (tab:evalparams). RunMetrics.keeps_up stays unset without it.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
-    backlog_slope_max: float | None = None
     # The stall length (tab:evalparams), TBD. An episode in which an agent holding a task stands
     # still longer than this is a stall. None leaves RunMetrics.stalled unset.
     stall_length: PositiveInt | None = None

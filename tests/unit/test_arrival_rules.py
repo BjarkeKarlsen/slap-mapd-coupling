@@ -126,7 +126,6 @@ def test_fixed_fills_the_home_shelf_first_and_overflows_to_the_nearest_shelf():
     assert result.overflow_units == 2
     assert result.unplaced_units == 0
     assert result.arrived_units == 7
-    assert result.putaway_distance == 3 * ACCESS[4] + 2 * ACCESS[1] + 2 * ACCESS[0]
 
 
 def test_fixed_places_the_skus_in_id_order():
@@ -143,7 +142,6 @@ def test_demand_puts_the_most_demanded_sku_on_the_nearest_shelves():
     # b first: both at 1. Then a: 2 more at 1, then 3 at 5. Stock on 4 and 0 stays.
     assert result.storage.counts == {"a": {4: 1, 1: 2, 5: 3}, "b": {0: 1, 1: 2}}
     assert result.overflow_units == 0
-    assert result.putaway_distance == 4 * ACCESS[1] + 3 * ACCESS[5]
 
     flipped = _put_away("demand", x_prev, {"a": 5, "b": 2}, demand={"a": 0.02, "b": 0.01})
     assert flipped.storage.counts == {"a": {4: 1, 1: 4, 5: 1}, "b": {0: 1, 5: 2}}
@@ -207,13 +205,12 @@ def test_nothing_already_on_a_shelf_moves(rule):
     assert added == 5
 
 
-def test_the_putaway_distance_is_from_the_nearest_delivery_vertex_to_the_shelf():
+def test_the_shelves_are_filled_by_distance_from_the_nearest_delivery_vertex():
     graph = _line()
     for v, expected in ACCESS.items():
         assert min(graph.distance(g, v) for g in (2, 6)) == expected
     result = _put_away("demand", _state({}, capacity=1.0), {"a": 4}, demand={"a": 0.1})
     assert result.storage.counts == {"a": {1: 1, 5: 1, 0: 1, 4: 1}}
-    assert result.putaway_distance == sum(ACCESS.values())
 
 
 # The home shelf and the split SKUs.
@@ -331,7 +328,6 @@ def test_each_arrival_moves_nothing_and_logs_what_it_placed(mode):
         assert added == result.arrived_units - result.unplaced_units
     log = env.log
     assert log.arrived_units_by_update == [r.arrived_units for _, r in calls]
-    assert log.putaway_distance_by_update == [r.putaway_distance for _, r in calls]
     assert log.unplaced_units_by_update == [r.unplaced_units for _, r in calls]
     assert log.overflow_units_by_update == [r.overflow_units for _, r in calls]
     assert log.split_skus_by_update == [
@@ -350,7 +346,6 @@ def test_a_full_arrival_episode_replays_bit_for_bit():
     assert first._waiting_orders == second._waiting_orders
     assert first.log.backlog_by_t == second.log.backlog_by_t
     assert first.log.stock_wait_by_task == second.log.stock_wait_by_task
-    assert first.log.putaway_distance_by_update == second.log.putaway_distance_by_update
     assert first.log.split_skus_by_update == second.log.split_skus_by_update
 
 

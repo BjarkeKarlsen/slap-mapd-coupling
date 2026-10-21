@@ -255,14 +255,13 @@ ARRIVAL_CONFIG = (
 
 
 def _arrival_metrics(seed, storage_mode, service_time):
-    """An arrival run that keeps up: its put-away and its wait for stock are reported."""
+    """An arrival run that keeps up: its wait for stock is reported."""
     values = _real_metrics(seed, storage_mode, service_time).model_dump()
     values.update(
         stock_model="arrival",
         num_storage_updates=1,
         mean_relocated_units=0.0,
         mean_stock_wait=1.0 if storage_mode == "fixed" else 0.5,
-        mean_putaway_distance=110.0 if storage_mode == "fixed" else 54.0,
         mean_arrived_units=30.0,
         mean_split_skus=0.0 if storage_mode == "fixed" else 4.0,
         mean_order_completion=12.0 if storage_mode == "fixed" else 9.0,
@@ -298,32 +297,29 @@ def test_a_template_summary_keeps_its_columns(tmp_path, fake_episodes, monkeypat
     assert lines[2:4] == header
     rows = [line for line in lines if line.startswith("| chosen") or line.startswith("| last")]
     assert len(rows) == 2
-    assert all(len(_cells(row)) == 15 for row in rows)
-    # Every F_fix run takes 200 steps in total, 100 of them travel and blocked, so the relative
-    # gain is the total gain over 100. The total gain and the relative gain lead.
+    assert all(len(_cells(row)) == 14 for row in rows)
+    # Every F_fix run has a mean pick service time of 10, so the relative gain, a percentage of
+    # it, is ten times the gain. The gain and the relative gain lead.
     chosen = _cells(rows[0])
-    assert chosen[6].startswith(f"{float(chosen[4]) / 100:.3f} [")
-    assert chosen[8].startswith(f"{float(chosen[4]) / 20:.3f} [")  # the mean pick gain
-    assert "putaway" not in "\n".join(lines) and "stock wait" not in "\n".join(lines)
+    assert chosen[6].startswith(f"{float(chosen[4]) * 10:.3f} [")
+    assert "stock wait" not in "\n".join(lines)
 
 
-def test_an_arrival_summary_adds_putaway_stock_wait_and_order_completion(
+def test_an_arrival_summary_adds_stock_wait_and_order_completion(
     tmp_path, fake_episodes, monkeypatch
 ):
     fake_episodes([3, 9])
     lines = _summary_of(tmp_path, monkeypatch, _arrival_metrics, ARRIVAL_CONFIG)
     header = _cells(lines[2])
-    assert len(header) == 20 and len(_cells(lines[3])) == 20
-    assert header[15:] == [
-        "putaway per update F_fix",
-        "putaway per update mode",
+    assert len(header) == 17 and len(_cells(lines[3])) == 17
+    assert header[14:] == [
         "stock wait F_fix",
         "stock wait mode",
         "order completion F_fix / mode",
     ]
     chosen = _cells(next(line for line in lines if line.startswith("| chosen")))
     assert chosen[:2] == ["chosen", "demand"]
-    assert chosen[15:] == ["110.000", "54.000", "1.000", "0.500", "12.000 / 9.000"]
+    assert chosen[14:] == ["1.000", "0.500", "12.000 / 9.000"]
 
 
 def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episodes, monkeypatch):

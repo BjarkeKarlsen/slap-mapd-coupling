@@ -35,7 +35,6 @@ _SPLIT_TOLERANCE = 1e-9
 # The measures of the arrival stock model, put-away first. Every one is at its default under the
 # template model.
 _PUTAWAY_FIELDS = (
-    "mean_putaway_distance",
     "mean_arrived_units",
     "mean_split_skus",
     "unplaced_units",
@@ -96,10 +95,7 @@ class RunMetrics(BaseModel):
     # |C_T| / (|C_T| + B_T), the share of the released tasks that finished. None iff nothing
     # was released.
     completed_share: NonNegativeFloat | None = None
-    # chi_T, the least-squares slope of B_t over T/2 <= t <= T, in tasks per timestep.
-    backlog_slope: float | None = None
-    # The keep-up check: completed_share >= f_up and backlog_slope <= chi_max. None unless
-    # both thresholds are configured, since tab:evalparams leaves chi_max TBD.
+    # The keep-up check, Lambda_T >= f_up (|C_T| + B_T) / T. None unless f_up is configured.
     keeps_up: bool | None = None
     # The longest run of consecutive blocked ticks of any task, finished or still active at T.
     longest_stand_still: NonNegativeInt = 0
@@ -170,9 +166,6 @@ class RunMetrics(BaseModel):
     mean_relocation_distance: NonNegativeFloat = 0.0
 
     # --- put-away, arrival stock model only. All stay at 0 under the template model ---
-    # The put-away measure, averaged over arrivals: the travel of the arriving units from the
-    # nearest receiving vertex to their shelves (units x d_G). 0.0 without an arrival.
-    mean_putaway_distance: NonNegativeFloat = 0.0
     mean_arrived_units: NonNegativeFloat = 0.0  # units arrived per arrival, placed or not
     # SKUs held at more than one storage vertex after an arrival, averaged over arrivals.
     mean_split_skus: NonNegativeFloat = 0.0

@@ -75,7 +75,6 @@ def _arrival_row(**overrides) -> dict:
         mean_stock_wait=1.5,
         num_waiting_orders=2,
         backlog=5,
-        mean_putaway_distance=54.0,
         mean_arrived_units=30.0,
         mean_split_skus=4.5,
         unplaced_units=0,
@@ -90,7 +89,7 @@ def test_a_template_row_keeps_every_arrival_field_at_its_default():
     assert metrics.stock_model == "template"
     assert metrics.mean_stock_wait is None
     assert metrics.num_waiting_orders == 0
-    assert (metrics.mean_putaway_distance, metrics.mean_arrived_units) == (0.0, 0.0)
+    assert metrics.mean_arrived_units == 0.0
     assert (metrics.mean_split_skus, metrics.unplaced_units, metrics.overflow_units) == (0, 0, 0)
 
 
@@ -99,7 +98,6 @@ def test_a_template_row_keeps_every_arrival_field_at_its_default():
     [
         ("mean_stock_wait", 1.0),
         ("num_waiting_orders", 1),
-        ("mean_putaway_distance", 3.0),
         ("mean_arrived_units", 3.0),
         ("mean_split_skus", 1.0),
         ("unplaced_units", 1),
@@ -158,7 +156,6 @@ def test_an_arrival_row_without_an_arrival_has_no_putaway():
     with pytest.raises(ValidationError, match="no arrival"):
         RunMetrics(**_arrival_row(num_storage_updates=0))
     no_putaway = dict(
-        mean_putaway_distance=0.0,
         mean_arrived_units=0.0,
         mean_split_skus=0.0,
         num_storage_updates=0,
@@ -214,7 +211,6 @@ def test_an_arrival_episode_reports_its_log(mode):
     assert metrics.backlog == (
         metrics.num_waiting_tasks + metrics.num_active_tasks + metrics.num_waiting_orders
     )
-    assert metrics.mean_putaway_distance == log.putaway_distance_by_update[0]
     assert metrics.mean_arrived_units == log.arrived_units_by_update[0]
     assert metrics.mean_split_skus == log.split_skus_by_update[0]
     assert metrics.unplaced_units == sum(log.unplaced_units_by_update)
@@ -227,7 +223,6 @@ def test_the_means_are_over_arrivals():
     metrics = _to_run_metrics(env, config)
     log = env.log
     assert metrics.num_storage_updates == 2
-    assert metrics.mean_putaway_distance == pytest.approx(sum(log.putaway_distance_by_update) / 2)
     assert metrics.mean_arrived_units == pytest.approx(sum(log.arrived_units_by_update) / 2)
     assert metrics.mean_split_skus == pytest.approx(sum(log.split_skus_by_update) / 2)
 
@@ -238,7 +233,7 @@ def test_a_template_episode_keeps_the_arrival_defaults():
     metrics = _to_run_metrics(env, config)
     assert metrics.stock_model == "template"
     assert metrics.mean_stock_wait is None and metrics.num_waiting_orders == 0
-    assert metrics.mean_putaway_distance == 0.0 and metrics.num_storage_updates == 0
+    assert metrics.mean_arrived_units == 0.0 and metrics.num_storage_updates == 0
 
 
 # The paired comparison
@@ -257,7 +252,6 @@ def _run(seed, service_time, storage_mode="fixed", **overrides):
         total_service_time=round(10 * service_time),
         total_wait_for_agent=round(5 * service_time),
         total_travel_time=round(10 * service_time) - round(5 * service_time),
-        mean_putaway_distance=110.0 if storage_mode == "fixed" else 54.0 + seed,
         mean_stock_wait=1.0 + seed,
     )
     values.update(overrides)
@@ -273,14 +267,11 @@ def test_a_template_run_and_an_arrival_run_are_not_a_pair():
         compare_paired(fixed, template)
 
 
-def test_two_arrival_arms_are_paired_with_their_putaway_and_stock_wait():
+def test_two_arrival_arms_are_paired_with_their_split_skus_and_stock_wait():
     fixed = [_run(seed, 10.0 + seed) for seed in range(3)]
     adaptive = [_run(seed, 8.0 + seed, "demand") for seed in range(3)]
     result = compare_paired(fixed, adaptive)
-    assert result.gains == pytest.approx((20.0, 20.0, 20.0))
-    assert result.mean_pick_gain == pytest.approx(2.0)
-    assert result.fixed_summary["mean_putaway_distance"].mean == pytest.approx(110.0)
-    assert result.adaptive_summary["mean_putaway_distance"].mean == pytest.approx(55.0)
+    assert result.gains == pytest.approx((2.0, 2.0, 2.0))
     assert result.adaptive_summary["mean_split_skus"].mean == pytest.approx(4.5)
     assert result.fixed_summary["mean_stock_wait"].mean == pytest.approx(2.0)
 
@@ -290,7 +281,7 @@ def test_the_stock_wait_is_left_out_when_a_run_falls_behind():
     adaptive = [_run(seed, 8.0, "demand") for seed in range(3)]
     result = compare_paired(fixed, adaptive)
     assert "mean_stock_wait" not in result.fixed_summary
-    assert "mean_putaway_distance" in result.fixed_summary
+    assert "mean_split_skus" in result.fixed_summary
 
 
 # configs/medium_arrival

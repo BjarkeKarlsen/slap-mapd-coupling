@@ -1,177 +1,77 @@
 # Fleet Load Sweep Quick Start Guide
 
-**Branch:** `feat/fleet-load-sweeps`
+How to run the Token Passing load sweeps for the 8, 16, 32 and 64-agent warehouses and read off
+the main load of each fleet.
 
-This guide covers how to run the Token Passing load sweeps for 8, 16, 32, and 64-agent warehouses to extract parameters for your thesis (RQ4).
+## What is measured
 
-## What's on this branch
+The sweep runs fixed storage only. The capacity of a fleet is the highest arrival rate at which
+F_fix, and every lower rate, keeps up on every seed, meaning throughput is at least `f_up` times
+the rate tasks were released (`eq:throughput`, [A49]). The main load is 0.6 of that capacity, and
+every storage rule and every controller of that fleet runs at this one rate, as the paired
+comparison needs.
 
-✓ **New warehouse configs** for all fleet sizes:
-- `configs/fleet_8/` — 8-agent baseline (already have sweep results)
-- `configs/fleet_16/` — 16-agent warehouse
-- `configs/fleet_32/` — 32-agent warehouse  
-- `configs/fleet_64/` — 64-agent warehouse
+Throughput is not used as the capacity. It counts put-aways, which grow with the rate, so it
+keeps rising after the fleet has fallen behind.
 
-Each has centralised, section-based, and decentralised controller configs.
+## Configs and scripts
 
-✓ **Sweep scripts**:
-- `scripts/run_fleet_sweeps.sh` — Run all sweeps in sequence
-- `scripts/extract_sweep_parameters.py` — Extract results from completed sweeps
+- `configs/fleet_{8,16,32,64}/` — one warehouse per fleet size, with centralised, section-based
+  and decentralised configs. The sweep reads `centralised.yaml` for the instance and `f_up`.
+- `scripts/run_fleet_sweeps.sh` — runs every fleet size in sequence.
+- `scripts/load_sweep.py` — one fleet size.
+- `scripts/extract_sweep_parameters.py` — collects the capacity of every fleet size.
 
-✓ **Documentation**:
-- `SWEEP_ROADMAP.md` — Detailed roadmap
-- This file — Quick start guide
-
-## Quick Start
-
-### 1. Checkout the branch locally
+## Run
 
 ```bash
-git fetch origin
-git checkout feat/fleet-load-sweeps
+./scripts/run_fleet_sweeps.sh DIR
 ```
 
-### 2. Run all load sweeps
+or one fleet size by hand:
 
-**Option A: Automatic (recommended)**
 ```bash
-./scripts/run_fleet_sweeps.sh
-```
-
-This runs Token Passing sweeps for 8, 16, 32, and 64-agent warehouses in sequence.
-
-**Option B: Manual (one at a time)**
-```bash
-# For each fleet size: 8, 16, 32, 64
 ~/.venvs/rl/bin/python scripts/load_sweep.py \
     --config configs/fleet_SIZE/centralised.yaml \
-    --rates 0.1 0.2 0.3 0.4 \
+    --rates-per-agent 0.0125 0.025 0.0375 0.05 0.0625 0.075 0.0875 0.1 \
     --seeds 6 \
-    --storage-modes fixed demand congestion \
     --out DIR/sweep_SIZE_agents
 ```
 
-### 3. Extract parameters
+`--rates-per-agent` is multiplied by the fleet size m, so one grid serves every fleet.
+`--rates` takes absolute rates instead. Add `--storage-modes fixed demand congestion` to see
+the adaptive rules at the same rates.
 
-Once all sweeps are complete:
+## Refine
+
+Each sweep writes `summary.md` and `capacity.json` with the capacity and the first rate that
+fails. Run the same command again with extra rates between the two and the same `--out`. Rows
+already there are skipped, and only the new rates run.
+
+## Collect
 
 ```bash
-python scripts/extract_sweep_parameters.py
+python scripts/extract_sweep_parameters.py DIR
 ```
 
-This generates `DIR/fleet_parameters.json` with:
-- `capacity` — max throughput (tasks/step) for each fleet size
-- `chi_max` — max healthy backlog slope (keep-up threshold)
-- `rate_at_0_6` — arrival rate at 0.6 of capacity (recommended main load)
+This prints one row per fleet size (capacity, first failing rate, main load) and writes
+`DIR/fleet_parameters.json`. Then set `arrival_rate` in `configs/fleet_{SIZE}/*.yaml` to the
+main load.
 
-### 4. Update your configs and code
-
-Using the extracted parameters:
-
-1. Update `configs/fleet_{SIZE}/*.yaml` with the `arrival_rate` from `rate_at_0_6`
-2. Set `chi_max` in your keep-up check (evaluation code)
-3. Proceed with long training runs (step 5 of thesis plan)
-
-## Folder structure after sweeps
+## Output
 
 ```
 DIR/
-├── load_sweep.jsonl              # 8-agent results (existing)
-├── summary.md                    # 8-agent summary
-├── sweep_8_agents/
-│   ├── load_sweep.jsonl         # results for each storage mode
-│   └── summary.md               # human-readable summary
-├── sweep_16_agents/
-│   ├── load_sweep.jsonl
-│   └── summary.md
-├── sweep_32_agents/
-│   ├── load_sweep.jsonl
-│   └── summary.md
-├── sweep_64_agents/
-│   ├── load_sweep.jsonl
-│   └── summary.md
-└── fleet_parameters.json        # extracted parameters (generated)
+├── sweep_{8,16,32,64}_agents/
+│   ├── load_sweep.jsonl   # one RunMetrics row per (rule, rate, seed)
+│   ├── summary.md         # means over seeds, seeds that keep up, capacity
+│   └── capacity.json      # capacity, first failing rate and main load per rule
+└── fleet_parameters.json  # F_fix of every fleet size
 ```
-
-## Time estimates
-
-- **8-agent**: 20-30 minutes (already done, shows as ~0 if re-run)
-- **16-agent**: 40-60 minutes
-- **32-agent**: 1-2 hours
-- **64-agent**: 2-4 hours
-
-**Total: 4-8 hours** for the three new sweeps
-
-You can run this in the background or overnight:
-```bash
-nohup ./scripts/run_fleet_sweeps.sh > sweep_run.log 2>&1 &
-tail -f sweep_run.log  # Monitor progress
-```
-
-## What to expect in the output
-
-Each sweep generates:
-
-### `load_sweep.jsonl` (raw results)
-One JSON object per line, one line per (storage_mode, arrival_rate, seed) combination.
-Fields include: throughput, backlog_slope, mean_service_time, etc.
-
-### `summary.md` (readable summary)
-A markdown table showing per-rate aggregates (means over seeds) for:
-- Throughput
-- Backlog slope
-- Service times
-- Capacity calculation
-- Rate at 0.6 of capacity
-
-## Understanding the results
-
-After extraction, check the summary table:
-
-| Agents | Capacity | Chi_max | Rate at 0.6x |
-|--------|----------|---------|-------------|
-| 8      | 0.515    | ~0.1    | 0.309       |
-| 16     | ...      | ...     | ...         |
-
-**What each column means:**
-- **Capacity**: Maximum throughput Token Passing sustains (highest mean across rates)
-- **Chi_max**: Maximum healthy backlog slope (used in keep-up check)
-  - Healthy runs: slope ≤ chi_max
-  - Degrading runs: slope > chi_max
-- **Rate at 0.6x**: Recommended arrival rate (main load) = 0.6 × capacity
-  - Heavy enough to show differences between controllers
-  - Light enough that all arms can keep up
 
 ## Troubleshooting
 
-### Sweep interrupted?
-The script appends to existing files, so just re-run it and it will skip completed runs.
-
-### Parameter extraction fails?
-Check that all sweeps have completed:
-```bash
-for SIZE in 8 16 32 64; do
-  echo "=== $SIZE agents ==="
-  ls -lh DIR/sweep_${SIZE}_agents/load_sweep.jsonl 2>/dev/null || echo "Not done"
-done
-```
-
-### Warehouse generation fails (64-agent)?
-The parameters might be infeasible for the random topology generator. If so:
-- Increase `max_num_cross_aisles` or `max_aisle_length` in `configs/fleet_64/`
-- Reduce `num_storage_vertices` or `num_delivery_vertices`
-- Or use different `seed` values for generation
-
-## Next steps in thesis plan
-
-After extracting parameters:
-
-1. **Step 5**: Long run — Train all three arms with confirmed loads
-2. **Step 6**: Main result figures and tables
-3. **Step 7**: RQ3 check (congestion heatmap)
-4. **Step 8**: RQ4 sweep (transfer + training at larger sizes)
-5. **Step 9**: RQ5 (communication, if time)
-
----
-
-**Questions?** Check `SWEEP_ROADMAP.md` for detailed background.
+- **Sweep interrupted.** Run it again. Rows already written are skipped.
+- **Warehouse generation fails (64 agents).** Raise `max_num_cross_aisles` or
+  `max_aisle_length`, or lower `num_storage_vertices` or `num_delivery_vertices`, in
+  `configs/fleet_64/`.

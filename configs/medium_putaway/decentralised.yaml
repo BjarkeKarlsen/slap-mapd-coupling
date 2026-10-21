@@ -6,8 +6,8 @@
 # (SKU, shelf) of an arrival is a put-away task, and its units can be picked only once it is
 # delivered (`arrival.putaway: robots`).
 #
-# Values are illustrative and are not thesis values. The arrival rate, chi_max and the stall
-# length wait for the Token Passing load sweep (scripts/load_sweep.py). Everything else is
+# Values are illustrative and are not thesis values. The arrival rate and the stall length
+# wait for the Token Passing load sweep (scripts/load_sweep.py). Everything else is
 # configs/medium_arrival. See training/spec.py for what each section means.
 
 

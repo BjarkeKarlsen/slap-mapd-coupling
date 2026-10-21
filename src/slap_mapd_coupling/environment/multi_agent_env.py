@@ -231,9 +231,6 @@ class EpisodeLog:
     # and the lines that waited for stock, as (order id, line index).
     order_line_by_task: dict[TaskId, tuple[int, int]] = field(default_factory=dict)
     lines_waited: set[tuple[int, int]] = field(default_factory=set)
-    # Arrival stock model only, one entry per arrival. The put-away measure: the travel of the
-    # arriving units from the nearest receiving vertex to their shelves, in units x d_G.
-    putaway_distance_by_update: list[float] = field(default_factory=list)
     # Arrival stock model only: the units that arrived at each arrival, placed or not.
     arrived_units_by_update: list[int] = field(default_factory=list)
     # Arrival stock model only: the arriving units that fit on no shelf at each arrival.
@@ -660,7 +657,6 @@ class WarehouseMAPDEnv:
             self.storage = result.storage
         if self.config.cold_stock_top_k is not None:
             self.log.cold_prime_share_by_update.append(self._cold_prime_share(arrival_t))
-        self.log.putaway_distance_by_update.append(result.putaway_distance)
         self.log.arrived_units_by_update.append(result.arrived_units)
         self.log.unplaced_units_by_update.append(result.unplaced_units)
         self.log.overflow_units_by_update.append(result.overflow_units)

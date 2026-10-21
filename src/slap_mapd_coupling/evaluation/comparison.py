@@ -1,10 +1,10 @@
 """The paired comparison of eq:rqformal: does adaptive storage shorten
-total service time under a controller, compared with fixed storage?
+the mean service time of picks under a controller, compared with fixed storage?
 
 Under one seed, fixed and adaptive storage face exactly the same order
-stream (sec:impl:instances), so the difference in their total service times
-comes from the storage rule alone. eq:rqformal therefore pairs runs seed by
-seed: gain_n = zeta^tot_T(F_fix) - zeta^tot_T(F) under seed n, and adaptive
+stream (sec:impl:instances), so the difference in their mean service times
+comes from the storage rule. eq:rqformal therefore pairs runs seed by
+seed: gain_n = zeta_bar_T(F_fix) - zeta_bar_T(F) under seed n, and adaptive
 storage wins if every run keeps up and the confidence interval of the
 mean gain lies above zero, a paired t-test over seeds. Every other scored
 quantity of each arm is reported as a mean over seeds with the same kind
@@ -17,7 +17,7 @@ rather than counting as a loss or a win. An unset check shows as
 all_keep_up = None, distinct from False for a run that falls behind.
 
 Runs of the arrival stock model (thesis wording pending) also report the
-put-away measures and the wait for stock. A template run and an arrival run
+split SKUs and the wait for stock. A template run and an arrival run
 are never a pair, and a comparison of template runs reports exactly what it
 did before the arrival model existed.
 """
@@ -70,10 +70,10 @@ _SERVICE_QUANTITIES = (
     "mean_blocked_time",
 )
 # The arrival stock model's own quantities. They are scored only when the runs are arrival
-# runs, since a template run has no put-away and no wait for stock. The put-away measures are
+# runs, since a template run has no put-away and no wait for stock. The split SKUs are
 # set for every run. The wait for stock is a part of the wait for an agent and, like it, exists
 # only for runs that finished a task, so it joins the service quantities.
-_ARRIVAL_SCORED_QUANTITIES = ("mean_putaway_distance", "mean_split_skus")
+_ARRIVAL_SCORED_QUANTITIES = ("mean_split_skus",)
 _ARRIVAL_SERVICE_QUANTITIES = ("mean_stock_wait",)
 
 
@@ -110,17 +110,12 @@ class PairedComparison(BaseModel):
     mean_gain: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
-    # The relative gain, each seed's gain over the route time of its F_fix run, total travel
-    # plus total blocked time, with its interval as for the gain. Controllers are compared on
-    # it. None unless all_keep_up is True.
+    # The relative gain, eq:relgain, each seed's gain as a percentage of the mean service time
+    # of its F_fix run, with its interval as for the gain. Controllers are compared on it. None
+    # unless all_keep_up is True.
     mean_relative_gain: float | None = None
     relative_ci_low: float | None = None
     relative_ci_high: float | None = None
-    # The gain in mean pick service time, reported next to the total gain. None unless
-    # all_keep_up is True and every run completed a pick.
-    mean_pick_gain: float | None = None
-    pick_ci_low: float | None = None
-    pick_ci_high: float | None = None
     # eq:rqformal: all runs keep up and ci_low > 0.
     shortens_service_time: bool
 
@@ -188,21 +183,17 @@ def compare_paired(
 
     gains: list[float] = []
     relative_gains = []
-    pick_gains = []
     for seed in seeds:
-        fixed = fixed_by_seed[seed]
-        adaptive = adaptive_by_seed[seed]
-        gain = float(fixed.total_service_time - adaptive.total_service_time)
+        fixed = fixed_by_seed[seed].mean_service_time
+        adaptive = adaptive_by_seed[seed].mean_service_time
+        # Set for every run that keeps up, as in _summarise.
+        assert fixed is not None and adaptive is not None
+        gain = fixed - adaptive
         gains.append(gain)
-        relative_gains.append(gain / (fixed.total_travel_time + fixed.total_blocked_time))
-        if fixed.mean_service_time is not None and adaptive.mean_service_time is not None:
-            pick_gains.append(fixed.mean_service_time - adaptive.mean_service_time)
+        relative_gains.append(100.0 * gain / fixed)
 
     mean_gain, ci_low, ci_high = _mean_and_interval(gains, confidence)
     mean_relative, relative_low, relative_high = _mean_and_interval(relative_gains, confidence)
-    pick: tuple[float | None, float | None, float | None] = (None, None, None)
-    if len(pick_gains) == len(seeds):
-        pick = _mean_and_interval(pick_gains, confidence)
     return PairedComparison(
         adaptive_storage_mode=adaptive_mode,
         num_seeds=len(seeds),
@@ -217,9 +208,6 @@ def compare_paired(
         mean_relative_gain=mean_relative,
         relative_ci_low=relative_low,
         relative_ci_high=relative_high,
-        mean_pick_gain=pick[0],
-        pick_ci_low=pick[1],
-        pick_ci_high=pick[2],
         shortens_service_time=ci_low > 0.0,
     )
 

@@ -55,7 +55,7 @@ rule(x_prev, graph, amounts, home, demand_estimate, traversal_estimate,
 - `home` maps each SKU to its home shelf, the storage vertex holding most
   of its starting units. Only `"fixed"` uses it.
 - `congestion_weight` is beta. Only `"congestion"` uses it.
-- `PutAwayResult` holds the new storage state, the put-away distance, and
+- `PutAwayResult` holds the new storage state and
   the units that arrived, that fit nowhere, and that `"fixed"` placed off
   the home shelf. The environment logs them per arrival, and
   `evaluation/evaluator.py` reduces them to the put-away fields of
