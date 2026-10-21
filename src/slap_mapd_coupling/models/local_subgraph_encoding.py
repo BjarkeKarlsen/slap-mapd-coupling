@@ -184,6 +184,10 @@ class EncodedObservation:
     move_sender_index: Optional[np.ndarray] = None  # [d_max] int64, sender standing on slot k
     move_sender_mask: Optional[np.ndarray] = None  # [d_max], 1.0 if that sender is heard
     pool_mask: Optional[np.ndarray] = None  # [max_local_nodes], 1.0 pool / 0.0 halo or pad
+    # l_i(t) and the vertices of the senders in sender order. They are not part of the dense
+    # sample, and models/window_tables.py keys the compact sample by them.
+    location: Optional[VertexId] = None
+    sender_locations: Optional[tuple[VertexId, ...]] = None
 
     def as_rllib_dict(self) -> dict[str, Any]:
         """{"action_mask": ..., "observations": {...}}, the Dict shape that
@@ -274,18 +278,60 @@ def encoded_observation_space(
     return gym.spaces.Dict(spaces)
 
 
+def window_structure(
+    graph: WarehouseGraph,
+    window: Sequence[VertexId],
+    d_max: int,
+    config: LocalSubgraphEncodingConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The vertex mask, edge list and edge mask of `window`, padded, in the
+    window's order. They depend on the window only, never on the time step,
+    so models/window_tables.py stores them once per window."""
+    index = {v: i for i, v in enumerate(window)}
+    node_mask = np.zeros(config.max_local_nodes, dtype=np.float32)
+    node_mask[: len(window)] = 1.0
+
+    num_edges = max_edges(config, d_max)
+    edge_index = np.zeros((num_edges, 2), dtype=np.int64)
+    edge_mask = np.zeros(num_edges, dtype=np.float32)
+    pairs: set[tuple[int, int]] = set()
+    for edge in graph.edges:
+        if edge.source in index and edge.target in index:
+            a, b = index[edge.source], index[edge.target]
+            pair = (min(a, b), max(a, b))
+            if pair not in pairs:
+                edge_index[len(pairs)] = pair
+                edge_mask[len(pairs)] = 1.0
+                pairs.add(pair)
+    return node_mask, edge_index, edge_mask
+
+
+def slot_targets(
+    graph: WarehouseGraph, location: VertexId, index: Mapping[VertexId, int], d_max: int
+) -> np.ndarray:
+    """move_target_index, the local index in the window (`index`) of the
+    vertex each move slot of `location` leads to, 0 for a missing slot."""
+    move_target_index = np.zeros(d_max, dtype=np.int64)
+    for k, w in enumerate(graph.out_neighbours(location)):
+        move_target_index[k] = index[w]
+    return move_target_index
+
+
 def encode_view(
     graph: WarehouseGraph,
     location: VertexId,
     observation: Observation,
     d_max: int,
     config: LocalSubgraphEncodingConfig,
+    structure: bool = True,
 ) -> EncodedView:
     """The window in `observation` as padded arrays, in the window's order.
     Used for the robot itself and for each sender. `d_max` is
     max_out_degree(graph). Raises ValueError if the window leaves out
     `location` or one of its outgoing neighbours, or does not fit the cap
-    (see check_windows)."""
+    (see check_windows). With `structure` off the arrays that depend only on
+    the window (the masks and the edge list) are left empty, for the compact
+    sample of models/window_tables.py, which keeps them in tables."""
     move_targets = graph.out_neighbours(location)
     if len(move_targets) + 1 > config.max_local_nodes:
         raise ValueError(
@@ -309,7 +355,6 @@ def encode_view(
             "max_local_nodes. check_windows finds this for a whole graph before the first step."
         )
     index = {v: i for i, v in enumerate(selected)}
-    n = len(selected)
 
     node_features = np.zeros((config.max_local_nodes, NODE_FEATURE_DIM), dtype=np.float32)
     for i, v in enumerate(selected):
@@ -322,26 +367,13 @@ def encode_view(
             f.eta,
             float(f.occupied),
             float(f.claimed),
+            float(f.receiving),
         )
-    node_mask = np.zeros(config.max_local_nodes, dtype=np.float32)
-    node_mask[:n] = 1.0
-
-    num_edges = max_edges(config, d_max)
-    edge_index = np.zeros((num_edges, 2), dtype=np.int64)
-    edge_mask = np.zeros(num_edges, dtype=np.float32)
-    pairs: set[tuple[int, int]] = set()
-    for edge in graph.edges:
-        if edge.source in index and edge.target in index:
-            a, b = index[edge.source], index[edge.target]
-            pair = (min(a, b), max(a, b))
-            if pair not in pairs:
-                edge_index[len(pairs)] = pair
-                edge_mask[len(pairs)] = 1.0
-                pairs.add(pair)
-
-    move_target_index = np.zeros(d_max, dtype=np.int64)
-    for k, w in enumerate(move_targets):
-        move_target_index[k] = index[w]
+    if structure:
+        node_mask, edge_index, edge_mask = window_structure(graph, selected, d_max, config)
+    else:
+        node_mask = edge_index = edge_mask = _EMPTY
+    move_target_index = slot_targets(graph, location, index, d_max)
 
     return EncodedView(
         node_features=node_features,
@@ -353,6 +385,9 @@ def encode_view(
         move_targets=move_targets,
         move_target_index=move_target_index,
     )
+
+
+_EMPTY = np.empty(0, dtype=np.float32)
 
 
 def _pad_senders(
@@ -420,10 +455,22 @@ def _assemble(
     sender_views: Optional[Sequence[EncodedView]],
     config: LocalSubgraphEncodingConfig,
     pool_mask: Optional[np.ndarray] = None,
+    padded: bool = True,
 ) -> EncodedObservation:
     senders: dict[str, np.ndarray] = {}
     if sender_views is not None:
-        senders = _pad_senders(sender_views, config.max_messages, view)
+        if padded:
+            senders = _pad_senders(sender_views, config.max_messages, view)
+        else:
+            # The compact sample names its senders by row key, so it needs only which slots
+            # are real, not their views.
+            if len(sender_views) > config.max_messages:
+                raise ValueError(
+                    f"{len(sender_views)} sender views exceed max_messages={config.max_messages}"
+                )
+            sender_mask = np.zeros(config.max_messages, np.float32)
+            sender_mask[: len(sender_views)] = 1.0
+            senders = {"sender_mask": sender_mask}
         senders.update(_move_senders(view, sender_views))
     return EncodedObservation(
         node_features=view.node_features,
@@ -435,6 +482,10 @@ def _assemble(
         action_mask=to_action_mask(mask),
         move_target_index=view.move_target_index,
         pool_mask=pool_mask,
+        location=view.location,
+        sender_locations=(
+            None if sender_views is None else tuple(sender.location for sender in sender_views)
+        ),
         **senders,
     )
 
@@ -471,6 +522,7 @@ def encode_all_observations(
     pool_vertices: Optional[Mapping[AgentId, Collection[VertexId]]] = None,
     acting: Optional[Sequence[AgentId]] = None,
     chosen: Optional[Mapping[AgentId, Mapping[AgentId, VertexId]]] = None,
+    padded: bool = True,
 ) -> dict[AgentId, EncodedObservation]:
     """The EncodedObservation of every acting robot at timestep t, keyed by
     agent id in ascending order. `d_max` is max_out_degree(graph). `windows`
@@ -495,7 +547,15 @@ def encode_all_observations(
     by agent id), closest first. A move slot's sender is the heard robot
     standing on the vertex the slot leads to, if any. The controller, the
     training env and any later env all build their observations here, so a
-    message is the same wherever it is read."""
+    message is the same wherever it is read.
+
+    With `padded` off, only what the compact sample of models/window_tables.py
+    reads is built: the vertex features, the location, the congestion, the
+    action mask, which sender slots are real and the move slot senders. The
+    window arrays, the pool mask and the senders' views are left empty, since
+    the compact sample keeps them in tables or names the senders by row key.
+    The training adapter builds its samples this way, and tests compare it
+    with the padded build."""
     communication = experiment_config.communication
     check_communication_caps(encoding_config, communication)
     if experiment_config.observation_depth is None:
@@ -533,7 +593,7 @@ def encode_all_observations(
     }
     views = {
         agent_id: encode_view(
-            graph, locations[agent_id], observations[agent_id], d_max, encoding_config
+            graph, locations[agent_id], observations[agent_id], d_max, encoding_config, padded
         )
         for agent_id in agent_ids
     }
@@ -547,7 +607,7 @@ def encode_all_observations(
             )
             sender_views = [views[j] for j in heard[: encoding_config.max_messages]]
         pool_mask: Optional[np.ndarray] = None
-        if pooling != "none":
+        if pooling != "none" and padded:
             observation = observations[agent_id]
             pool = (
                 observation.visible_vertices if pool_vertices is None else pool_vertices[agent_id]
@@ -564,5 +624,6 @@ def encode_all_observations(
             sender_views,
             encoding_config,
             pool_mask,
+            padded,
         )
     return encoded

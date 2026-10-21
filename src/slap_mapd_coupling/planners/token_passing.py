@@ -212,6 +212,7 @@ class TokenPassingPlanner:
                 if vertex.role.endpoint
                 and not vertex.role.storage
                 and not vertex.role.delivery
+                and not vertex.role.receiving
                 and v not in ends
                 and v not in task_vertices
             ),

@@ -16,7 +16,7 @@ class RoleStyle(BaseModel):
 
     fill: str  # hex colour
     edge: str  # hex colour
-    shape: str  # "circle" | "square" | "diamond" -- each backend maps this to its own API
+    shape: str  # "circle" | "square" | "diamond" | "triangle" -- each backend maps it to its API
 
 
 PALETTE: dict[str, str] = {
@@ -31,14 +31,15 @@ ROLE_STYLES: dict[str, RoleStyle] = {
     "delivery": RoleStyle(fill="#ffd9b3", edge="#c9761a", shape="square"),
     "storage": RoleStyle(fill="#cfe3f7", edge="#2f6fae", shape="circle"),
     "endpoint": RoleStyle(fill="#d7f0d8", edge="#3f8f45", shape="diamond"),
+    "receiving": RoleStyle(fill="#e6d9f2", edge="#7a4fa3", shape="triangle"),
     "plain": RoleStyle(fill="#ffffff", edge=PALETTE["transit"], shape="circle"),
 }
 
 # First match wins as the primary style. Roles are NOT mutually exclusive
 # (sec:pf:env) -- this order is a rendering judgement call, not derived
 # from the math: delivery and storage are where operational work
-# happens, endpoint is a fallback/idle role.
-ROLE_PRIORITY: tuple[str, ...] = ("delivery", "storage", "endpoint")
+# happens, receiving is where arriving stock enters, endpoint is a fallback/idle role.
+ROLE_PRIORITY: tuple[str, ...] = ("delivery", "storage", "receiving", "endpoint")
 
 
 def style_for_role(role: VertexRole) -> tuple[RoleStyle, list[str]]:

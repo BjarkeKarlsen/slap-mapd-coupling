@@ -4,7 +4,8 @@ Generation has four separate stages:
 
 1. Build a random warehouse topology containing only plain movable vertices.
 2. Orient some transit segments as one-way while retaining strong connectivity.
-3. Randomly assign storage, delivery, and parking roles to EXISTING vertices.
+3. Randomly assign storage, delivery, and parking roles to EXISTING vertices,
+   and receiving roles to vertices of row 0, the inbound side.
 4. Assign edge costs and construct the immutable ``WarehouseGraph``.
 
 Storage, delivery, and parking vertices are therefore allowed in the middle of
@@ -84,6 +85,9 @@ class GeneratorParams(BaseModel):
     num_storage_vertices: PositiveInt
     num_delivery_vertices: PositiveInt
     num_endpoints: PositiveInt
+    # V_rcv, drawn from row 0, the inbound side (sec:impl:instances). Zero
+    # leaves every instance as before the receiving role existed.
+    num_receiving_vertices: NonNegativeInt = 0
 
     # Set this above zero when an experiment explicitly requires some role
     # vertices to have at least two distinct neighbours. A value of zero means
@@ -95,7 +99,12 @@ class GeneratorParams(BaseModel):
     @property
     def num_role_vertices(self) -> int:
         """Number of vertices treated as endpoints by well-formedness."""
-        return self.num_storage_vertices + self.num_delivery_vertices + self.num_endpoints
+        return (
+            self.num_storage_vertices
+            + self.num_delivery_vertices
+            + self.num_endpoints
+            + self.num_receiving_vertices
+        )
 
     @property
     def max_num_vertices(self) -> int:
@@ -138,7 +147,7 @@ class GeneratorParams(BaseModel):
         if self.min_internal_role_vertices > self.num_role_vertices:
             raise ValueError(
                 "min_internal_role_vertices cannot exceed the total number "
-                "of storage, delivery, and parking role vertices."
+                "of storage, delivery, receiving and parking role vertices."
             )
 
         return self
@@ -386,19 +395,24 @@ def _try_build(
         return None, f"{description}, one_way_fraction not realisable"
 
     role_rng = _attempt_rng(params, attempt, "roles")
-    role_vertices = _sample_well_formed_role_vertices(
+    row_zero = tuple(sorted(topology.grid[(0, column)] for column in range(shape.num_aisles)))
+    sampled = _sample_well_formed_role_vertices(
         vertex_ids=set(topology.vertices),
         directed_edges=directed_edges,
         num_role_vertices=params.num_role_vertices,
         min_internal_vertices=params.min_internal_role_vertices,
         rng=role_rng,
+        receiving_candidates=row_zero,
+        num_receiving=params.num_receiving_vertices,
     )
-    if role_vertices is None:
+    if sampled is None:
         return None, f"{description}, no well-formed role assignment"
+    role_vertices, receiving_ids = sampled
 
     topology.vertices = _assign_roles(
         plain_vertices=topology.vertices,
         role_vertex_ids=role_vertices,
+        receiving_ids=receiving_ids,
         params=params,
         rng=role_rng,
     )
@@ -779,8 +793,15 @@ def _sample_well_formed_role_vertices(
     num_role_vertices: int,
     min_internal_vertices: int,
     rng: random.Random,
-) -> tuple[VertexId, ...] | None:
+    receiving_candidates: tuple[VertexId, ...] = (),
+    num_receiving: int = 0,
+) -> tuple[tuple[VertexId, ...], frozenset[VertexId]] | None:
     """Randomly select existing nodes whose role assignment is well-formed.
+
+    The receiving vertices are drawn from ``receiving_candidates`` and the
+    other roles from the rest. They are returned apart, the other role
+    vertices first. With ``num_receiving`` zero the draws are the same as
+    before the receiving role existed.
 
     A candidate assignment is accepted when:
 
@@ -800,8 +821,16 @@ def _sample_well_formed_role_vertices(
         vertex: set(outgoing[vertex]) | set(incoming[vertex]) for vertex in vertex_ids
     }
 
+    if num_receiving > len(receiving_candidates):
+        return None
     for _attempt in range(_MAX_ROLE_ATTEMPTS):
-        selected = set(rng.sample(ordered_vertices, num_role_vertices))
+        if num_receiving:
+            receiving = set(rng.sample(receiving_candidates, num_receiving))
+            rest = [v for v in ordered_vertices if v not in receiving]
+            selected = receiving | set(rng.sample(rest, num_role_vertices - num_receiving))
+        else:
+            receiving = set()
+            selected = set(rng.sample(ordered_vertices, num_role_vertices))
 
         internal_count = sum(len(undirected_neighbours[vertex]) >= 2 for vertex in selected)
         if internal_count < min_internal_vertices:
@@ -821,9 +850,9 @@ def _sample_well_formed_role_vertices(
         ):
             continue
 
-        result = list(selected)
+        result = sorted(selected - receiving) if receiving else list(selected)
         rng.shuffle(result)
-        return tuple(result)
+        return tuple(result), frozenset(receiving)
 
     return None
 
@@ -917,6 +946,7 @@ def _assign_roles(
     role_vertex_ids: tuple[VertexId, ...],
     params: GeneratorParams,
     rng: random.Random,
+    receiving_ids: frozenset[VertexId] = frozenset(),
 ) -> dict[VertexId, Vertex]:
     """Assign role labels to selected existing topology vertices."""
     selected = list(role_vertex_ids)
@@ -937,6 +967,7 @@ def _assign_roles(
                 storage=vertex_id in storage_ids,
                 delivery=vertex_id in delivery_ids,
                 endpoint=vertex_id in parking_ids,
+                receiving=vertex_id in receiving_ids,
             ),
         )
         for vertex_id in plain_vertices

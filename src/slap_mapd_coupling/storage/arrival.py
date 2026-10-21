@@ -23,10 +23,17 @@ shelves:
 A shelf takes as many units as fit in its free capacity. Units that fit nowhere are not placed
 and are counted as unplaced.
 
+When robots carry the put-away (config.stock_putaway == "robots") every rule judges a shelf by
+the trip distance d^trip(v) = min_{g in V_rcv} d_G(g, v) + min_{g in V_del} d_G(v, g), the
+trip of a unit through it (sec:method:storage). "fixed" sends overflow and "demand" sends every
+SKU to the shelves in order of d^trip, ties by vertex id, and the congestion-aware score of
+"congestion" is rho_hat_t(k) * d^trip(v) plus beta times the traffic over both legs of the
+trip. With instant put-away the rules are as before.
+
 Choices flagged, not fixed by the thesis yet:
-- Stock is received at the delivery vertices (config.stock_receiving == "delivery", one I/O
-  side), and the put-away distance of a unit is the distance from the nearest one to its shelf,
-  min_{g in V_del} d_G(g, v), whichever rule places it.
+- The put-away distance of a unit is the distance from the nearest receiving vertex to its
+  shelf, min_{g in V_rcv} d_G(g, v), whichever rule places it. The receiving vertices are the
+  delivery vertices or the receiving role (config.stock_receiving).
 - The units of SKU k ordered in the last period are counted as round(rho_hat^unit_t(k) * Delta),
   the exact count, since the estimate is per step. Taking the ceiling of the float product
   (1 + epsilon) * rho_hat^unit_t(k) * Delta directly could round an exact count up by one unit.
@@ -42,7 +49,11 @@ from typing import Callable, NamedTuple, Protocol, runtime_checkable
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
 from slap_mapd_coupling.storage.base import DemandEstimate, TrafficEstimate
-from slap_mapd_coupling.storage.congestion import ranked_storage_vertices_for
+from slap_mapd_coupling.storage.congestion import (
+    _shortest_path_edges,
+    nearest_delivery_point,
+    ranked_storage_vertices_for,
+)
 from slap_mapd_coupling.storage.demand import (
     delivery_vertices,
     ranked_storage_vertices,
@@ -54,7 +65,7 @@ class PutAwayResult(NamedTuple):
     """What one arrival leaves behind: the storage state after the put-away and its measures."""
 
     storage: StorageState
-    putaway_distance: float  # sum over placed units of min_{g in V_del} d_G(g, v)
+    putaway_distance: float  # sum over placed units of min_{g in V_rcv} d_G(g, v)
     arrived_units: int  # every unit that arrived, placed or not
     unplaced_units: int  # units that fit on no shelf
     overflow_units: int  # "fixed" only: units placed off the SKU's home shelf
@@ -67,6 +78,8 @@ class PutAwayRule(Protocol):
     A plain callable, like storage/base.py::StorageRule. `amounts` are the units arriving per
     SKU (`arrival_amounts`), the same under every rule. `home` maps each SKU to its home shelf,
     which only "fixed" uses, and `congestion_weight` is beta, which only "congestion" uses.
+    `receiving` is V_rcv, None for the delivery vertices. `trip` ranks the shelves by the trip
+    distance (robots carry the put-away), False by the access distance as before.
     The returned storage satisfies the capacity constraint, which StorageState enforces.
     """
 
@@ -80,6 +93,9 @@ class PutAwayRule(Protocol):
         traversal_estimate: TrafficEstimate,
         waiting_estimate: TrafficEstimate,
         congestion_weight: float | None,
+        *,
+        receiving: list[VertexId] | None = None,
+        trip: bool = False,
     ) -> PutAwayResult: ...
 
 
@@ -121,7 +137,8 @@ def arrival_amounts(
     SKU k is filled up to max(floor, ceil((1 + epsilon) * n_k)), n_k being the units of k
     ordered in the period that ends now (rho_hat^unit), plus the units that lines still wait for
     (`waiting_by_sku`). What is on hand counts towards that, and nothing is taken away, so a SKU
-    with more than enough gets none.
+    with more than enough gets none. Under robot put-away `x_prev` holds the stock on its way
+    too, which counts as on hand.
     """
     amounts: dict[SkuId, int] = {}
     for sku_id in x_prev.skus:
@@ -138,6 +155,47 @@ def receiving_distance(graph: WarehouseGraph, vertex: VertexId, receiving: list[
     return min(graph.distance(g, vertex) for g in receiving)
 
 
+def nearest_receiving_point(
+    graph: WarehouseGraph, vertex: VertexId, receiving: list[VertexId]
+) -> VertexId:
+    """argmin_{g in V_rcv} d_G(g, v), ties by vertex id: where a put-away to v picks up."""
+    return min(receiving, key=lambda g: (graph.distance(g, vertex), g))
+
+
+def trip_distance(
+    graph: WarehouseGraph, vertex: VertexId, receiving: list[VertexId], delivery: list[VertexId]
+) -> float:
+    """d^trip(v), the trip distance: from the nearest receiving vertex to v, then on to the
+    nearest delivery vertex. Both legs are in timesteps, so they add with no weight."""
+    return receiving_distance(graph, vertex, receiving) + min(
+        graph.distance(vertex, g) for g in delivery
+    )
+
+
+def ranked_by_trip(graph: WarehouseGraph, receiving: list[VertexId]) -> list[VertexId]:
+    """V_str sorted by d^trip ascending, ties by vertex id."""
+    delivery = delivery_vertices(graph)
+    return sorted(
+        storage_vertices(graph), key=lambda v: (trip_distance(graph, v, receiving, delivery), v)
+    )
+
+
+def trip_exposure(
+    graph: WarehouseGraph,
+    vertex: VertexId,
+    receiving: list[VertexId],
+    delivery: list[VertexId],
+    traversal_estimate: TrafficEstimate,
+    waiting_estimate: TrafficEstimate,
+) -> float:
+    """sum mu_hat_t(e) * w_hat_t(e) over the edges of the trip through v, the shortest path
+    from the nearest receiving vertex to v and on to the nearest delivery vertex."""
+    start = nearest_receiving_point(graph, vertex, receiving)
+    end = nearest_delivery_point(graph, vertex, delivery)
+    path = _shortest_path_edges(graph, start, vertex) + _shortest_path_edges(graph, vertex, end)
+    return sum(traversal_estimate.get(e, 0.0) * waiting_estimate.get(e, 0.0) for e in path)
+
+
 def _put_away(
     x_prev: StorageState,
     graph: WarehouseGraph,
@@ -145,11 +203,14 @@ def _put_away(
     sku_order: list[SkuId],
     shelf_order: Callable[[SkuId], list[VertexId]],
     home: dict[SkuId, VertexId] | None = None,
+    receiving: list[VertexId] | None = None,
 ) -> PutAwayResult:
     """The fill loop every rule shares. Each SKU in `sku_order` places its arriving units on
     its shelves in `shelf_order(k)`, as many on each as fit in the free capacity left. `home`
-    is given by "fixed" only, to count the overflow. Stock already on a shelf stays."""
-    receiving = delivery_vertices(graph)
+    is given by "fixed" only, to count the overflow. Stock already on a shelf stays.
+    `receiving` is V_rcv, None for the delivery vertices."""
+    if receiving is None:
+        receiving = delivery_vertices(graph)
     free = {v: cap - x_prev.used_capacity(v) for v, cap in x_prev.capacities.items()}
     counts = {sku_id: dict(per_vertex) for sku_id, per_vertex in x_prev.counts.items()}
     putaway_distance = 0.0
@@ -183,6 +244,16 @@ def _put_away(
     )
 
 
+def _shelf_ranking(
+    graph: WarehouseGraph, receiving: list[VertexId] | None, trip: bool
+) -> list[VertexId]:
+    """The shelves of "fixed" and "demand": by trip distance under robot put-away, by access
+    distance otherwise."""
+    if not trip:
+        return ranked_storage_vertices(graph)
+    return ranked_by_trip(graph, delivery_vertices(graph) if receiving is None else receiving)
+
+
 def _by_demand(x_prev: StorageState, demand_estimate: DemandEstimate) -> list[SkuId]:
     """SKUs by rho_hat_t(k) descending, ties by id, the order of F_dem and F_cng."""
     return sorted(x_prev.skus, key=lambda k: (-demand_estimate.get(k, 0.0), k))
@@ -198,16 +269,19 @@ def putaway_fixed(
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,
     congestion_weight: float | None,
+    *,
+    receiving: list[VertexId] | None = None,
+    trip: bool = False,
 ) -> PutAwayResult:
     """Dedicated storage: the home shelf first, then the nearest shelves with room."""
-    by_access = ranked_storage_vertices(graph)
+    by_access = _shelf_ranking(graph, receiving, trip)
 
     def shelf_order(sku_id: SkuId) -> list[VertexId]:
         if sku_id not in home:
             raise ValueError(f"SKU {sku_id!r} has stock arriving and no home shelf.")
         return [home[sku_id]] + [v for v in by_access if v != home[sku_id]]
 
-    return _put_away(x_prev, graph, amounts, sorted(x_prev.skus), shelf_order, home)
+    return _put_away(x_prev, graph, amounts, sorted(x_prev.skus), shelf_order, home, receiving)
 
 
 @register_putaway_rule("demand")
@@ -220,11 +294,19 @@ def putaway_demand(
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,
     congestion_weight: float | None,
+    *,
+    receiving: list[VertexId] | None = None,
+    trip: bool = False,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into the nearest shelves with room."""
-    by_access = ranked_storage_vertices(graph)
+    by_access = _shelf_ranking(graph, receiving, trip)
     return _put_away(
-        x_prev, graph, amounts, _by_demand(x_prev, demand_estimate), lambda _sku: by_access
+        x_prev,
+        graph,
+        amounts,
+        _by_demand(x_prev, demand_estimate),
+        lambda _sku: by_access,
+        receiving=receiving,
     )
 
 
@@ -238,6 +320,9 @@ def putaway_congestion(
     traversal_estimate: TrafficEstimate,
     waiting_estimate: TrafficEstimate,
     congestion_weight: float | None,
+    *,
+    receiving: list[VertexId] | None = None,
+    trip: bool = False,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into its shelves by the congestion-aware score."""
     if congestion_weight is None:
@@ -247,6 +332,32 @@ def putaway_congestion(
         )
     storage = storage_vertices(graph)
     delivery = delivery_vertices(graph)
+
+    if trip:
+        # The score rho_hat_t(k) * d^trip(v) + beta * the traffic over the trip. The trip of a
+        # shelf does not depend on the SKU, so both parts are worked out once per shelf.
+        trip_receiving = delivery if receiving is None else receiving
+        weight = congestion_weight
+        distance = {v: trip_distance(graph, v, trip_receiving, delivery) for v in storage}
+        exposure = {
+            v: trip_exposure(
+                graph, v, trip_receiving, delivery, traversal_estimate, waiting_estimate
+            )
+            for v in storage
+        }
+
+        def trip_order(sku_id: SkuId) -> list[VertexId]:
+            rho = demand_estimate.get(sku_id, 0.0)
+            return sorted(storage, key=lambda v: (rho * distance[v] + weight * exposure[v], v))
+
+        return _put_away(
+            x_prev,
+            graph,
+            amounts,
+            _by_demand(x_prev, demand_estimate),
+            trip_order,
+            receiving=receiving,
+        )
 
     def shelf_order(sku_id: SkuId) -> list[VertexId]:
         return ranked_storage_vertices_for(
@@ -260,4 +371,11 @@ def putaway_congestion(
             congestion_weight,
         )
 
-    return _put_away(x_prev, graph, amounts, _by_demand(x_prev, demand_estimate), shelf_order)
+    return _put_away(
+        x_prev,
+        graph,
+        amounts,
+        _by_demand(x_prev, demand_estimate),
+        shelf_order,
+        receiving=receiving,
+    )

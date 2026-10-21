@@ -175,10 +175,13 @@ def evaluate_run(
     return RunEvaluation(chosen, last, validation_rows, test_rows)
 
 
+# The total gain and the relative gain lead. The mean pick gain and the order completion time
+# (arrival runs) follow.
 _SUMMARY_HEADER = (
-    "| checkpoint | storage mode | seeds | all keep up | throughput F_fix | throughput mode "
-    "| service time F_fix | service time mode | mean gain | CI | relative gain [CI] | shortens |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    "| checkpoint | storage mode | seeds | all keep up | total gain | CI | relative gain [CI] "
+    "| shortens | mean pick gain [CI] | throughput F_fix | throughput mode "
+    "| total service F_fix | total service mode | pick service F_fix | pick service mode |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
 )
 # The columns an arrival run adds to every row: the put-away distance per update and the wait
 # for stock of both arms, and the order completion time under each rule, F_fix / mode.
@@ -191,7 +194,7 @@ _ARRIVAL_HEADER = (
 
 def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMetrics]]) -> str:
     """The markdown of `summary.md`. Each adaptive mode is paired with F_fix over the same test
-    seeds. The gain is F_fix minus the mode in mean service time, so a positive gain means the
+    seeds. The gain is F_fix minus the mode in total service time, so a positive gain means the
     adaptive rule is faster, and it is only given when every run keeps up."""
     lines = ["# Adaptive storage against fixed storage on the test seeds", ""]
     adaptive = [mode for mode in modes if mode != "fixed"]
@@ -208,7 +211,7 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])
             except ValueError as error:
-                lines.append(f"| {role} | {mode} | {error} |" + " |" * (14 if arrival else 9))
+                lines.append(f"| {role} | {mode} | {error} |" + " |" * (17 if arrival else 12))
                 continue
             row = _summary_row(role, result, arrival)
             if arrival:
@@ -223,7 +226,9 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
     def mean(summary: dict, name: str) -> str:
         return f"{summary[name].mean:.3f}" if name in summary else "n/a"
 
-    gain = ci = relative = "n/a"
+    gain = ci = relative = pick = "n/a"
+    if result.mean_pick_gain is not None:
+        pick = f"{result.mean_pick_gain:.3f} [{result.pick_ci_low:.3f}, {result.pick_ci_high:.3f}]"
     if result.mean_gain is not None:
         gain = f"{result.mean_gain:.3f}"
         ci = f"[{result.ci_low:.3f}, {result.ci_high:.3f}]"
@@ -237,14 +242,17 @@ def _summary_row(role: str, result: PairedComparison, arrival: bool = False) -> 
         result.adaptive_storage_mode,
         str(result.num_seeds),
         str(result.all_keep_up),
-        mean(result.fixed_summary, "throughput"),
-        mean(result.adaptive_summary, "throughput"),
-        mean(result.fixed_summary, "mean_service_time"),
-        mean(result.adaptive_summary, "mean_service_time"),
         gain,
         ci,
         relative,
         str(result.shortens_service_time),
+        pick,
+        mean(result.fixed_summary, "throughput"),
+        mean(result.adaptive_summary, "throughput"),
+        mean(result.fixed_summary, "total_service_time"),
+        mean(result.adaptive_summary, "total_service_time"),
+        mean(result.fixed_summary, "mean_service_time"),
+        mean(result.adaptive_summary, "mean_service_time"),
     ]
     if arrival:
         cells += [

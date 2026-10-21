@@ -87,6 +87,7 @@ def _own_vector(observation, vertex: int) -> torch.Tensor:
             f.eta,
             float(f.occupied),
             float(f.claimed),
+            float(f.receiving),
         ]
     )
 

@@ -43,6 +43,8 @@ def main() -> None:
         wait_cost=0.2,
         num_storage_vertices=4,
         num_delivery_vertices=4,
+        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
+        num_receiving_vertices=4,
         num_endpoints=fleet_size,
         # Require at least eight selected role nodes to have degree >= 2.
         # Use zero if leaf placements are also acceptable.
@@ -60,6 +62,7 @@ def main() -> None:
 
     num_movable = sum(1 for v in graph.vertices.values() if v.role.movable)
     num_storage = sum(1 for v in graph.vertices.values() if v.role.storage)
+    num_receiving = sum(1 for v in graph.vertices.values() if v.role.receiving)
     num_delivery = sum(1 for v in graph.vertices.values() if v.role.delivery)
     num_endpoint = sum(1 for v in graph.vertices.values() if v.role.endpoint)
 
@@ -67,6 +70,7 @@ def main() -> None:
     print(f"  |V|     = {len(graph.vertices)}")
     print(f"  |V_mov| = {num_movable}")
     print(f"  |V_str| = {num_storage}")
+    print(f"  |V_rcv| = {num_receiving}")
     print(f"  |V_del| = {num_delivery}")
     print(f"  |V_ep|  = {num_endpoint}")
     print(f"  |E|     = {len(graph.edges)}")

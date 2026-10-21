@@ -63,12 +63,12 @@ def test_local_subgraph_respects_depth():
 
 def test_role_flags_multi_hot_for_overlapping_roles():
     role = VertexRole(movable=True, storage=True, endpoint=True)
-    assert role_flags(role) == (True, False, True, False)
+    assert role_flags(role) == (True, False, True, False, False)
 
 
 def test_role_flags_transit_when_no_other_role():
     role = VertexRole(movable=True)
-    assert role_flags(role) == (False, False, False, True)
+    assert role_flags(role) == (False, False, False, True, False)
 
 
 def test_occupancy_fraction_matches_worked_example():

@@ -13,8 +13,8 @@ The centralised and section-based routers pass a wider window
 view whatever the window is, so it means the same under every router.
 
 The vertex features use a multi-hot role (storage, delivery, endpoint,
-transit), because VertexRole allows a vertex several roles. Transit is
-true when none of the other three apply.
+transit, receiving), because VertexRole allows a vertex several roles.
+Transit is true when none of the other four apply.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ class VertexFeatures:
     eta: float
     occupied: bool
     claimed: bool = False
+    receiving: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,11 +66,11 @@ def local_subgraph(graph: WarehouseGraph, location: VertexId, depth: float) -> t
     )
 
 
-def role_flags(role: VertexRole) -> tuple[bool, bool, bool, bool]:
-    """(storage, delivery, endpoint, transit) -- see module docstring for
-    why this is multi-hot, not a strict one-hot."""
-    transit = not (role.storage or role.delivery or role.endpoint)
-    return role.storage, role.delivery, role.endpoint, transit
+def role_flags(role: VertexRole) -> tuple[bool, bool, bool, bool, bool]:
+    """(storage, delivery, endpoint, transit, receiving), multi-hot (see
+    module docstring)."""
+    transit = not (role.storage or role.delivery or role.endpoint or role.receiving)
+    return role.storage, role.delivery, role.endpoint, transit, role.receiving
 
 
 def eta(graph: WarehouseGraph, vertex: VertexId, target: VertexId) -> float:
@@ -142,15 +143,19 @@ def build_observation(
         raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
     occupied_vertices = {loc for aid, loc in locations.items() if aid != agent_id}
     claimed_vertices = set(claimed)
-    features = {
-        v: VertexFeatures(
-            *role_flags(graph.vertices[v].role),
+    features = {}
+    for v in visible:
+        storage, delivery, endpoint, transit, receiving = role_flags(graph.vertices[v].role)
+        features[v] = VertexFeatures(
+            storage,
+            delivery,
+            endpoint,
+            transit,
             eta=eta(graph, v, target),
             occupied=v in occupied_vertices,
             claimed=v in claimed_vertices,
+            receiving=receiving,
         )
-        for v in visible
-    }
 
     congestion = occupancy_fraction(fleet, field_of_view, excl={agent_id})
 

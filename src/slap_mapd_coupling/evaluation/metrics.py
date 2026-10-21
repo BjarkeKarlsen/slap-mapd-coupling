@@ -1,5 +1,6 @@
-"""Run metrics (sec:pf:measures): keeping up, mean service time and its
-three parts, crowding, relocations per storage update, and runtime.
+"""Run metrics (sec:pf:measures): keeping up, total service time and its
+three parts, mean pick service time, crowding, relocations per storage
+update, and runtime.
 
 Under the arrival stock model (thesis wording pending) the storage update is
 the put-away of arriving stock, so a row also reports the wait for stock, the
@@ -50,6 +51,9 @@ _COLD_STOCK_FIELDS = ("mean_cold_prime_share", "mean_unit_age_at_pick")
 _ARRIVAL_FIELDS = (
     "mean_stock_wait",
     "num_waiting_orders",
+    "num_released_putaways",
+    "num_completed_putaways",
+    "mean_putaway_service_time",
     *_PUTAWAY_FIELDS,
     *_ORDER_FIELDS,
     *_COLD_STOCK_FIELDS,
@@ -62,7 +66,7 @@ class RunMetrics(BaseModel):
     prose, so a reviewer can grep an equation label straight to the field
     that reports it.
 
-    The score has one result, mean service time, valid only if the run
+    The score has one result, total service time, valid only if the run
     keeps up. The three parts of service time and crowding explain it;
     relocations and runtime are costs reported next to it. Nothing here is
     a weighted sum: each field is a count or an average.
@@ -111,16 +115,34 @@ class RunMetrics(BaseModel):
     # entry of the B_t trace
     backlog: NonNegativeInt
 
-    # --- the result, eq:meanservice, and its split, eq:split ---
-    # All four are None iff |C_T| = 0: a run with no finished task has no
-    # service time to average, and fails the keep-up check anyway.
+    # --- the result, the total service time zeta^tot_T, and its split ---
+    # Every task released by T adds min(t^finish, T) - t^released, and every order line still
+    # waiting for stock at T adds T - its release. An open task adds its wait up to its
+    # assignment or T, then its moving and blocked ticks up to T. A waiting line adds all its
+    # time to the wait. The four add up.
+    total_service_time: NonNegativeInt = 0
+    total_wait_for_agent: NonNegativeInt = 0
+    total_travel_time: NonNegativeInt = 0
+    total_blocked_time: NonNegativeInt = 0
+    # The same sum over the completed tasks only, to show how much the open work adds.
+    total_service_time_finished: NonNegativeInt = 0
+    # Arrival stock model with robot put-away only: the put-aways released by T, those completed
+    # by T and their mean service time, None without one. They count in num_completed_tasks.
+    num_released_putaways: NonNegativeInt = 0
+    num_completed_putaways: NonNegativeInt = 0
+    mean_putaway_service_time: NonNegativeFloat | None = None
+
+    # --- mean service time, eq:meanservice, and its split, eq:split ---
+    # Over the completed picks only. Every task of a run without robot put-away is a pick, so
+    # there they are the means over every completed task, as before put-aways existed. All
+    # four are None iff no pick completed.
     mean_service_time: NonNegativeFloat | None = None  # zeta_bar_T
     mean_wait_for_agent: NonNegativeFloat | None = None  # mean of t_assigned - t_released
     mean_travel_time: NonNegativeFloat | None = None  # mean of zeta_j^travel
     mean_blocked_time: NonNegativeFloat | None = None  # W_T, eq:waiting
-    # Arrival stock model only: the mean over completed tasks of the steps their order waited
+    # Arrival stock model only: the mean over completed picks of the steps their order waited
     # for a unit of its SKU. A task keeps its order's release time, so this wait is part of
-    # mean_wait_for_agent. None under the template model, and None iff |C_T| = 0.
+    # mean_wait_for_agent. None under the template model, and None iff no pick completed.
     mean_stock_wait: NonNegativeFloat | None = None
     # Arrival stock model only. The order completion time, the longest service time among an
     # order's tasks, averaged over the orders whose tasks are all completed and none of whose
@@ -179,17 +201,41 @@ class RunMetrics(BaseModel):
             "mean_blocked_time",
         )
         values = [getattr(self, name) for name in names]
-        if self.num_completed_tasks == 0:
+        if self.num_completed_picks == 0:
             if any(value is not None for value in values):
                 raise ValueError(
-                    "service-time fields must be None when num_completed_tasks == 0 "
-                    "(no finished task to average over, eq:meanservice)."
+                    "service-time fields must be None when no pick completed "
+                    "(no finished pick to average over, eq:meanservice)."
                 )
         elif any(value is None for value in values):
             raise ValueError(
-                "with num_completed_tasks > 0, mean_service_time and all three of "
+                "with a completed pick, mean_service_time and all three of "
                 "its parts must be set (eq:split)."
             )
+        if self.num_completed_putaways > self.num_completed_tasks:
+            raise ValueError("num_completed_putaways cannot exceed num_completed_tasks.")
+        if self.num_completed_putaways > self.num_released_putaways:
+            raise ValueError("num_completed_putaways cannot exceed num_released_putaways.")
+        if (self.num_completed_putaways == 0) != (self.mean_putaway_service_time is None):
+            raise ValueError(
+                "mean_putaway_service_time is set iff a put-away completed."
+            )
+        return self
+
+    @property
+    def num_completed_picks(self) -> int:
+        return self.num_completed_tasks - self.num_completed_putaways
+
+    @model_validator(mode="after")
+    def _total_split_adds_up(self) -> "RunMetrics":
+        parts = self.total_wait_for_agent + self.total_travel_time + self.total_blocked_time
+        if parts != self.total_service_time:
+            raise ValueError(
+                f"waiting + travel + blocked = {parts} must equal total_service_time = "
+                f"{self.total_service_time}."
+            )
+        if self.total_service_time_finished > self.total_service_time:
+            raise ValueError("total_service_time_finished cannot exceed total_service_time.")
         return self
 
     @model_validator(mode="after")
@@ -233,13 +279,13 @@ class RunMetrics(BaseModel):
         part of the wait before assignment, which counts from the order's release."""
         if self.stock_model != "arrival":
             return self
-        if self.num_completed_tasks == 0:
+        if self.num_completed_picks == 0:
             if self.mean_stock_wait is not None:
-                raise ValueError("mean_stock_wait must be None when num_completed_tasks == 0.")
+                raise ValueError("mean_stock_wait must be None when no pick completed.")
             return self
         if self.mean_stock_wait is None:
             raise ValueError(
-                "under stock_model='arrival' with num_completed_tasks > 0, mean_stock_wait "
+                "under stock_model='arrival' with a completed pick, mean_stock_wait "
                 "must be set."
             )
         assert self.mean_wait_for_agent is not None  # by _zero_completion_has_no_service_time

@@ -231,6 +231,37 @@ def order_metrics(
     )
 
 
+def total_service(
+    tasks: Sequence[Task],
+    blocked_ticks_by_task: Mapping[TaskId, int],
+    waiting_lines: Sequence[OrderLine],
+    horizon: int,
+) -> dict[str, int]:
+    """The total service time zeta^tot_T and its three parts. Every task released by T adds
+    min(t^finish, T) - t^released, split into the wait up to its assignment or T, then its
+    blocked ticks and its moving ticks up to T. Every line still waiting for stock at T adds
+    T - its release, all of it wait. `total_service_time_finished` sums the completed tasks
+    only."""
+    wait = travel = blocked = finished = 0
+    for task in tasks:
+        end = horizon if task.finish_time is None else min(task.finish_time, horizon)
+        assigned = horizon if task.assignment_time is None else min(task.assignment_time, horizon)
+        ticks = blocked_ticks_by_task.get(task.task_id, 0)
+        wait += assigned - task.release_time
+        blocked += ticks
+        travel += end - assigned - ticks
+        if task.finish_time is not None and task.finish_time <= horizon:
+            finished += task.finish_time - task.release_time
+    wait += sum(horizon - line.release_time for line in waiting_lines)
+    return dict(
+        total_service_time=wait + travel + blocked,
+        total_wait_for_agent=wait,
+        total_travel_time=travel,
+        total_blocked_time=blocked,
+        total_service_time_finished=finished,
+    )
+
+
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
     horizon = config.horizon
     completed = [task for task in env.tasks if task.finish_time is not None]
@@ -245,29 +276,38 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     throughput = num_completed / horizon  # Lambda_T
     keep_up_ratio = throughput / config.arrival_rate
 
-    # The result and its split, eq:meanservice / eq:split. After assignment
-    # an agent either moves or stands still at every timestep, and every
-    # standing-still tick is logged as blocked, so travel is what is left
-    # of the active phase -- no separate travel counter is needed.
+    # Mean service time and its split, eq:meanservice / eq:split, over the completed picks.
+    # After assignment an agent either moves or stands still at every timestep, and every
+    # standing-still tick is logged as blocked, so travel is what is left of the active
+    # phase -- no separate travel counter is needed.
+    picks = [task for task in completed if task.kind == "pick"]
+    putaways = [task for task in completed if task.kind == "putaway"]
+    num_picks = len(picks)
     mean_wait: float | None = None
     mean_travel: float | None = None
     mean_blocked: float | None = None
     mean_service_time: float | None = None
-    if num_completed:
+    if num_picks:
         waits, travels, blocks = [], [], []
-        for task in completed:
+        for task in picks:
             # by construction: a completed task was assigned first (core/tasks.py)
             assert task.finish_time is not None and task.assignment_time is not None
             blocked = env.log.blocked_ticks_by_task.get(task.task_id, 0)
             waits.append(task.assignment_time - task.release_time)
             travels.append(task.finish_time - task.assignment_time - blocked)
             blocks.append(blocked)
-        mean_wait = sum(waits) / num_completed
-        mean_travel = sum(travels) / num_completed
-        mean_blocked = sum(blocks) / num_completed  # W_T, eq:waiting
-        mean_service_time = (sum(waits) + sum(travels) + sum(blocks)) / num_completed
+        mean_wait = sum(waits) / num_picks
+        mean_travel = sum(travels) / num_picks
+        mean_blocked = sum(blocks) / num_picks  # W_T, eq:waiting
+        mean_service_time = (sum(waits) + sum(travels) + sum(blocks)) / num_picks
 
-    num_waiting = sum(1 for task in env.tasks if task.status(horizon) == "waiting")
+    # B_t is logged before stage 1 and stage 6 release tasks at t, so the put-aways of an
+    # arrival at T are not in B_T, and they are left out here too. No pick is released at T.
+    num_waiting = sum(
+        1
+        for task in env.tasks
+        if task.release_time < horizon and task.status(horizon) == "waiting"
+    )
     num_active = sum(1 for task in env.tasks if task.status(horizon) == "active")
     # Under the arrival model, orders released and still waiting for stock. They count in B_T.
     # Always 0 under the template model.
@@ -298,11 +338,18 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
 
         arrival_fields = dict(
             mean_stock_wait=(
-                sum(env.log.stock_wait_by_task[task.task_id] for task in completed) / num_completed
-                if num_completed
+                sum(env.log.stock_wait_by_task[task.task_id] for task in picks) / num_picks
+                if num_picks
                 else None
             ),
             num_waiting_orders=num_waiting_orders,
+            num_released_putaways=sum(1 for task in env.tasks if task.kind == "putaway"),
+            num_completed_putaways=len(putaways),
+            mean_putaway_service_time=(
+                sum(task.service_time or 0 for task in putaways) / len(putaways)
+                if putaways
+                else None
+            ),
             mean_putaway_distance=per_arrival(env.log.putaway_distance_by_update),
             mean_arrived_units=per_arrival(arrived),
             mean_split_skus=per_arrival(env.log.split_skus_by_update),
@@ -359,5 +406,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         mean_relocation_distance=mean_relocation_distance,
         mean_decision_runtime_seconds=mean_decision_runtime,
         stock_model=config.stock_model,
+        **total_service(env.tasks, env.log.blocked_ticks_by_task, env.waiting_orders, horizon),
         **arrival_fields,
     )
