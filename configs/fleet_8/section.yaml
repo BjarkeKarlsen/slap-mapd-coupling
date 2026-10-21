@@ -39,25 +39,13 @@ experiment:
   congestion_sensitive: false
   seed: 0
 
-# GeneratorParams without wait_cost and num_endpoints, which follow the experiment section.
-instance:
-  max_num_aisles: 12
-  max_aisle_length: 10
-  max_num_cross_aisles: 8
-  one_way_fraction: 0.0
-  default_edge_cost: 1.0
-  random_edge_costs: false
-  edge_cost_range: [0.5, 2.0]
-  num_storage_vertices: 10
-  num_delivery_vertices: 4
-  num_receiving_vertices: 4       # V_rcv on row 0, as many as the delivery vertices
-  min_internal_role_vertices: 2   # at least two role vertices have degree >= 2
-  seed: 42
+# No instance section: the warehouse follows experiment.num_agents
+# (instances/generator.py::fleet_defaults). An `instance:` section would build that one instead.
 
 # 100 SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), with the most popular
 # SKUs at the storage vertices nearest the delivery vertices. Each SKU starts with its expected
 # orders over one arrival period, with the margin, and at least 8 units, the floor of every
-# arrival too. Each vertex holds up to 200. An order picks a SKU by its popularity and takes a
+# arrival too. Each vertex holds up to 300. An order picks a SKU by its popularity and takes a
 # unit from the shelf holding it nearest its delivery vertex, or waits for the next arrival.
 # See StorageSettings, ArrivalSettings and DemandSettings.
 storage:
@@ -66,7 +54,7 @@ storage:
   # null names them sku_000, sku_001 and so on.
   sku_names: null
   unit_capacities: [0.5, 1.0, 2.0]
-  vertex_capacity: 200.0
+  vertex_capacity: 300.0
   initial_units: 8
   initial_placement: demand_sized_blocks
 

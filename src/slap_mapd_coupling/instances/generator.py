@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 import random
+from typing import Any
 
 from pydantic import (
     BaseModel,
@@ -93,6 +95,12 @@ class GeneratorParams(BaseModel):
     # vertices to have at least two distinct neighbours. A value of zero means
     # all well-formed random placements are allowed, including topology leaves.
     min_internal_role_vertices: NonNegativeInt = 0
+
+    # True also requires the plain vertices left after placing the roles to be strongly
+    # connected, a sufficient condition for well-formedness that rejects many well-formed
+    # placements. False places roles by the exact well-formedness check alone, as the fleet
+    # warehouses of ``fleet_defaults`` do. True keeps the instance every older config gives.
+    role_backbone: bool = True
 
     seed: int
 
@@ -258,6 +266,46 @@ def _to_plot_position(cell: GridCell) -> Position:
     return column * _GRID_SPACING, -row * _GRID_SPACING
 
 
+# Vertices per agent (sec:impl:instances), the sizes van Knippenberg et al. (2021) use for 32
+# and 64 agents.
+VERTICES_PER_AGENT = 16
+# One warehouse per fleet size, the same in every run (app:instances).
+FLEET_INSTANCE_SEED = 42
+
+
+def fleet_defaults(num_agents: int) -> dict[str, Any]:
+    """The warehouse of a fleet of ``num_agents`` (sec:impl:instances, app:instances).
+
+    |V| = 16 m, m parking vertices, m/2 storage vertices and m/2 delivery and as many
+    receiving vertices, so two agents per dock at every fleet size, every edge two-way
+    with cost 1. The shape bounds keep the
+    warehouse about square: aisles of at most sqrt(|V|) steps, at most 1.1 sqrt(|V|)
+    aisles, and at most 0.7 times the aisle length bound in cross-aisles, enough for every
+    seed of app:instances to be well-formed. Roles are placed by the exact well-formedness
+    check alone (``role_backbone=False``). The seed is ``FLEET_INSTANCE_SEED``. A config
+    with an ``instance`` section builds that warehouse instead.
+    """
+    num_vertices = VERTICES_PER_AGENT * num_agents
+    side = math.sqrt(num_vertices)
+    aisle_length = math.ceil(side)
+    num_docks = max(1, num_agents // 2)
+    return {
+        "max_num_aisles": math.ceil(1.1 * side),
+        "max_aisle_length": aisle_length,
+        "max_num_cross_aisles": math.ceil(0.7 * aisle_length),
+        "num_transit_vertices": num_vertices,
+        "one_way_fraction": 0.0,
+        "default_edge_cost": 1.0,
+        "random_edge_costs": False,
+        "num_storage_vertices": max(1, num_agents // 2),
+        "num_delivery_vertices": num_docks,
+        "num_receiving_vertices": num_docks,
+        "num_endpoints": num_agents,
+        "role_backbone": False,
+        "seed": FLEET_INSTANCE_SEED,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -401,6 +449,7 @@ def _try_build(
         directed_edges=directed_edges,
         num_role_vertices=params.num_role_vertices,
         min_internal_vertices=params.min_internal_role_vertices,
+        require_backbone=params.role_backbone,
         rng=role_rng,
         receiving_candidates=row_zero,
         num_receiving=params.num_receiving_vertices,
@@ -792,6 +841,7 @@ def _sample_well_formed_role_vertices(
     directed_edges: set[DirectedEdge],
     num_role_vertices: int,
     min_internal_vertices: int,
+    require_backbone: bool = True,
     rng: random.Random,
     receiving_candidates: tuple[VertexId, ...] = (),
     num_receiving: int = 0,
@@ -811,8 +861,9 @@ def _sample_well_formed_role_vertices(
     4. the exact endpoint-avoiding reachability predicate succeeds.
 
     Conditions 2 and 3 are a constructive sufficient condition: every role
-    vertex can travel to any other through plain nodes only. Condition 4 is
-    retained as an explicit guard against implementation mistakes.
+    vertex can travel to any other through plain nodes only. They apply only
+    with ``require_backbone``, and without it condition 4, the well-formedness
+    condition itself (app:wellformed), decides alone.
     """
     ordered_vertices = sorted(vertex_ids)
     outgoing, incoming = _adjacency_tables(vertex_ids, directed_edges)
@@ -836,7 +887,7 @@ def _sample_well_formed_role_vertices(
         if internal_count < min_internal_vertices:
             continue
 
-        if not _roles_share_plain_backbone(
+        if require_backbone and not _roles_share_plain_backbone(
             vertex_ids=vertex_ids,
             role_vertices=selected,
             outgoing=outgoing,

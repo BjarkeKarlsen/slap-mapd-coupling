@@ -46,6 +46,7 @@ from slap_mapd_coupling.environment.multi_agent_env import popularity_ranking, z
 from slap_mapd_coupling.instances.generator import (
     GeneratedInstance,
     GeneratorParams,
+    fleet_defaults,
     generate_instance,
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
@@ -246,7 +247,8 @@ class TrainingSpec(BaseModel):
     evaluation_storage_mode: StorageMode = "fixed"
     experiment: ExperimentSettings
     # The GeneratorParams without wait_cost and num_endpoints, which follow the experiment.
-    instance: dict[str, Any]
+    # Empty, or left out, builds the warehouse of the fleet size, `fleet_defaults(num_agents)`.
+    instance: dict[str, Any] = {}
     storage: StorageSettings
     # The order distribution. None is the uniform draw of the shipped configs.
     demand: DemandSettings | None = None
@@ -264,6 +266,13 @@ class TrainingSpec(BaseModel):
     test_seed_count: PositiveInt
     checkpoint: CheckpointSettings = CheckpointSettings()
 
+    def instance_settings(self) -> dict[str, Any]:
+        """The GeneratorParams keys without wait_cost: the `instance` section as written, or
+        the fleet's warehouse when it is empty."""
+        if not self.instance:
+            return fleet_defaults(self.experiment.num_agents)
+        return {**self.instance, "num_endpoints": self.experiment.num_agents}
+
     @model_validator(mode="after")
     def _arrival_settings(self) -> "TrainingSpec":
         """The arrival model needs Delta, its arrival period, under every storage rule and
@@ -280,7 +289,7 @@ class TrainingSpec(BaseModel):
                     "the arrival model relocates nothing, so the storage_rule section takes no "
                     "reassignment_cap."
                 )
-            if self.arrival.receiving == "receiving" and not self.instance.get(
+            if self.arrival.receiving == "receiving" and not self.instance_settings().get(
                 "num_receiving_vertices", 0
             ):
                 raise ValueError(
@@ -365,13 +374,14 @@ def with_budget(spec: TrainingSpec, budget_env_steps: int | None) -> TrainingSpe
     return override_spec(spec, budget_env_steps=budget_env_steps)
 
 
+def instance_params(spec: TrainingSpec) -> GeneratorParams:
+    """The generator settings, from the `instance` section or the fleet size."""
+    return GeneratorParams(**spec.instance_settings(), wait_cost=spec.experiment.wait_cost)
+
+
 def build_instance(spec: TrainingSpec) -> GeneratedInstance:
     """The generated instance, which keeps the aisle index the section arm needs."""
-    params = GeneratorParams(
-        **spec.instance,
-        wait_cost=spec.experiment.wait_cost,
-        num_endpoints=spec.experiment.num_agents,
-    )
+    params = instance_params(spec)
     instance = generate_instance(params)
     connectivity = check_connectivity(instance.graph)
     well_formedness = check_well_formedness(instance.graph, spec.experiment.num_agents)

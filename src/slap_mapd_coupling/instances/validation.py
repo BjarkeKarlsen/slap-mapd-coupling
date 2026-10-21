@@ -32,15 +32,16 @@ class WellFormednessReport(BaseModel):
     """(b) well-formedness (Ma et al. 2017, sec:pf:agents), adapted for a
     directed graph: there are at least m non-task endpoints, and every pair of
     endpoints needs a path in BOTH directions, each avoiding every third
-    endpoint. A non-task endpoint is a vertex of V_ep in neither V_str nor
-    V_del. The pairwise check takes the endpoints to be V_ep u V_str u V_del.
+    endpoint. A non-task endpoint is a vertex of V_ep in none of V_str, V_del and
+    V_rcv. The pairwise check takes the endpoints to be V_ep u V_str u V_del u V_rcv,
+    since a put-away task is picked up at a receiving vertex (app:wellformed).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ok: bool
-    num_endpoints: NonNegativeInt  # |V_ep u V_str u V_del|, for the pairwise check
-    num_non_task_endpoints: NonNegativeInt  # |V_ep minus (V_str u V_del)|
+    num_endpoints: NonNegativeInt  # |V_ep u V_str u V_del u V_rcv|, for the pairwise check
+    num_non_task_endpoints: NonNegativeInt  # |V_ep minus (V_str u V_del u V_rcv)|
     required_endpoints: NonNegativeInt  # m (fleet size), the least number of non-task endpoints
     endpoint_count_ok: bool  # num_non_task_endpoints >= required_endpoints
     blocked_pairs: tuple[tuple[VertexId, VertexId, VertexId], ...]  # (v, w, blocking_endpoint)

@@ -8,10 +8,12 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from slap_mapd_coupling.instances.generator import GeneratorParams
 from slap_mapd_coupling.training.spec import (
     build_experiment_config,
     build_storage,
     build_study,
+    instance_params,
     load_spec,
     override_spec,
     with_budget,
@@ -141,3 +143,28 @@ def test_initial_counts_that_do_not_fit_the_capacity_are_rejected(spec):
     crowded = spec.storage.model_copy(update={"initial_units": 50})
     with pytest.raises(ValueError, match="do not fit"):
         build_storage(crowded, build_study(spec).instance.graph)
+
+
+@pytest.mark.parametrize("num_agents", [8, 16, 32, 64])
+def test_the_fleet_size_alone_gives_the_warehouse(num_agents):
+    """sec:impl:instances: |V| = 16 m, m parking, m/2 storage, m/2 delivery and receiving."""
+    fleet = load_spec(ROOT / "configs" / f"fleet_{num_agents}" / "centralised.yaml")
+    assert fleet.instance == {}
+    params = instance_params(fleet)
+    assert params.num_transit_vertices == 16 * num_agents
+    assert params.num_endpoints == num_agents
+    assert params.num_storage_vertices == num_agents // 2
+    assert params.num_delivery_vertices == params.num_receiving_vertices == num_agents // 2
+    assert params.seed == 42
+    assert params.one_way_fraction == 0.0
+
+
+def test_an_instance_section_is_built_as_written(spec):
+    """A config with an instance section keeps its own warehouse, not the fleet's."""
+    params = instance_params(spec)
+    assert params.model_dump(exclude={"wait_cost", "num_endpoints"}) == (
+        GeneratorParams(**spec.instance, wait_cost=0.0, num_endpoints=1).model_dump(
+            exclude={"wait_cost", "num_endpoints"}
+        )
+    )
+    assert params.role_backbone
