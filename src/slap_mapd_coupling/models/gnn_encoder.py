@@ -38,7 +38,7 @@ that both paths agree.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Collection, Literal, Optional, Sequence
+from typing import Collection, Literal, Mapping, Optional, Sequence
 
 import torch
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
@@ -390,12 +390,99 @@ class GNNEncoder(nn.Module):
             mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
             parts = [node_embeddings[rows, own_index], mean_message]
 
+        z = self._readout(parts, node_embeddings, node_mask, congestion, pool_mask)
+        return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=messages)
+
+    def _readout(
+        self,
+        parts: list[torch.Tensor],
+        node_embeddings: torch.Tensor,
+        node_mask: torch.Tensor,
+        congestion: torch.Tensor,
+        pool_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """z_i from the own embedding and the message mean in `parts`, then the
+        pooled mean when pool_mask is given, then the congestion feature."""
         if pool_mask is not None:
             weight = (pool_mask * node_mask).unsqueeze(-1)  # [B,N,1]
             pooled = (node_embeddings * weight).sum(dim=1) / weight.sum(dim=1).clamp(min=1.0)
-            parts.append(pooled)  # [B,D]
+            parts = [*parts, pooled]  # [B,D]
+        return torch.cat([*parts, congestion.unsqueeze(-1)], dim=-1)
 
-        z = torch.cat([*parts, congestion.unsqueeze(-1)], dim=-1)
+    def own_embeddings(
+        self,
+        node_features: torch.Tensor,
+        node_mask: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_mask: torch.Tensor,
+        own_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """h^(L) at each view's own vertex, [R, D]. With communication on this is
+        the message the robot of each view sends."""
+        embeddings = self._embed_padded(node_features, node_mask, edge_index, edge_mask)
+        rows = torch.arange(embeddings.shape[0], device=embeddings.device)
+        return embeddings[rows, own_index]
+
+    def encode_keyed(
+        self,
+        views: Mapping[str, torch.Tensor],
+        row_key: torch.Tensor,
+        sender_row_key: torch.Tensor,
+        context: Optional[Mapping[str, torch.Tensor]] = None,
+        context_row_key: Optional[torch.Tensor] = None,
+        message_table: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> EncoderOutput:
+        """encode_padded with communication on, where each sender is named by
+        the key of its own row (models/window_tables.py) instead of carrying a
+        copy of its view. The output equals encode_padded on the same rows with
+        the senders' views.
+
+        `views` holds the padded arrays of the B rows (node_features,
+        node_mask, edge_index, edge_mask, own_index, congestion, and pool_mask
+        with pooling on). row_key [B] is each row's key and sender_row_key
+        [B, M] the keys of its senders, -1 for a padded slot. A sender is looked
+        up among the rows and the `context` rows (the same arrays, keyed by
+        context_row_key [K]), which a training minibatch carries for senders
+        outside it. Every view is embedded once, so a sender's embedding reaches
+        each receiver that hears it, and the receiver's loss reaches the
+        sender's view through the shared weights. `message_table` (sorted keys
+        [R], embeddings [R, D]) replaces that lookup for the value pass, which
+        embeds the whole batch first. A sender key that is not found raises,
+        since a missing message would otherwise train silently on zero."""
+        if not self.config.communication:
+            raise ValueError("encode_keyed needs communication on")
+        keys = ("node_features", "node_mask", "edge_index", "edge_mask", "own_index")
+        batch_size = row_key.shape[0]
+        if context is not None and context_row_key is not None:
+            stacked = {key: torch.cat([views[key], context[key]]) for key in keys}
+            all_keys = torch.cat([row_key, context_row_key])
+        else:
+            stacked = {key: views[key] for key in keys}
+            all_keys = row_key
+        embeddings = self._embed_padded(
+            stacked["node_features"],
+            stacked["node_mask"],
+            stacked["edge_index"],
+            stacked["edge_mask"],
+        )
+        node_embeddings = embeddings[:batch_size]  # [B,N,D]
+        rows = torch.arange(embeddings.shape[0], device=embeddings.device)
+        own = embeddings[rows, stacked["own_index"]]  # [B+K,D]
+
+        if message_table is None:
+            sorted_keys, order = torch.sort(all_keys)
+            table = own[order]
+        else:
+            sorted_keys, table = message_table
+        sender_mask = (sender_row_key >= 0).to(own.dtype)  # [B,M]
+        messages = lookup_messages(sorted_keys, table, sender_row_key)  # [B,M,D]
+
+        count = sender_mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B,1]
+        mean_message = (messages * sender_mask.unsqueeze(-1)).sum(dim=1) / count  # [B,D]
+        parts = [own[:batch_size], mean_message]
+        z = self._readout(
+            parts, node_embeddings, views["node_mask"], views["congestion"], views.get("pool_mask")
+        )
         return EncoderOutput(z=z, node_embeddings=node_embeddings, messages=messages)
 
     def forward_padded(
@@ -431,3 +518,23 @@ class GNNEncoder(nn.Module):
             sender_mask,
             pool_mask,
         ).z
+
+
+def lookup_messages(
+    sorted_keys: torch.Tensor, table: torch.Tensor, sender_row_key: torch.Tensor
+) -> torch.Tensor:
+    """The embedding in `table` of each key in sender_row_key [B, M], from
+    `sorted_keys` [R] (ascending, the row keys of `table`). A padded slot (-1)
+    gets zeros. Raises ValueError if a real key is not among `sorted_keys`."""
+    wanted = sender_row_key.clamp(min=0)
+    index = torch.searchsorted(sorted_keys, wanted.reshape(-1)).clamp(max=len(sorted_keys) - 1)
+    index = index.reshape(wanted.shape)
+    real = sender_row_key >= 0
+    found = sorted_keys[index] == sender_row_key
+    if bool((real & ~found).any()):
+        raise ValueError(
+            "a sender's row key is not among the rows given, so its message is missing. A "
+            "training minibatch must carry its senders' rows as context."
+        )
+    messages = table[index]  # [B,M,D]
+    return torch.where(real.unsqueeze(-1), messages, torch.zeros_like(messages))

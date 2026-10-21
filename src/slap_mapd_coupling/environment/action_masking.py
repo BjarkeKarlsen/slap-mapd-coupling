@@ -52,6 +52,8 @@ torch, nn = try_import_torch()
 
 # Rows per encoder pass of compute_values. It only bounds GPU memory, so it does not change a result.
 VALUE_CHUNK_ROWS = 512
+# The batch entry that carries the value pass's message table (models/rl_module.py).
+MESSAGE_TABLE = "message_table"
 
 
 def to_action_mask(mask: Mask) -> np.ndarray:
@@ -185,15 +187,31 @@ class ActionMaskingTorchRLModule(ActionMaskingRLModule, DefaultPPOTorchRLModule)
         # turns the values into numpy. The loss calls this on a minibatch
         # or with embeddings, which stay below the chunk size and take
         # the differentiable path above.
+        #
+        # With communication on and compact samples, a row's senders can sit in
+        # any chunk, so the GNN module first embeds every row once into a message
+        # table (GNNPPOTorchRLModule.message_table) that every chunk reads. The
+        # train batch may also sit in host memory while the module is on the GPU
+        # (training/learner.py), so each chunk is moved to the module's device.
         rows = len(next(iter(obs.values())))
-        if rows <= VALUE_CHUNK_ROWS:
+        model_config = self.model_config if isinstance(self.model_config, dict) else {}
+        chunk_rows = model_config.get("value_chunk_rows", VALUE_CHUNK_ROWS)
+        device = next(self.parameters()).device
+        on_device = all(value.device == device for value in obs.values())
+        table_of = getattr(self, "message_table", None)
+        table = None if table_of is None else table_of(obs, chunk_rows)
+        if rows <= chunk_rows and on_device and table is None:
             return super().compute_values(batch, embeddings)
+        extra = {} if table is None else {MESSAGE_TABLE: table}
         chunks = []
         with torch.no_grad():
-            for start in range(0, rows, VALUE_CHUNK_ROWS):
-                part = {key: value[start : start + VALUE_CHUNK_ROWS] for key, value in obs.items()}
-                chunks.append(super().compute_values({**batch, Columns.OBS: part}))
-        return torch.cat(chunks)
+            for start in range(0, rows, chunk_rows):
+                part = {
+                    key: value[start : start + chunk_rows].to(device) for key, value in obs.items()
+                }
+                chunks.append(super().compute_values({**batch, Columns.OBS: part, **extra}))
+        # On the batch's device, so the advantages land where the batch is.
+        return torch.cat(chunks).to(next(iter(obs.values())).device)
 
     def _preprocess_batch(
         self, batch: Dict[str, TensorType], **kwargs

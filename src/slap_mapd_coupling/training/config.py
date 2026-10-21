@@ -41,9 +41,10 @@ from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training.env import (
     WarehouseMAPDMultiAgentEnv,
     Zones,
-    arm_windows,
+    arm_window_tables,
     check_arm,
 )
+from slap_mapd_coupling.training.learner import BATCH_ON_CPU, GNNPPOTorchLearner
 
 TrainingRegime = Literal["fixed_only", "matched"]  # sec:method:training
 DEFAULT_POLICY_ID = "shared_policy"  # full parameter sharing, sec:method:training
@@ -167,6 +168,14 @@ def first_seed_index(worker_index: int, vector_index: int = 0, envs_per_runner: 
     return worker_index * envs_per_runner + vector_index
 
 
+def key_prefix(worker_index: int, vector_index: int = 0) -> int:
+    """The prefix of the row keys of one runner's env (training/env.py::row_key), so
+    two runners never give the same key. The envs of one runner share a vector
+    index (see first_seed_index), so this needs one env per runner, RLlib's
+    default, which build_ppo_config keeps."""
+    return worker_index * 16 + vector_index
+
+
 def build_ppo_config(
     graph: WarehouseGraph,
     skus: Mapping[SkuId, SkuType],
@@ -183,6 +192,8 @@ def build_ppo_config(
     policy_id: str = DEFAULT_POLICY_ID,
     num_env_runners: int = 0,
     use_gpu: bool = False,
+    batch_on_cpu: bool = False,
+    value_chunk_rows: Optional[int] = None,
 ) -> PPOConfig:
     """A PPOConfig for the learned controller `experiment_config.controller`.
     It registers the adapter of training/env.py, maps every robot to
@@ -198,7 +209,11 @@ def build_ppo_config(
     `seed_split` gives the adapter its training seeds and sets RLlib's own
     seed to `seed_split.training_seed`. `policy_id`, `num_env_runners` and
     `use_gpu` (one GPU for the local learner) are execution details, not
-    study parameters, so they have defaults.
+    study parameters, so they have defaults. So are `batch_on_cpu`, which keeps
+    the train batch in host memory and moves one minibatch at a time to the GPU
+    (training/learner.py), and `value_chunk_rows`, the rows per encoder pass of
+    the value pass (environment/action_masking.py, 512 when None). Neither
+    changes a result.
     """
     if experiment_config.discount is None:
         raise ValueError(
@@ -221,12 +236,13 @@ def build_ppo_config(
         ) from error
     assert experiment_config.controller is not None  # check_arm rejects a planner
     check_communication_caps(encoding_config, experiment_config.communication)
-    arm_windows(
+    window_tables = arm_window_tables(
         graph,
         experiment_config.controller,
         experiment_config.observation_depth,
         encoding_config,
         zones,
+        pooling,
     )
 
     train_seeds = split_seeds(seed_split).train
@@ -260,6 +276,10 @@ def build_ppo_config(
                 getattr(env_context, "vector_index", 0),
             ),
             seed_from_cycle=True,
+            key_prefix=key_prefix(
+                getattr(env_context, "worker_index", 0),
+                getattr(env_context, "vector_index", 0),
+            ),
         )
 
     register_env(_ENV_NAME, env_creator)
@@ -267,7 +287,14 @@ def build_ppo_config(
     model_config: dict[str, Any] = {
         "gnn_encoder_config": gnn_encoder_config.model_dump(),
         "policy_value_head_config": policy_value_head_config.model_dump(),
+        # The adapter stores compact samples (models/window_tables.py), and the module
+        # rebuilds the padded arrays from these tables.
+        "window_tables": window_tables.as_arrays(),
     }
+    if value_chunk_rows is not None:
+        if value_chunk_rows < 1:
+            raise ValueError(f"value_chunk_rows must be positive, got {value_chunk_rows}.")
+        model_config["value_chunk_rows"] = value_chunk_rows
 
     config = (
         PPOConfig()
@@ -301,7 +328,12 @@ def build_ppo_config(
             sample_timeout_s=None,
         )
         .debugging(seed=seed_split.training_seed)
-        .learners(num_gpus_per_learner=1 if use_gpu else 0)
+        # The learner adds the senders' rows to each minibatch and can keep the batch in
+        # host memory (training/learner.py).
+        .learners(
+            num_gpus_per_learner=1 if use_gpu else 0,
+            learner_class=GNNPPOTorchLearner,
+        )
         .training(
             gamma=experiment_config.discount,
             lr=ppo_hyperparameters.lr,
@@ -313,6 +345,7 @@ def build_ppo_config(
             num_epochs=ppo_hyperparameters.num_epochs,
             entropy_coeff=ppo_hyperparameters.entropy_coeff,
             vf_loss_coeff=ppo_hyperparameters.vf_loss_coeff,
+            learner_config_dict={BATCH_ON_CPU: batch_on_cpu},
         )
     )
     return config

@@ -19,6 +19,7 @@ from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncod
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
 from slap_mapd_coupling.training import policy as policy_module
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
+from slap_mapd_coupling.training.learner import add_context_rows
 from slap_mapd_coupling.training.policy import ModulePolicy
 
 _POOLING = {
@@ -126,6 +127,7 @@ class _Arm:
                     "pooling": self.pooling,
                 },
                 "policy_value_head_config": {"hidden_width": 8},
+                "window_tables": env.window_tables.as_arrays(),
             },
         )
         return spec.build()
@@ -169,13 +171,26 @@ class _CountingModule:
         return self._module.forward_inference(batch)
 
 
+def _alone(observations, agent_id):
+    """A batch with only `agent_id`'s row. With communication on, the rows of
+    its senders are added as context rows, as the learner does for a minibatch
+    (training/learner.py), since a message is read from the sender's own row."""
+    batch = policy_module._batch([observations[agent_id]])
+    obs = batch[Columns.OBS]["observations"]
+    if "sender_row_key" in obs:
+        full = policy_module._batch(list(observations.values()))[Columns.OBS]["observations"]
+        sorted_keys, order = torch.sort(full["row_key"])
+        add_context_rows(obs, full, sorted_keys, order)
+    return batch
+
+
 def _per_agent_slots(module, observations, t, episode_seed):
     """The slots of one timestep from one module call per agent, drawn from the
     same (episode_seed + offset, t, agent_id) streams as ModulePolicy."""
     offset = policy_module._ACTION_SAMPLING_SEED_OFFSET
     slots = {}
     for agent_id, observation in observations.items():
-        out = module.forward_inference(policy_module._batch([observation]))
+        out = module.forward_inference(_alone(observations, agent_id))
         logits = out[Columns.ACTION_DIST_INPUTS][0].detach().numpy()
         rng = np.random.default_rng((episode_seed + offset, t, int(agent_id)))
         slots[agent_id] = policy_module._sample_legal_slot(logits, observation["action_mask"], rng)
@@ -320,8 +335,8 @@ def test_batched_logits_equal_the_per_agent_logits(communication):
 
     with torch.no_grad():
         together = module.forward_inference(policy_module._batch(list(observations.values())))
-        for row, observation in enumerate(observations.values()):
-            alone = module.forward_inference(policy_module._batch([observation]))
+        for row, agent_id in enumerate(observations):
+            alone = module.forward_inference(_alone(observations, agent_id))
             assert torch.allclose(
                 together[Columns.ACTION_DIST_INPUTS][row],
                 alone[Columns.ACTION_DIST_INPUTS][0],
@@ -340,22 +355,27 @@ def test_batch_stacks_every_observation_key_including_the_move_slot_arrays(commu
 
     stacked = batch[Columns.OBS]["observations"]
     assert set(stacked) == set(observations["1"]["observations"])
-    assert stacked["move_target_index"].shape == (3, d_max)
-    assert stacked["move_target_index"].dtype == torch.int64
+    assert stacked["vertex"].shape == (3,)
+    assert stacked["vertex"].dtype == torch.int64
     assert ("move_sender_index" in stacked) == communication
     assert ("move_sender_mask" in stacked) == communication
+    if communication:
+        assert stacked["move_sender_index"].shape == (3, d_max)
 
 
-def test_batch_stacks_the_pool_mask_like_every_other_key():
+def test_batch_keeps_the_compact_types_and_stores_no_pool_mask():
     arm = _Arm("centralised")
     env = arm.adapter()
     observations, _ = env.reset(seed=0)
 
     stacked = policy_module._batch(list(observations.values()))[Columns.OBS]["observations"]
 
-    expected = np.stack([o["observations"]["pool_mask"] for o in observations.values()])
-    assert stacked["pool_mask"].dtype == torch.float32
-    np.testing.assert_array_equal(stacked["pool_mask"].numpy(), expected)
+    # The pool mask depends on the window only, so it is in the module's tables.
+    assert "pool_mask" not in stacked
+    assert stacked["flags"].dtype == torch.uint8
+    assert stacked["eta"].dtype == torch.float32
+    expected = np.stack([o["observations"]["flags"] for o in observations.values()])
+    np.testing.assert_array_equal(stacked["flags"].numpy(), expected)
 
 
 @pytest.mark.parametrize("controller", ARMS)

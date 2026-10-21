@@ -137,6 +137,19 @@ def simulate(
 @click.option("--env-runners", default=0, type=int, help="Number of RLlib env runners.")
 @click.option("--gpu", is_flag=True, help="Use one GPU for the learner.")
 @click.option(
+    "--batch-on-cpu",
+    is_flag=True,
+    help="Keep the train batch in host memory and move one minibatch at a time to the GPU, "
+    "for runs whose batch does not fit on the GPU. Changes no result.",
+)
+@click.option(
+    "--value-chunk-rows",
+    type=int,
+    default=None,
+    help="Rows per encoder pass of the value pass (default 512). Lower it if the value pass "
+    "runs out of GPU memory. Changes no result.",
+)
+@click.option(
     "--checkpoint-every",
     type=int,
     default=None,
@@ -165,6 +178,8 @@ def train(
     seed,
     env_runners,
     gpu,
+    batch_on_cpu,
+    value_chunk_rows,
     checkpoint_every,
     keep_checkpoints,
     output,
@@ -195,7 +210,14 @@ def train(
             keep_checkpoints=keep_checkpoints,
         )
         study = build_study(spec)
-        ppo_config = build_study_ppo_config(spec, study, num_env_runners=env_runners, use_gpu=gpu)
+        ppo_config = build_study_ppo_config(
+            spec,
+            study,
+            num_env_runners=env_runners,
+            use_gpu=gpu,
+            batch_on_cpu=batch_on_cpu,
+            value_chunk_rows=value_chunk_rows,
+        )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
 

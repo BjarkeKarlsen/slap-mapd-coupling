@@ -7,8 +7,9 @@ DefaultPPORLModule needs `setup()` to build `self.encoder`, `self.pi` and
 so CRITIC is that tensor. The move score also reads h^(L) at the vertex each
 move leads to and the message of the robot standing there, so ACTOR is a dict
 holding z_i and those tensors, which DefaultPPORLModule hands to `self.pi`
-unchanged. Everything the head needs arrives through the observation, so the
-module never looks at the graph.
+unchanged. Everything the head needs arrives through the observation and the
+window tables of the model config (models/window_tables.py), so the module
+never looks at the graph.
 
 GNNActionMaskingRLModule composes this with ActionMaskingTorchRLModule by
 multiple inheritance. Python's method resolution order puts
@@ -18,7 +19,7 @@ DefaultPPOTorchRLModule, so no masking logic is repeated here.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module import (
@@ -29,13 +30,17 @@ from ray.rllib.core.models.base import ACTOR, CRITIC, ENCODER_OUT
 from ray.rllib.utils.annotations import override
 from torch import nn
 
-from slap_mapd_coupling.environment.action_masking import ActionMaskingTorchRLModule
+from slap_mapd_coupling.environment.action_masking import (
+    MESSAGE_TABLE,
+    ActionMaskingTorchRLModule,
+)
 from slap_mapd_coupling.models.base_model import (
     MOVE_SENDER_KEYS,
     PolicyValueHead,
     PolicyValueHeadConfig,
 )
 from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS, GNNEncoder, GNNEncoderConfig
+from slap_mapd_coupling.models.window_tables import WindowLookup, window_tables_from_config
 
 
 class _GNNSharedEncoder(nn.Module):
@@ -43,12 +48,19 @@ class _GNNSharedEncoder(nn.Module):
     `self.encoder(batch) -> {ENCODER_OUT: {ACTOR: ..., CRITIC: ...}}`
     contract, see the module docstring for what each role gets."""
 
-    def __init__(self, encoder: GNNEncoder) -> None:
+    def __init__(self, encoder: GNNEncoder, lookup: Optional[WindowLookup] = None) -> None:
         super().__init__()
         self.gnn = encoder
+        self.lookup = lookup
 
     def forward(self, batch: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         obs = batch[Columns.OBS]
+        # A compact sample is turned back into the padded arrays first, see
+        # models/window_tables.py. Without tables the samples are padded already.
+        if self.lookup is not None:
+            obs = self.lookup(obs)
+            if self.gnn.config.communication:
+                return self._forward_keyed(obs, batch.get(MESSAGE_TABLE))
         # the sender keys are in the observation exactly when communication is
         # on, and pool_mask exactly when pooling is on
         communication = self.gnn.config.communication
@@ -73,6 +85,40 @@ class _GNNSharedEncoder(nn.Module):
             actor["messages"] = out.messages
             actor.update({key: obs[key] for key in MOVE_SENDER_KEYS})
         return {ENCODER_OUT: {ACTOR: actor, CRITIC: out.z}}
+
+    def _forward_keyed(
+        self, obs: Dict[str, Any], message_table: Optional[tuple[torch.Tensor, torch.Tensor]]
+    ) -> Dict[str, Any]:
+        """forward for compact samples with communication on, where the senders
+        are row keys (GNNEncoder.encode_keyed)."""
+        out = self.gnn.encode_keyed(
+            obs,
+            obs["row_key"],
+            obs["sender_row_key"],
+            obs.get("context"),
+            obs.get("context_row_key"),
+            message_table,
+        )
+        actor: Dict[str, Any] = {
+            "z": out.z,
+            "node_embeddings": out.node_embeddings,
+            "move_target_index": obs["move_target_index"],
+            "messages": out.messages,
+        }
+        actor.update({key: obs[key] for key in MOVE_SENDER_KEYS})
+        return {ENCODER_OUT: {ACTOR: actor, CRITIC: out.z}}
+
+    def own_embeddings(self, obs: Dict[str, Any]) -> torch.Tensor:
+        """Each compact row's own embedding [B, D], the message its robot sends."""
+        assert self.lookup is not None
+        views = self.lookup.views(obs["vertex"], obs["eta"], obs["flags"])
+        return self.gnn.own_embeddings(
+            views["node_features"],
+            views["node_mask"],
+            views["edge_index"],
+            views["edge_mask"],
+            views["own_index"],
+        )
 
 
 class _PiHead(nn.Module):
@@ -107,7 +153,9 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
     docstring. `model_config` must carry "gnn_encoder_config" and
     "policy_value_head_config" (plain dicts, matching GNNEncoderConfig/
     PolicyValueHeadConfig's own fields) -- RLlib passes model_config
-    through as a dict, not the pydantic model itself.
+    through as a dict, not the pydantic model itself. With "window_tables"
+    (WindowTables.as_arrays()) the module reads compact samples, which is
+    what the adapter of training/env.py stores, and without it padded ones.
     """
 
     def __init__(self, *args: Any, catalog_class: Any = None, **kwargs: Any) -> None:
@@ -133,7 +181,11 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
         head_config = PolicyValueHeadConfig(**model_config["policy_value_head_config"])
 
         gnn_encoder = GNNEncoder(encoder_config)
-        self.encoder = _GNNSharedEncoder(gnn_encoder)
+        tables = window_tables_from_config(model_config)
+        lookup = None
+        if tables is not None:
+            lookup = WindowLookup(tables, encoder_config.pooling, encoder_config.communication)
+        self.encoder = _GNNSharedEncoder(gnn_encoder, lookup)
         head = PolicyValueHead(
             gnn_encoder.output_dim,
             gnn_encoder.embedding_dim,
@@ -142,6 +194,30 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
         )
         self.pi = _PiHead(head)
         self.vf = _VfHead(head)
+
+    def message_table(
+        self, obs: Dict[str, Any], chunk_rows: int
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """The value pass's message table for compact samples with communication
+        on, None otherwise. It embeds every row once, `chunk_rows` rows at a time
+        and without gradients, and returns the sorted row keys with the matching
+        own embeddings, on the module's device. A chunk of the value pass then
+        finds every sender in it, wherever the sender's row is in the batch."""
+        encoder = self.encoder
+        if encoder.lookup is None or not encoder.gnn.config.communication:
+            return None
+        device = next(self.parameters()).device
+        rows = len(obs["row_key"])
+        parts = []
+        with torch.no_grad():
+            for start in range(0, rows, chunk_rows):
+                chunk = {
+                    key: obs[key][start : start + chunk_rows].to(device)
+                    for key in ("vertex", "eta", "flags")
+                }
+                parts.append(encoder.own_embeddings(chunk))
+        keys, order = torch.sort(obs["row_key"].to(device))
+        return keys, torch.cat(parts)[order]
 
 
 class GNNActionMaskingRLModule(ActionMaskingTorchRLModule, GNNPPOTorchRLModule):

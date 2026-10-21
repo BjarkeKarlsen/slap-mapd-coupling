@@ -18,6 +18,7 @@ from slap_mapd_coupling.instances.generator import (
 )
 from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import LocalSubgraphEncodingConfig
+from slap_mapd_coupling.models.window_tables import COMPACT_SENDER_KEYS, expand_compact
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
 
 
@@ -46,6 +47,13 @@ def _graph(**overrides):
 _MAX_LOCAL_NODES = 20
 # _graph() has 30 movable vertices, the centralised window and the largest section window.
 _WIDE_MAX_LOCAL_NODES = 30
+
+
+def _padded(env: WarehouseMAPDMultiAgentEnv, sample: dict) -> dict:
+    """The padded arrays of one compact sample of the adapter (models/window_tables.py)."""
+    return expand_compact(
+        env.window_tables, sample["observations"], env._pooling, env._config.communication
+    )
 
 
 def _instance(graph):
@@ -142,9 +150,14 @@ def test_observations_carry_the_sender_keys_exactly_when_communication_is_on(com
     for _ in range(3):
         for aid in env.agents:
             keys = set(obs[aid]["observations"])
-            assert (set(SENDER_KEYS) <= keys) == communication
-            assert "move_target_index" in keys
+            assert (set(COMPACT_SENDER_KEYS) <= keys) == communication
+            assert "vertex" in keys
             assert ({"move_sender_index", "move_sender_mask"} <= keys) == communication
+            padded = set(_padded(env, obs[aid]))
+            # The senders are row keys, and the module reads their views from their own rows.
+            assert padded.isdisjoint(SENDER_KEYS)
+            assert ({"row_key", "sender_row_key"} <= padded) == communication
+            assert "move_target_index" in padded
             assert env.observation_spaces[aid].contains(obs[aid])
         obs, *_ = env.step({aid: 0 for aid in env.agents})
 
@@ -313,8 +326,8 @@ def test_step_respects_action_mask_and_truncates_at_horizon():
 ETA_COLUMN = 4  # the distance label in a node feature row (models/gnn_encoder.py)
 
 
-def _own_eta(obs: dict, aid: str) -> float:
-    view = obs[aid]["observations"]
+def _own_eta(env: WarehouseMAPDMultiAgentEnv, obs: dict, aid: str) -> float:
+    view = _padded(env, obs[aid])
     return float(view["node_features"][int(view["own_index"])][ETA_COLUMN])
 
 
@@ -330,7 +343,7 @@ def test_the_reset_observation_shows_the_target_of_a_robot_assigned_at_t0():
         target = locations[agent_id] if task is None else task.pickup_vertex
         expected = env.graph.distance(locations[agent_id], target)
         assert (expected > 0) == (task is not None)
-        assert _own_eta(obs, str(agent_id)) == pytest.approx(expected)
+        assert _own_eta(env, obs, str(agent_id)) == pytest.approx(expected)
 
 
 def test_every_observation_shows_the_task_assigned_at_its_own_timestep():
@@ -349,7 +362,7 @@ def test_every_observation_shows_the_task_assigned_at_its_own_timestep():
                 assert task.assigned_agent is not None
                 expected = env.graph.distance(locations[task.assigned_agent], task.pickup_vertex)
                 assert expected > 0
-                assert _own_eta(seen, str(task.assigned_agent)) == pytest.approx(expected)
+                assert _own_eta(env, seen, str(task.assigned_agent)) == pytest.approx(expected)
                 checked += 1
     assert checked > 1  # the assignment of reset and at least one later one
 
@@ -395,7 +408,7 @@ def test_each_arm_builds_and_its_observations_cover_its_window(controller, pooli
         locations = env.core.fleet.locations()
         for aid in obs:
             assert env.observation_spaces[aid].contains(obs[aid])
-            view = obs[aid]["observations"]
+            view = _padded(env, obs[aid])
             window = env.window_of(int(aid))
             assert frozenset(window) == _expected_window(env, locations[int(aid)], zones)
             assert view["node_mask"].sum() == len(window)
@@ -437,7 +450,7 @@ def test_the_section_window_follows_the_robot_into_the_next_zone():
     after = env.window_of(agent_id)
     assert after != before
     assert frozenset(after) == _expected_window(env, target, zones)
-    view = env._encode([agent_id])[str(agent_id)]["observations"]
+    view = _padded(env, env._encode([agent_id])[str(agent_id)])
     assert view["node_mask"].sum() == len(after)
     assert view["pool_mask"].sum() == len(zones[owner[target]])
 
@@ -628,7 +641,7 @@ def _first_legal_move_trajectory() -> str:
 
 # --- turns -----------------------------------------------------------------------------
 
-CLAIM_COLUMN = -1  # the claimed flag in a node feature row (models/gnn_encoder.py)
+CLAIM_COLUMN = 6  # the claimed flag in a node feature row (models/gnn_encoder.py)
 
 # Recorded on main before the adapter became turn-based.
 _DECENTRALISED_DIGEST = "1f50d1931a5b604dd6b02b4923910236d70413f16e6a15714d2494bb3b73fea3"
@@ -662,7 +675,7 @@ def test_a_later_centralised_agent_sees_the_choice_of_an_earlier_one():
     obs, _ = env.reset()
     first, second = env.core.priority[:2]
     locations = env.core.fleet.locations()
-    first_view = obs[str(first)]["observations"]
+    first_view = _padded(env, obs[str(first)])
     assert first_view["node_mask"].sum() == len(env.window_of(first))
     assert not (first_view["node_features"][:, CLAIM_COLUMN]).any()
 
@@ -671,7 +684,7 @@ def test_a_later_centralised_agent_sees_the_choice_of_an_earlier_one():
     chosen = locations[first] if target.kind == "wait" else target.target
     obs, *_ = env.step({str(first): slot})
 
-    view = obs[str(second)]["observations"]
+    view = _padded(env, obs[str(second)])
     window = list(env.window_of(second))
     claimed = {window[i] for i in np.flatnonzero(view["node_features"][:, CLAIM_COLUMN])}
     assert claimed == {chosen}
@@ -739,7 +752,7 @@ def test_a_section_agent_does_not_see_choices_made_in_another_zone():
             for aid, view in obs.items():
                 window = list(env.window_of(int(aid)))
                 seen = {
-                    window[i] for i in np.flatnonzero(view["observations"]["node_features"][:, -1])
+                    window[i] for i in np.flatnonzero(_padded(env, view)["node_features"][:, CLAIM_COLUMN])
                 }
                 same_zone = {
                     v for j, v in chosen.items() if owner[locations[j]] == owner[locations[int(aid)]]
@@ -781,8 +794,9 @@ def test_the_full_view_setting_has_one_turn_and_no_claims():
     obs, _ = env.reset()
     assert set(obs) == set(env.agents)
     for view in obs.values():
-        assert not view["observations"]["node_features"][:, CLAIM_COLUMN].any()
-        assert "pool_mask" in view["observations"]
+        padded = _padded(env, view)
+        assert not padded["node_features"][:, CLAIM_COLUMN].any()
+        assert "pool_mask" in padded
     _, rewards, *_ = env.step({aid: 0 for aid in obs})
     assert env.timestep_completed
     assert set(rewards) == set(env.agents)
@@ -829,7 +843,7 @@ def test_the_last_sub_step_returns_every_agent_with_no_claims(controller):
     locations = env.core.fleet.locations()
     d_max = env.action_spaces["1"].n - 1
     for aid, view in obs.items():
-        assert not view["observations"]["node_features"][:, CLAIM_COLUMN].any()
+        assert not _padded(env, view)["node_features"][:, CLAIM_COLUMN].any()
         plain = (np.array(legality_mask(env.graph, locations[int(aid)], d_max)) == 0.0).astype(float)
         np.testing.assert_array_equal(view["action_mask"], plain)
 
