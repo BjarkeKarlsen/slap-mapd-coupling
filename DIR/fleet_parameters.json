@@ -1,0 +1,195 @@
+{
+  "8": {
+    "capacity": 0.7195,
+    "chi_max": 0.34742204103281954,
+    "rate_at_0_6": 0.43170000000000003,
+    "metrics_by_rate": {
+      "0.1": {
+        "throughput": 0.16991666666666666,
+        "backlog_slope": -0.001175989678983691,
+        "num_seeds": 6
+      },
+      "0.2": {
+        "throughput": 0.31933333333333336,
+        "backlog_slope": -0.0010478284190858984,
+        "num_seeds": 6
+      },
+      "0.3": {
+        "throughput": 0.43016666666666664,
+        "backlog_slope": 0.012040151465301175,
+        "num_seeds": 6
+      },
+      "0.4": {
+        "throughput": 0.5164166666666666,
+        "backlog_slope": 0.050051367793882785,
+        "num_seeds": 6
+      },
+      "0.5": {
+        "throughput": 0.5765833333333333,
+        "backlog_slope": 0.12238751667494188,
+        "num_seeds": 6
+      },
+      "0.6": {
+        "throughput": 0.6338333333333334,
+        "backlog_slope": 0.19924144717557898,
+        "num_seeds": 12
+      },
+      "0.7": {
+        "throughput": 0.6785833333333333,
+        "backlog_slope": 0.2820512162488211,
+        "num_seeds": 12
+      },
+      "0.8": {
+        "throughput": 0.7195,
+        "backlog_slope": 0.34742204103281954,
+        "num_seeds": 12
+      }
+    }
+  },
+  "16": {
+    "capacity": 1.0190833333333333,
+    "chi_max": 1.006362886614384,
+    "rate_at_0_6": 0.6114499999999999,
+    "metrics_by_rate": {
+      "0.1": {
+        "throughput": 0.1695,
+        "backlog_slope": -6.761302569685897e-05,
+        "num_seeds": 6
+      },
+      "0.2": {
+        "throughput": 0.31858333333333333,
+        "backlog_slope": 0.005899986241303608,
+        "num_seeds": 6
+      },
+      "0.3": {
+        "throughput": 0.4285,
+        "backlog_slope": 0.022962380932440823,
+        "num_seeds": 6
+      },
+      "0.4": {
+        "throughput": 0.501,
+        "backlog_slope": 0.09441557045748665,
+        "num_seeds": 6
+      },
+      "0.6": {
+        "throughput": 0.6671666666666667,
+        "backlog_slope": 0.19543326334344305,
+        "num_seeds": 12
+      },
+      "0.8": {
+        "throughput": 0.7519166666666667,
+        "backlog_slope": 0.35553790720257794,
+        "num_seeds": 12
+      },
+      "1.0": {
+        "throughput": 0.8241666666666667,
+        "backlog_slope": 0.500902353135886,
+        "num_seeds": 12
+      },
+      "1.2": {
+        "throughput": 0.8934166666666666,
+        "backlog_slope": 0.6497394302304483,
+        "num_seeds": 12
+      },
+      "1.4": {
+        "throughput": 0.9618333333333333,
+        "backlog_slope": 0.8102269706341564,
+        "num_seeds": 12
+      },
+      "1.6": {
+        "throughput": 1.0190833333333333,
+        "backlog_slope": 1.006362886614384,
+        "num_seeds": 12
+      }
+    }
+  },
+  "32": {
+    "capacity": 1.0370833333333334,
+    "chi_max": 2.6624097459426808,
+    "rate_at_0_6": 0.62225,
+    "metrics_by_rate": {
+      "0.1": {
+        "throughput": 0.16941666666666666,
+        "backlog_slope": -4.363101967892316e-05,
+        "num_seeds": 6
+      },
+      "0.8": {
+        "throughput": 0.75725,
+        "backlog_slope": 0.366086123457381,
+        "num_seeds": 12
+      },
+      "1.2": {
+        "throughput": 0.8346666666666667,
+        "backlog_slope": 0.7200832141909987,
+        "num_seeds": 12
+      },
+      "1.6": {
+        "throughput": 0.9144166666666667,
+        "backlog_slope": 1.1280187596834303,
+        "num_seeds": 12
+      },
+      "2.0": {
+        "throughput": 0.9494166666666667,
+        "backlog_slope": 1.4759430409909455,
+        "num_seeds": 12
+      },
+      "2.4": {
+        "throughput": 0.9748333333333333,
+        "backlog_slope": 1.9368093642884066,
+        "num_seeds": 12
+      },
+      "2.8": {
+        "throughput": 1.0165833333333334,
+        "backlog_slope": 2.3313320790985466,
+        "num_seeds": 12
+      },
+      "3.2": {
+        "throughput": 1.0370833333333334,
+        "backlog_slope": 2.6624097459426808,
+        "num_seeds": 6
+      }
+    }
+  },
+  "64": {
+    "capacity": 0.97525,
+    "chi_max": 6.099252406276359,
+    "rate_at_0_6": 0.58515,
+    "metrics_by_rate": {
+      "1.6": {
+        "throughput": 0.88775,
+        "backlog_slope": 1.0982234831037228,
+        "num_seeds": 6
+      },
+      "2.4": {
+        "throughput": 0.8483333333333334,
+        "backlog_slope": 2.0623810500876374,
+        "num_seeds": 6
+      },
+      "3.2": {
+        "throughput": 0.8645833333333334,
+        "backlog_slope": 2.8833556224214916,
+        "num_seeds": 6
+      },
+      "4.0": {
+        "throughput": 0.9211666666666667,
+        "backlog_slope": 3.6029837707202983,
+        "num_seeds": 6
+      },
+      "4.8": {
+        "throughput": 0.969,
+        "backlog_slope": 4.345118982813594,
+        "num_seeds": 6
+      },
+      "5.6": {
+        "throughput": 0.97525,
+        "backlog_slope": 5.146855025214308,
+        "num_seeds": 6
+      },
+      "6.4": {
+        "throughput": 0.9280833333333334,
+        "backlog_slope": 6.099252406276359,
+        "num_seeds": 6
+      }
+    }
+  }
+}

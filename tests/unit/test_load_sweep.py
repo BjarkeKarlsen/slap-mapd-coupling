@@ -1,11 +1,11 @@
-"""scripts/load_sweep.py, the Token Passing load sweep on a training spec."""
+"""scripts/sweep/load_sweep.py, the Token Passing load sweep on a training spec."""
 
 import importlib.util
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "load_sweep.py"
+SCRIPT = ROOT / "scripts" / "sweep" / "load_sweep.py"
 CONFIG = ROOT / "configs" / "medium_putaway" / "decentralised.yaml"
 
 
@@ -75,3 +75,36 @@ def test_rates_per_agent_are_scaled_by_the_fleet_size_and_only_fixed_runs(tmp_pa
     assert row["storage_mode"] == "fixed"
     capacity = json.loads((tmp_path / "capacity.json").read_text())
     assert set(capacity["by_mode"]) == {"fixed"}
+
+
+def test_vary_runs_once_per_value_and_reports_the_capacity_per_value(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "0.1", "--seeds", "1", "--horizon", "60",
+        "--vary", "demand.skew", "--values", "0.5", "1.5", "--out", str(tmp_path),
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    rows = [json.loads(line) for line in (tmp_path / "load_sweep.jsonl").read_text().splitlines()]
+    assert [(row["varied"], row["value"]) for row in rows] == [
+        ("demand.skew", 0.5),
+        ("demand.skew", 1.5),
+    ]
+    capacity = json.loads((tmp_path / "capacity.json").read_text())
+    assert capacity["varied"] == "demand.skew"
+    assert set(capacity["by_value"]) == {"0.5", "1.5"}
+    assert "## demand.skew = 0.5" in (tmp_path / "summary.md").read_text()
+
+    assert sweep.main(argv) == 0
+    assert len((tmp_path / "load_sweep.jsonl").read_text().splitlines()) == 2
+
+
+def test_with_setting_changes_one_setting_and_validates_it():
+    sweep = _script()
+    spec = sweep.load_spec(CONFIG)
+    assert sweep.with_setting(spec, "demand.skew", 1.5).demand.skew == 1.5
+    try:
+        sweep.with_setting(spec, "demand.skew", -1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a negative skew should be rejected")

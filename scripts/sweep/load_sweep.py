@@ -13,6 +13,14 @@ serves every fleet. The sweep runs F_fix only unless `--storage-modes` says othe
 the main load is read off fixed storage and every rule and controller of a fleet then runs at
 that one rate, as the paired comparison needs.
 
+`--vary SETTING --values ...` runs the sweep once per value of one demand, arrival or storage-rule
+setting, every other setting as the spec has it. It is for the sensitivity sweeps at the main
+load, so `--rates` is then usually that one rate. Each row records the setting and its value, and
+the summary and `OUT/capacity.json` are given per value. One OUT holds one setting.
+
+    python scripts/sweep/load_sweep.py --config configs/fleet_8/decentralised.yaml \\
+        --rates 0.12 --seeds 50 --vary demand.skew --values 0.5 1.0 1.5 --out DIR
+
 `OUT/summary.md` is written again after every sweep. It starts with the trip distance
 d^trip(v) of every storage vertex, then gives per rule and rate the means over seeds of the
 measures the author reads the main load and the stall length off. The capacity of a rule is
@@ -51,10 +59,22 @@ SUMMARY = "summary.md"
 CAPACITY = "capacity.json"
 # The share of capacity the main load is read at.
 LOAD_SHARE = 0.6
+# The settings `--vary` can change, as section.key of the spec.
+VARIABLE = (
+    "demand.skew",
+    "demand.rotation_period",
+    "demand.rotation_shift",
+    "arrival.margin",
+    "arrival.cold_stock_top_k",
+    "storage_rule.epoch_length",
+    "storage_rule.congestion_weight",
+)
 # The summary columns, the RunMetrics field of each, averaged over seeds.
 _COLUMNS = (
     ("throughput", "throughput"),
     ("completed share", "completed_share"),
+    ("tasks waiting", "num_waiting_tasks"),
+    ("orders waiting", "num_waiting_orders"),
     ("longest stand-still", "longest_stand_still"),
     ("total service", "total_service_time"),
     ("total service finished", "total_service_time_finished"),
@@ -77,7 +97,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--storage-modes", nargs="+", default=["fixed"], dest="modes")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--horizon", type=int, default=None, help="overrides the spec's T")
+    parser.add_argument("--vary", choices=VARIABLE, default=None, help="a setting to sweep")
+    parser.add_argument("--values", type=float, nargs="+", help="the values of --vary")
     args = parser.parse_args(argv)
+    if (args.vary is None) != (args.values is None):
+        parser.error("give --vary and --values together")
 
     spec = load_spec(args.config)
     if args.horizon is not None:
@@ -85,42 +109,71 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     rows_path = args.out / ROWS
     rows = _read_rows(rows_path)
-    done = {(row["storage_mode"], row["arrival_rate"], row["seed"]) for row in rows}
+    varied = {row.get("varied") for row in rows} - {args.vary}
+    if varied:
+        parser.error(f"{rows_path} holds rows of {sorted(map(str, varied))}, not {args.vary}")
+    done = {(row.get("value"), row["storage_mode"], row["arrival_rate"], row["seed"]) for row in rows}
     num_agents = spec.experiment.num_agents
     sweep_rates = args.rates or [round(share * num_agents, 6) for share in args.rates_per_agent]
 
-    for rate in sweep_rates:
-        # The starting stock is sized by the load, so every rate builds its own study.
-        rated = override_spec(spec, arrival_rate=rate)
-        study = build_study(rated)
-        seeds = split_seeds(study.seed_split).test[: args.seeds]
-        for mode in args.modes:
-            for seed in seeds:
-                if (mode, rate, seed) in done:
-                    continue
-                config = _planner_config(rated, seed, mode)
-                metrics = run_episode(
-                    study.instance.graph, study.skus, study.counts, study.capacities, config
-                )
-                row = metrics.model_dump(mode="json")
-                with rows_path.open("a", encoding="utf-8") as sink:
-                    sink.write(json.dumps(row) + "\n")
-                rows.append(row)
-                done.add((mode, rate, seed))
-                print(f"{mode} rate {rate} seed {seed}: throughput {metrics.throughput:.3f}")
+    for value in args.values or [None]:
+        valued = spec if value is None else with_setting(spec, args.vary, value)
+        for rate in sweep_rates:
+            # The starting stock is sized by the load, so every rate builds its own study.
+            rated = override_spec(valued, arrival_rate=rate)
+            study = build_study(rated)
+            seeds = split_seeds(study.seed_split).train[: args.seeds]
+            for mode in args.modes:
+                for seed in seeds:
+                    if (value, mode, rate, seed) in done:
+                        continue
+                    config = _planner_config(rated, seed, mode)
+                    metrics = run_episode(
+                        study.instance.graph, study.skus, study.counts, study.capacities, config
+                    )
+                    row = metrics.model_dump(mode="json")
+                    if value is not None:
+                        row.update(varied=args.vary, value=value)
+                    with rows_path.open("a", encoding="utf-8") as sink:
+                        sink.write(json.dumps(row) + "\n")
+                    rows.append(row)
+                    done.add((value, mode, rate, seed))
+                    at = "" if value is None else f"{args.vary} {value:g} "
+                    print(f"{at}{mode} rate {rate} seed {seed}: throughput {metrics.throughput:.3f}")
 
     study = build_study(spec)
     f_up = spec.experiment.keep_up_threshold
-    capacities = {mode: capacity(runs, f_up) for mode, runs in _by_mode(rows).items()}
+    by_value: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_value.setdefault(row.get("value"), []).append(row)
+    sections, found = [], {}
+    for value, runs in sorted(by_value.items(), key=lambda item: (item[0] is None, item[0])):
+        capacities = {mode: capacity(of_mode, f_up) for mode, of_mode in _by_mode(runs).items()}
+        found[value] = capacities
+        title = None if value is None else f"{args.vary or rows[0]['varied']} = {value:g}"
+        sections.append(_tables(spec, runs, capacities, title))
     (args.out / SUMMARY).write_text(
-        _summary(spec, study.instance.graph, rows, capacities), encoding="utf-8"
+        _trips(spec, study.instance.graph) + "".join(sections), encoding="utf-8"
     )
-    (args.out / CAPACITY).write_text(
-        json.dumps({"num_agents": num_agents, "f_up": f_up, "by_mode": capacities}, indent=2)
-        + "\n",
-        encoding="utf-8",
-    )
+    report: dict[str, Any] = {"num_agents": num_agents, "f_up": f_up}
+    if set(found) == {None}:
+        report["by_mode"] = found[None]
+    else:
+        report["varied"] = args.vary or rows[0]["varied"]
+        report["by_value"] = {f"{value:g}": capacities for value, capacities in found.items()}
+    (args.out / CAPACITY).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return 0
+
+
+def with_setting(spec: TrainingSpec, setting: str, value: float) -> TrainingSpec:
+    """`spec` with one setting of VARIABLE, given as section.key, set to `value`. The result is
+    validated again, so a value the spec would reject raises here."""
+    section, key = setting.split(".")
+    data = spec.model_dump()
+    if data.get(section) is None:
+        raise ValueError(f"the spec has no {section} section to set {key} in")
+    data[section][key] = value
+    return TrainingSpec.model_validate(data)
 
 
 def capacity(rows: list[dict[str, Any]], f_up: float) -> dict[str, float | None]:
@@ -175,13 +228,7 @@ def receiving_vertices(spec: TrainingSpec, graph: WarehouseGraph) -> list[Vertex
     return sorted(v for v, vertex in graph.vertices.items() if getattr(vertex.role, role))
 
 
-def _summary(
-    spec: TrainingSpec,
-    graph: WarehouseGraph,
-    rows: list[dict[str, Any]],
-    capacities: dict[str, dict[str, float | None]],
-) -> str:
-    f_up = spec.experiment.keep_up_threshold
+def _trips(spec: TrainingSpec, graph: WarehouseGraph) -> str:
     receiving = receiving_vertices(spec, graph)
     delivery = sorted(v for v, vertex in graph.vertices.items() if vertex.role.delivery)
     trips = {
@@ -201,7 +248,22 @@ def _summary(
         "|---|---|",
         *(f"| {v} | {d:.1f} |" for v, d in trips.items()),
         "",
-        "## Means over seeds",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _tables(
+    spec: TrainingSpec,
+    rows: list[dict[str, Any]],
+    capacities: dict[str, dict[str, float | None]],
+    title: str | None,
+) -> str:
+    """The means over seeds and the capacity of `rows`, under `title` when a setting is varied."""
+    f_up = spec.experiment.keep_up_threshold
+    level = "##" if title is None else "###"
+    lines = [] if title is None else [f"## {title}", ""]
+    lines += [
+        f"{level} Means over seeds",
         "",
         "| rule | rate | seeds | keep up | " + " | ".join(name for name, _ in _COLUMNS) + " |",
         "|---|---|---|---|" + "---|" * len(_COLUMNS),
@@ -228,7 +290,7 @@ def _summary(
 
     lines += [
         "",
-        "## Capacity",
+        f"{level} Capacity",
         "",
         f"The highest rate that keeps up on every seed with f_up = {f_up:g}, every lower rate",
         f"too, the first rate that fails, and the main load at {LOAD_SHARE} of the capacity.",
@@ -241,7 +303,7 @@ def _summary(
         lines.append(
             f"| {mode} | " + " | ".join("n/a" if c is None else f"{c:g}" for c in cells) + " |"
         )
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n\n"
 
 
 if __name__ == "__main__":

@@ -6,8 +6,8 @@
 # (SKU, shelf) of an arrival is a put-away task, and its units can be picked only once it is
 # delivered (`arrival.putaway: robots`).
 #
-# Values are illustrative and are not thesis values. The arrival rate and the stall length
-# wait for the Token Passing load sweep (scripts/load_sweep.py). Everything else is
+# Values are illustrative and are not thesis values, apart from the arrival rate, which the
+# Token Passing load sweep sets (scripts/sweep/load_sweep.py). Everything else is
 # configs/medium_arrival. See training/spec.py for what each section means.
 
 
@@ -16,11 +16,11 @@ regime: fixed_only          # fixed_only | matched
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 
-# An overload on this instance. Token Passing finishes 0.26 to 0.27 tasks per step at 0.3 and its
-# backlog grows, so the arms are compared on throughput and backlog. A sampling call of a runner
-# is one complete episode, and the budget below counts timesteps, one per timestep however
+# Selected main load from the fixed-storage Token Passing load sweep, 0.6 of the highest rate at
+# which fixed storage keeps up on every seed (scripts/sweep/load_sweep.py). A sampling call of a
+# runner is one complete episode, and the budget below counts timesteps, one per timestep however
 # many robots choose within it.
-arrival_rate: 0.6
+arrival_rate: 0.12
 horizon: 2000
 
 experiment:
@@ -52,7 +52,7 @@ storage:
   num_skus: 100
   # One name per SKU, e.g. [tea, coffee, mugs, ...]. The first is the most popular at t = 0.
   # null names them sku_000, sku_001 and so on.
-  sku_names: null
+  sku_names: [tea, coffee, mugs, sugar, milk_powder, instant_noodles, pasta, rice, canned_tomatoes, olive_oil, flour, bread_mix, cereal, oatmeal, honey, jam, peanut_butter, chocolate_bars, biscuits, crackers, chips, nuts, dried_fruit, granola_bars, energy_drinks, soda, sparkling_water, juice, bottled_water, sports_drink, protein_powder, protein_bars, vitamins, pain_relief, bandages, hand_sanitizer, soap, shampoo, conditioner, toothpaste, toothbrushes, deodorant, razors, shaving_cream, tissues, toilet_paper, paper_towels, dish_soap, laundry_detergent, fabric_softener, cleaning_spray, sponges, trash_bags, aluminum_foil, plastic_wrap, zip_lock_bags, paper_plates, plastic_cups, cutlery_sets, napkins, candles, light_bulbs, batteries, phone_chargers, usb_cables, power_strips, headphones, mouse_pads, notebooks, pens, pencils, markers, sticky_notes, envelopes, printer_paper, staplers, scissors, tape, glue, folders, binders, calendars, picture_frames, vases, plant_pots, seeds, gardening_gloves, watering_cans, tools, screwdrivers, duct_tape, extension_cords, door_hinges, light_switches, paint_brushes, sandpaper, safety_gloves, work_boots, umbrellas, backpacks]  #, water_bottles, lunch_boxes
   unit_capacities: [0.5, 1.0, 2.0]
   vertex_capacity: 300.0
   initial_units: 8

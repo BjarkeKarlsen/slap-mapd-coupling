@@ -6,8 +6,8 @@
 # (SKU, shelf) of an arrival is a put-away task, and its units can be picked only once it is
 # delivered (`arrival.putaway: robots`).
 #
-# Values are illustrative and are not thesis values. The arrival rate and the stall length
-# wait for the Token Passing load sweep (scripts/load_sweep.py). Everything else is
+# Values are illustrative and are not thesis values, apart from the arrival rate, which the
+# Token Passing load sweep sets (scripts/sweep/load_sweep.py). Everything else is
 # configs/medium_arrival. See training/spec.py for what each section means.
 
 
@@ -16,11 +16,11 @@ regime: fixed_only          # fixed_only | matched
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 
-# An overload on this instance. Token Passing finishes 0.26 to 0.27 tasks per step at 0.3 and its
-# backlog grows, so the arms are compared on throughput and backlog. A sampling call of a runner
-# is one complete episode, and the budget below counts timesteps, one per timestep however
+# Selected main load from the fixed-storage Token Passing load sweep, 0.6 of the highest rate at
+# which fixed storage keeps up on every seed (scripts/sweep/load_sweep.py). A sampling call of a
+# runner is one complete episode, and the budget below counts timesteps, one per timestep however
 # many robots choose within it.
-arrival_rate: 0.6
+arrival_rate: 0.36
 horizon: 2000
 
 experiment:

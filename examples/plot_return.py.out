@@ -1,0 +1,63 @@
+"""Plot iter -> episode_return_mean from a 04_decentralised_training.py log.
+
+Usage:
+    ~/.venvs/rl/bin/python plot_return.py <log_file> [output.png]
+
+Only lines matching "iter N/TOTAL: episode_return_mean=VALUE ..." are used.
+Lines where VALUE is "nan" (no episode finished in that iteration's sample
+window -- expected, not an error) or that don't match the pattern at all
+(Ray warnings, actor errors, etc.) are skipped rather than crashing the parse.
+"""
+
+import re
+import sys
+
+import matplotlib.pyplot as plt
+
+LINE_RE = re.compile(
+    r"iter (\d+)/\d+: episode_return_mean=(-?[\d.]+|nan)\b"
+)
+
+
+def parse(path: str) -> tuple[list[int], list[float]]:
+    iters: list[int] = []
+    returns: list[float] = []
+    with open(path) as f:
+        for line in f:
+            match = LINE_RE.search(line)
+            if match is None:
+                continue
+            value = match.group(2)
+            if value == "nan":
+                continue
+            iters.append(int(match.group(1)))
+            returns.append(float(value))
+    return iters, returns
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <log_file> [output.png]")
+        sys.exit(1)
+    log_path = sys.argv[1]
+    out_path = sys.argv[2] if len(sys.argv) > 2 else "episode_return.png"
+
+    iters, returns = parse(log_path)
+    if not iters:
+        print(f"No valid episode_return_mean lines found in {log_path}")
+        sys.exit(1)
+    print(f"Parsed {len(iters)} valid points (iter {iters[0]} to {iters[-1]})")
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(iters, returns, color="#2563eb", linewidth=1.2, marker="o", markersize=2)
+    ax.set_xlabel("Training iteration")
+    ax.set_ylabel("episode_return_mean")
+    ax.set_title("Decentralised training return over time")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    print(f"Saved {out_path}")
+
+
+if __name__ == "__main__":
+    main()
