@@ -82,3 +82,25 @@ def test_legal_actions_include_wait_and_all_successors():
 def test_action_wait_rejects_target():
     with pytest.raises(ValidationError):
         Action(kind="wait", target=5)
+
+
+def test_within_is_the_field_of_view_worked_out_once():
+    """within(v, depth) is every movable vertex within depth of v, in vertex order, and a second
+    call returns the kept tuple."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import build_instance, load_spec
+
+    root = Path(__file__).resolve().parents[2]
+    graph = build_instance(load_spec(root / "configs" / "fleet_8" / "decentralised.yaml")).graph
+    for depth in (0.0, 2.0, 5.0):
+        for v, vertex in graph.vertices.items():
+            if not vertex.role.movable:
+                continue
+            expected = tuple(
+                w
+                for w, item in graph.vertices.items()
+                if item.role.movable and graph.distance(v, w) <= depth
+            )
+            assert graph.within(v, depth) == expected
+            assert graph.within(v, depth) is graph.within(v, depth)

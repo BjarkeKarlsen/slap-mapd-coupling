@@ -59,11 +59,7 @@ class Observation:
 def local_subgraph(graph: WarehouseGraph, location: VertexId, depth: float) -> tuple[VertexId, ...]:
     """V_i^(d_obs)(t), the vertices of the field of view, the movable
     vertices with cost distance d_G(l_i(t), v) <= d_obs."""
-    return tuple(
-        v
-        for v, vertex in graph.vertices.items()
-        if vertex.role.movable and graph.distance(location, v) <= depth
-    )
+    return graph.within(location, depth)
 
 
 def role_flags(role: VertexRole) -> tuple[bool, bool, bool, bool, bool]:

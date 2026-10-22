@@ -109,6 +109,8 @@ class WarehouseGraph(BaseModel):
     _out: dict[VertexId, tuple[Edge, ...]] = PrivateAttr(default_factory=dict)
     _legal_actions: dict[VertexId, tuple[Action, ...]] = PrivateAttr(default_factory=dict)
     _dist: dict[tuple[VertexId, VertexId], float] = PrivateAttr(default_factory=dict)
+    # within(v, depth), filled on first use. The graph never changes, so neither does the set.
+    _within: dict[tuple[VertexId, float], tuple[VertexId, ...]] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
     def _edges_reference_known_movable_vertices(self) -> "WarehouseGraph":
@@ -205,6 +207,21 @@ class WarehouseGraph(BaseModel):
     def legal_actions(self, v: VertexId) -> tuple[Action, ...]:
         """U(v) in the action set: wait, then one move per N+(v) in increasing vertex number."""
         return self._legal_actions[v]
+
+    def within(self, v: VertexId, depth: float) -> tuple[VertexId, ...]:
+        """The movable vertices w with d_G(v, w) <= depth, in vertex order. Worked out once per
+        (v, depth) and kept, since the environment asks for every robot's field of view on every
+        timestep (environment/observation.py::local_subgraph)."""
+        key = (v, depth)
+        found = self._within.get(key)
+        if found is None:
+            found = tuple(
+                w
+                for w, vertex in self.vertices.items()
+                if vertex.role.movable and self.distance(v, w) <= depth
+            )
+            self._within[key] = found
+        return found
 
     def distance(self, v: VertexId, w: VertexId) -> float:
         """d_G(v, w) over G[V_mov].
