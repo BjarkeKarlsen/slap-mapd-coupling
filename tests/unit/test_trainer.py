@@ -17,8 +17,10 @@ from slap_mapd_coupling.training.spec import (
 from slap_mapd_coupling.training.trainer import (
     DEFAULT_SCORE_ATTRIBUTE,
     CheckpointSettings,
+    ProgressLog,
     checkpoint_config,
     load_module,
+    resume,
     train,
 )
 
@@ -144,3 +146,19 @@ def test_the_timestep_count_is_copied_to_the_top_level_of_the_result():
     result = {"env_runners": {"timesteps_sampled_lifetime": 260.0}}
     callbacks.on_train_result(result=result)
     assert result["timesteps_sampled_lifetime"] == 260
+
+
+def test_a_resumed_run_writes_its_repeated_iterations_once(tmp_path):
+    # A resumed run trains the iterations after its latest checkpoint again.
+    progress = tmp_path / "progress.jsonl"
+    log = ProgressLog(expected_iterations=6, progress_path=progress)
+    for i in (1, 2, 3, 4, 5, 4, 5, 6):
+        log.on_trial_result(None, [], None, {"training_iteration": i})
+    rows = [json.loads(line)["iteration"] for line in progress.read_text().splitlines()]
+    assert rows == [1, 2, 3, 4, 5, 6]
+
+
+def test_resume_refuses_a_folder_with_no_run(tmp_path):
+    spec = override_spec(load_spec(CONFIG), horizon=130, budget_env_steps=130)
+    with pytest.raises(ValueError, match="No run to continue"):
+        resume(build_study_ppo_config(spec, build_study(spec)), "missing", tmp_path)

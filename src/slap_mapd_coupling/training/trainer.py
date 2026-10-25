@@ -5,6 +5,8 @@ Tune until the training budget is reached and returns where the checkpoints are.
 graph and no study setting. Whoever calls it, an example or the `train` command, builds the
 config first.
 
+`resume` continues a run that was stopped before its budget, from its latest checkpoint.
+
 Checkpoints are Tune's own (`tune.CheckpointConfig`). A run writes one every
 `CheckpointSettings.frequency` iterations and one at the end, keeps the `num_to_keep` best by
 `score_attribute` (and always the latest), and `TrainingRun.best_checkpoint` is the best one by
@@ -84,7 +86,11 @@ class TrainingRun(NamedTuple):
 
 
 class ProgressLog(tune.Callback):
-    """Prints one line per iteration and appends it to a JSON Lines file."""
+    """Prints one line per iteration and appends it to a JSON Lines file.
+
+    A resumed run repeats the iterations after its latest checkpoint, so the rows of an
+    iteration and of every later one are dropped before it is written again.
+    """
 
     def __init__(self, expected_iterations: int, progress_path: Path | None) -> None:
         self._expected_iterations = expected_iterations
@@ -97,8 +103,13 @@ class ProgressLog(tune.Callback):
         i = result["training_iteration"]
         print(format_iteration(i, self._expected_iterations, result))
         if self._progress_path is not None:
-            with self._progress_path.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(iteration_record(i, result)) + "\n")
+            kept = [
+                line
+                for line in self._progress_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["iteration"] < i
+            ]
+            kept.append(json.dumps(iteration_record(i, result)))
+            self._progress_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
 def checkpoint_config(settings: CheckpointSettings) -> tune.CheckpointConfig:
@@ -153,6 +164,38 @@ def train(
             callbacks=[ProgressLog(expected_iterations, progress_path)],
         ),
     ).fit()
+    return _finished_run(results, settings)
+
+
+def resume(
+    ppo_config: PPOConfig,
+    run_name: str,
+    storage_path: Path,
+    *,
+    settings: CheckpointSettings | None = None,
+) -> TrainingRun:
+    """Continues the run `train` started as `run_name` under `storage_path`, from its latest
+    checkpoint, after it was stopped before its budget. The budget, the checkpointing and the
+    progress file are the ones the run started with, so it stops where an unbroken run would
+    have. The iterations after the latest checkpoint are trained again.
+
+    `ppo_config` is built from the run's spec as for `train`. Building it registers the
+    environment, which the restored run looks up by name. The runners and the rest of the
+    PPO settings come from the run's own saved state.
+    """
+    settings = settings or CheckpointSettings()
+    experiment = (storage_path / run_name).resolve()
+    if not tune.Tuner.can_restore(str(experiment)):
+        raise ValueError(f"No run to continue in {experiment}.")
+    results = tune.Tuner.restore(
+        str(experiment),
+        ppo_config.algo_class,
+        param_space=ppo_config.callbacks(TrainingProgressCallbacks),  # type: ignore[arg-type]
+    ).fit()
+    return _finished_run(results, settings)
+
+
+def _finished_run(results: tune.ResultGrid, settings: CheckpointSettings) -> TrainingRun:
     result = results[0]
     if result.error is not None:
         raise result.error

@@ -68,6 +68,12 @@ def test_train_requires_a_config():
     assert "--config" in result.output
 
 
+def test_resume_needs_the_spec_train_wrote(tmp_path):
+    result = CliRunner().invoke(cli, ["resume", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "Expected one *_spec.json" in result.output
+
+
 def test_train_rejects_communication_for_a_non_decentralised_controller(tmp_path):
     result = CliRunner().invoke(
         cli,

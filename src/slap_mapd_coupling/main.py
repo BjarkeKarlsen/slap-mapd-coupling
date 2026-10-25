@@ -1,11 +1,13 @@
 """Command-line interface for slap_mapd_coupling.
 
-Four verbs, following the experimental design of sec:pd-aim-and-scope.
+Five verbs, following the experimental design of sec:pd-aim-and-scope.
 
   simulate  runs one configuration, a storage rule with a controller or the
             reference planner, at one load.
   train     trains a learned controller with PPO. The reference planner is
             not learned.
+  resume    continues a training run that was stopped, from its latest
+            checkpoint.
   evaluate  chooses a trained run's checkpoint on the validation seeds and
             plays it on the test seeds.
   sweep     runs the experimental grid from a config file and writes one
@@ -235,10 +237,56 @@ def train(
         storage_path=out,
         progress_path=out / f"{name}_training_progress.jsonl",
     )
+    _report_run(run, spec, out)
+
+
+def _report_run(run, spec, out) -> None:
+    """Prints where a run's checkpoints are, and fails when it stopped before its budget (Tune
+    stops cleanly on Ctrl-C), so a script running it does not take it as finished."""
     click.echo(f"Checkpoint saved to {run.checkpoint}")
     click.echo(
         f"Best checkpoint by {spec.checkpoint.score_attribute} saved to {run.best_checkpoint}"
     )
+    budget = spec.ppo.training_budget_env_steps
+    if run.env_steps_sampled < budget:
+        raise click.ClickException(
+            f"Stopped at {run.env_steps_sampled} of {budget} environment steps. "
+            f"Continue it with: slap-mapd resume {out}"
+        )
+
+
+@cli.command()
+@click.argument("output", type=click.Path(exists=True, file_okay=False))
+def resume(output):
+    """Continue the training run in OUTPUT (the --output of train) from its latest checkpoint.
+    It runs on to the budget the run started with, with the same runners and settings, and
+    keeps writing the same progress file. The iterations after the checkpoint are trained
+    again."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import (
+        TrainingSpec,
+        build_study,
+        build_study_ppo_config,
+    )
+    from slap_mapd_coupling.training.trainer import resume as resume_training
+
+    out = Path(output)
+    specs = sorted(out.glob("*_spec.json"))
+    if len(specs) != 1:
+        raise click.UsageError(f"Expected one *_spec.json in {out}, found {len(specs)}.")
+    spec = TrainingSpec.model_validate_json(specs[0].read_text(encoding="utf-8"))
+    name = specs[0].name.removesuffix("_spec.json")
+    try:
+        run = resume_training(
+            build_study_ppo_config(spec, build_study(spec)),
+            name,
+            out,
+            settings=spec.checkpoint,
+        )
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
+    _report_run(run, spec, out)
 
 
 @cli.command()
