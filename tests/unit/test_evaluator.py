@@ -129,10 +129,10 @@ def test_keeps_up_checks_throughput_against_the_release_rate():
     assert metrics.keeps_up == (metrics.throughput >= 0.5 * released / metrics.horizon)
 
 
-def test_stalled_compares_the_longest_stand_still_with_the_stall_length():
+def test_stalled_compares_the_longest_gap_between_finishes_with_the_stall_length():
     unset = _run(_graph(), _config(horizon=40, arrival_rate=1.5))
     assert unset.stalled is None
-    longest = unset.longest_stand_still
+    longest = unset.longest_completion_gap
     assert longest > 0
     at_longest = _config(horizon=40, arrival_rate=1.5, stall_length=longest)
     assert _run(_graph(), at_longest).stalled is False

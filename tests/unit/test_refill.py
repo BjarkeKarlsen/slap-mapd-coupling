@@ -255,7 +255,9 @@ def test_the_number_of_skus_fills_the_start_fill_of_every_fleet():
             for units in per_vertex.values()
         )
         fill = room / sum(study.capacities.values())
-        assert spec.storage.start_fill <= fill < spec.storage.start_fill + 0.02, (fleet, fill)
+        # Rounded to the nearest multiple of 20 SKUs, so near the start fill, not at it.
+        assert len(study.skus) % 20 == 0
+        assert abs(fill - spec.storage.start_fill) < 0.04, (fleet, fill)
 
 
 def test_sku_names_name_the_first_skus_of_a_derived_count():

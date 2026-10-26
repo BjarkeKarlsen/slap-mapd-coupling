@@ -27,6 +27,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeFloat,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
     model_validator,
@@ -72,7 +73,8 @@ class StorageSettings(BaseModel):
     on otherwise. Under the refill rule `start_fill` may be given instead of `num_skus`: the
     number of SKUs is then derived, the fewest whose starting stock fills that share of the
     shelves' capacity, so every warehouse starts equally full whatever its number of storage
-    vertices (`derived_num_skus`). `sku_names` then names as many of the first SKUs as it has. The popularity ranking of `DemandSettings` starts from the order of that list,
+    vertices (`derived_num_skus`), rounded to the nearest multiple of 1 / `rotation_share` when
+    the demand rotates by a share. `sku_names` then names as many of the first SKUs as it has. The popularity ranking of `DemandSettings` starts from the order of that list,
     so the first name is the most popular at t = 0. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
     Every storage vertex has the capacity `vertex_capacity`. Every SKU starts with
     `initial_units` units, all at one storage vertex, chosen by `initial_placement`:
@@ -156,12 +158,18 @@ class DemandSettings(BaseModel):
     skew: NonNegativeFloat
     rotation_period: PositiveInt | None = None
     rotation_shift: PositiveInt | None = None
+    # The shift as a share of the SKUs instead of a number of places, rounded and at least one,
+    # so the ranking turns once in the same time whatever the number of SKUs.
+    rotation_share: float | None = Field(default=None, gt=0.0, lt=1.0)
 
     @model_validator(mode="after")
     def _rotation_parameters(self) -> "DemandSettings":
-        """A period and a shift only mean something together."""
-        if (self.rotation_period is None) != (self.rotation_shift is None):
-            raise ValueError("Set both rotation_period and rotation_shift, or neither.")
+        """A period and a shift, or a share, only mean something together."""
+        shifts = sum(shift is not None for shift in (self.rotation_shift, self.rotation_share))
+        if shifts > 1:
+            raise ValueError("Set rotation_shift or rotation_share, not both.")
+        if (self.rotation_period is None) != (shifts == 0):
+            raise ValueError("Set rotation_period with rotation_shift or rotation_share, or none.")
         return self
 
 
@@ -299,6 +307,9 @@ class TrainingSpec(BaseModel):
     communication: bool = False
     arrival_rate: PositiveFloat
     horizon: PositiveInt
+    # T_warm, the warm-up left out of the measures ([A66]), chosen by Welch's method. Training
+    # episodes run the whole horizon either way. Whether they get the long horizon is step 10's.
+    warmup: NonNegativeInt = 0
     # The storage rule a policy is evaluated under, which "matched" training uses too.
     evaluation_storage_mode: StorageMode = "fixed"
     experiment: ExperimentSettings
@@ -423,6 +434,7 @@ def override_spec(
     communication: bool | None = None,
     arrival_rate: float | None = None,
     horizon: int | None = None,
+    warmup: int | None = None,
     budget_env_steps: int | None = None,
     seed: int | None = None,
     checkpoint_every: int | None = None,
@@ -437,6 +449,7 @@ def override_spec(
         "communication": communication,
         "arrival_rate": arrival_rate,
         "horizon": horizon,
+        "warmup": warmup,
     }
     data = spec.model_dump()
     data.update({key: value for key, value in top.items() if value is not None})
@@ -489,6 +502,11 @@ def build_storage(
     count = storage.num_skus
     if count is None:
         count = derived_num_skus(storage, graph, demand, sizing)
+        if demand is not None and demand.rotation_share is not None:
+            # Rounded to the nearest whole number of shifts, so the ranking turns once in exactly
+            # 1 / share periods (D20). The fill then lands near start_fill, not at it.
+            multiple = round(1 / demand.rotation_share)
+            count = max(multiple, round(count / multiple) * multiple)
     skus, capacity, counts, _ = _stock_for(storage, graph, demand, sizing, count)
     return skus, capacity, counts
 
@@ -602,8 +620,8 @@ def _demand_blocks(
     ranked = popularity_ranking(
         sku_ids,
         0,
-        None if demand is None else demand.rotation_period,
-        None if demand is None else demand.rotation_shift,
+        None,  # at t = 0 no rotation has happened yet
+        None,
     )
     block = -(-len(ranked) // len(nearest_first))  # the ceiling, in integers
     return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(ranked)}
@@ -617,8 +635,8 @@ def _sized_units(
     ranked = popularity_ranking(
         sku_ids,
         0,
-        None if demand is None else demand.rotation_period,
-        None if demand is None else demand.rotation_shift,
+        None,  # at t = 0 no rotation has happened yet
+        None,
     )
     weights = zipf_weights(len(ranked), 0.0 if demand is None else demand.skew)
     return {
@@ -703,8 +721,8 @@ def refill_starting_stock(
     ranked = popularity_ranking(
         sku_ids,
         0,
-        None if demand is None else demand.rotation_period,
-        None if demand is None else demand.rotation_shift,
+        None,  # at t = 0 no rotation has happened yet
+        None,
     )
     quantiles = period_demand_quantiles(
         len(ranked),
@@ -796,6 +814,7 @@ def build_experiment_config(
         keep_up_threshold=experiment.keep_up_threshold,
         seed=experiment.seed if seed is None else seed,
         horizon=spec.horizon,
+        warmup=spec.warmup,
         wait_cost=experiment.wait_cost,
         observation_depth=experiment.observation_depth,
         discount=experiment.discount,
@@ -806,6 +825,7 @@ def build_experiment_config(
         demand_skew=None if demand is None else demand.skew,
         demand_rotation_period=None if demand is None else demand.rotation_period,
         demand_rotation_shift=None if demand is None else demand.rotation_shift,
+        demand_rotation_share=None if demand is None else demand.rotation_share,
         storage_epoch_length=None if rule is None else rule.epoch_length,
         reassignment_cap=None if rule is None else rule.reassignment_cap,
         congestion_weight=(

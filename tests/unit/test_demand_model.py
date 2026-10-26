@@ -298,8 +298,8 @@ def test_a_skew_alone_is_a_valid_config():
     ("fields", "message"),
     [
         (dict(demand_rotation_period=10, demand_rotation_shift=2), "requires demand_skew"),
-        (dict(demand_skew=1.0, demand_rotation_period=10), "requires demand_rotation_shift"),
-        (dict(demand_skew=1.0, demand_rotation_shift=2), "requires demand_rotation_period"),
+        (dict(demand_skew=1.0, demand_rotation_period=10), "requires one of demand_rotation_shift"),
+        (dict(demand_skew=1.0, demand_rotation_shift=2), "require demand_rotation_period"),
         (dict(demand_skew=-0.5), "greater than or equal to 0"),
         (dict(demand_skew=1.0, demand_rotation_period=0, demand_rotation_shift=1), "greater"),
     ],

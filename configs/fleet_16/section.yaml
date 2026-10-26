@@ -58,11 +58,12 @@ storage:
   unit_capacities: [0.5, 1.0, 2.0]
   initial_placement: demand_sized_blocks
 
-# SKU popularity is Zipf with the given skew, and the ranking rotates by 5 places every 200 steps.
+# SKU popularity is Zipf with the given skew, and every 200 steps the ranking rotates by 5 % of
+# the SKUs, so it turns once every 4000 steps whatever the number of SKUs.
 demand:
   skew: 1.0
   rotation_period: 200
-  rotation_shift: 5
+  rotation_share: 0.05
 
 # Delta, the arrival period of every storage rule, and beta of the congestion rule, used by
 # `slap-mapd evaluate --storage-modes`. Nothing is relocated, so there is no nu.

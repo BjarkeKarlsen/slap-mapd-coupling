@@ -349,6 +349,8 @@ class WarehouseMAPDEnv:
         # The order draw of the arrival model looks at every SKU, never at stock. The SKUs keep
         # the order of `skus`, which the popularity ranking starts from.
         self._sku_ids = list(self._skus)
+        # The places the ranking rotates by each period, from the shift or its share of the SKUs.
+        self._rotation_shift = config.rotation_shift(len(self._sku_ids))
         self._delivery_vertices = sorted(
             v for v, vertex in graph.vertices.items() if vertex.role.delivery
         )
@@ -796,7 +798,7 @@ class WarehouseMAPDEnv:
             self._sku_ids,
             t,
             self.config.demand_rotation_period,
-            self.config.demand_rotation_shift,
+            self._rotation_shift,
         )
         popular = set(ranked[: self.config.cold_stock_top_k])
         prime = set(self._prime_shelves)
@@ -861,7 +863,7 @@ class WarehouseMAPDEnv:
             self._sku_ids,
             t,
             self.config.demand_rotation_period,
-            self.config.demand_rotation_shift,
+            self._rotation_shift,
         )
         if self.config.lines_per_order is None and self.config.units_per_line is None:
             lines = self._draw_single_line_orders(t, ranked)
@@ -1025,7 +1027,7 @@ class WarehouseMAPDEnv:
                 [sku_id for sku_id in self._sku_ids if sku_id in vertices_by_sku],
                 self._t,
                 self.config.demand_rotation_period,
-                self.config.demand_rotation_shift,
+                self._rotation_shift,
             )
             in_stock, cumulative = popularity_cumulative(
                 ranked, self.config.demand_skew, vertices_by_sku
