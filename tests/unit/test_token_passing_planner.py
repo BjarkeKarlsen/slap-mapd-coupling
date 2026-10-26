@@ -186,6 +186,24 @@ def test_a_task_is_not_available_to_an_agent_while_another_agent_ends_on_its_pic
     assert planner.plan(graph, fleet, [], 0)[1].kind == "wait"
 
 
+def test_a_task_held_back_by_a_path_end_while_an_agent_is_idle_is_counted():
+    graph, planner = _corridor(), TokenPassingPlanner()
+    # Agent 2 takes task 1 and its path now ends on vertex 4. Task 2 also delivers to 4, so it
+    # is unavailable to agent 1, who stays idle. Task 2 waited one step with its delivery taken.
+    fleet = _at(graph, a1=1, a2=6)
+    assert planner.assign(graph, fleet, [_task(1, 6, 4), _task(2, 6, 4)], 0) == {1: 2}
+    assert planner.endpoint_wait == {2: (0, 1)}
+    planner.reset(0)
+    assert planner.endpoint_wait == {}
+
+
+def test_nothing_is_counted_when_no_agent_is_idle():
+    graph, planner = _corridor(), TokenPassingPlanner()
+    fleet = _at(graph, a1=6)
+    assert planner.assign(graph, fleet, [_task(1, 6, 4), _task(2, 6, 4)], 0) == {1: 1}
+    assert planner.endpoint_wait == {}
+
+
 def test_an_agent_on_a_delivery_vertex_of_a_waiting_task_moves_off_it():
     graph, planner = _corridor(), TokenPassingPlanner()
     # Agent 2 stands on the pickup, so the task is unavailable to agent 1. It delivers to the

@@ -108,3 +108,70 @@ def test_with_setting_changes_one_setting_and_validates_it():
         pass
     else:
         raise AssertionError("a negative skew should be rejected")
+
+
+def test_the_sweep_can_stop_at_a_rate_no_seed_keeps_up_at(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "0.8", "0.9", "--seeds", "1",
+        "--horizon", "60", "--out", str(tmp_path), "--stop-when-overloaded",
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    rows = [json.loads(line) for line in (tmp_path / "load_sweep.jsonl").read_text().splitlines()]
+    assert [row["arrival_rate"] for row in rows] == [0.8]
+    assert rows[0]["keeps_up"] is False
+    assert json.loads((tmp_path / "capacity.json").read_text())["by_mode"]["fixed"]["capacity"] is None
+
+
+def test_a_rate_whose_stock_does_not_fit_ends_the_sweep_without_a_crash(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "50.0", "--seeds", "1", "--horizon", "60",
+        "--out", str(tmp_path),
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    assert not (tmp_path / "load_sweep.jsonl").exists() or not (
+        tmp_path / "load_sweep.jsonl"
+    ).read_text()
+    assert json.loads((tmp_path / "capacity.json").read_text())["by_mode"] == {}
+
+
+def test_traces_are_written_for_the_first_seeds_only(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "0.1", "--seeds", "2", "--horizon", "40",
+        "--trace-seeds", "1", "--out", str(tmp_path),
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    traces = sorted((tmp_path / "traces").glob("*.jsonl"))
+    assert len(traces) == 1 and traces[0].name.startswith("fixed_rate0.1_seed")
+    assert len(traces[0].read_text().splitlines()) == 41  # the header and one line per step
+
+
+def test_the_shelf_capacity_can_be_varied(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "0.1", "--seeds", "1", "--horizon", "40",
+        "--vary", "storage.vertex_capacity", "--values", "300", "600", "--out", str(tmp_path),
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    rows = [json.loads(line) for line in (tmp_path / "load_sweep.jsonl").read_text().splitlines()]
+    assert [(row["varied"], row["value"]) for row in rows] == [
+        ("storage.vertex_capacity", 300.0),
+        ("storage.vertex_capacity", 600.0),
+    ]
+
+
+def test_every_episode_writes_its_timing(tmp_path):
+    sweep = _script()
+    argv = [
+        "--config", str(CONFIG), "--rates", "0.1", "--seeds", "2", "--horizon", "40",
+        "--out", str(tmp_path),
+    ]  # fmt: skip
+    assert sweep.main(argv) == 0
+    lines = [json.loads(line) for line in (tmp_path / "timing.jsonl").read_text().splitlines()]
+    assert len(lines) == 2
+    seconds, calls = lines[0]["seconds"], lines[0]["calls"]
+    for stage in ("conflict_resolution", "apply_and_lifecycle", "reward", "routing"):
+        assert seconds[stage] >= 0.0 and calls[stage] > 0
+    assert calls["reward"] == 40  # once per step

@@ -51,7 +51,6 @@ def _row(**overrides) -> dict:
         observation_depth=3,
         num_completed_tasks=50,
         throughput=0.25,
-        keep_up_ratio=0.83,
         num_waiting_tasks=1,
         num_active_tasks=2,
         backlog=3,
@@ -128,7 +127,6 @@ def test_an_arrival_row_without_completed_tasks_has_no_stock_wait():
     empty = dict(
         num_completed_tasks=0,
         throughput=0.0,
-        keep_up_ratio=0.0,
         mean_service_time=None,
         mean_wait_for_agent=None,
         mean_travel_time=None,

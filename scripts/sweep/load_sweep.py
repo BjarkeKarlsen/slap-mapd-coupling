@@ -43,7 +43,7 @@ from typing import Any, Sequence
 
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageMode
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
-from slap_mapd_coupling.evaluation.evaluator import keeps_up, run_episode
+from slap_mapd_coupling.evaluation.evaluator import row_keeps_up, run_episode
 from slap_mapd_coupling.storage.arrival import trip_distance
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.spec import (
@@ -68,20 +68,20 @@ VARIABLE = (
     "arrival.cold_stock_top_k",
     "storage_rule.epoch_length",
     "storage_rule.congestion_weight",
+    "storage.vertex_capacity",
 )
-# The summary columns, the RunMetrics field of each, averaged over seeds.
+# The summary columns: label, RunMetrics field, and how the seeds are summed up. Each has a use
+# (notes/measures_catalogue.md in thesis-progress). The two keep-up parts show which kind fails
+# ([A59]), the longest stand-still is what the stall length is chosen from, the backlog slope
+# shows a backlog still growing at T ([A55]), and overflow and unplaced units go in the load and
+# demand appendix. Service times are read from the rows and the plots, not from here.
 _COLUMNS = (
-    ("throughput", "throughput"),
-    ("completed share", "completed_share"),
-    ("tasks waiting", "num_waiting_tasks"),
-    ("orders waiting", "num_waiting_orders"),
-    ("longest stand-still", "longest_stand_still"),
-    ("total service", "total_service_time"),
-    ("total service finished", "total_service_time_finished"),
-    ("mean pick service", "mean_service_time"),
-    ("put-aways per arrival", None),
-    ("put-away service", "mean_putaway_service_time"),
-    ("unplaced units", "unplaced_units"),
+    ("picks keep up", "keeps_up_picks", "count"),
+    ("put-aways keep up", "keeps_up_putaways", "count"),
+    ("longest stand-still, highest", "longest_stand_still", "max"),
+    ("backlog slope per 100 steps", "backlog_slope", "mean"),
+    ("overflow units", "overflow_units", "mean"),
+    ("unplaced units", "unplaced_units", "mean"),
 )
 
 
@@ -99,6 +99,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--horizon", type=int, default=None, help="overrides the spec's T")
     parser.add_argument("--vary", choices=VARIABLE, default=None, help="a setting to sweep")
     parser.add_argument("--values", type=float, nargs="+", help="the values of --vary")
+    parser.add_argument(
+        "--trace-seeds",
+        type=int,
+        default=0,
+        help="write a per-step trace (evaluation/trace.py) for the first N seeds of each run",
+    )
+    parser.add_argument(
+        "--stop-when-overloaded",
+        action="store_true",
+        help="skip the rates above one at which no seed keeps up",
+    )
     args = parser.parse_args(argv)
     if (args.vary is None) != (args.values is None):
         parser.error("give --vary and --values together")
@@ -116,20 +127,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     num_agents = spec.experiment.num_agents
     sweep_rates = args.rates or [round(share * num_agents, 6) for share in args.rates_per_agent]
 
+    f_up = spec.experiment.keep_up_threshold
     for value in args.values or [None]:
         valued = spec if value is None else with_setting(spec, args.vary, value)
-        for rate in sweep_rates:
-            # The starting stock is sized by the load, so every rate builds its own study.
+        for rate in sorted(sweep_rates):
+            # The starting stock is sized by the load, so every rate builds its own study. At a
+            # high rate it can outgrow the shelves, and that rate and every higher one are left
+            # out rather than ending the sweep, so the rows and the capacity are still written.
             rated = override_spec(valued, arrival_rate=rate)
-            study = build_study(rated)
+            try:
+                study = build_study(rated)
+            except ValueError as error:
+                print(f"rate {rate} and above skipped, the study cannot be built: {error}")
+                break
             seeds = split_seeds(study.seed_split).train[: args.seeds]
             for mode in args.modes:
-                for seed in seeds:
+                for n, seed in enumerate(seeds):
                     if (value, mode, rate, seed) in done:
                         continue
                     config = _planner_config(rated, seed, mode)
+                    trace = None
+                    if n < args.trace_seeds:
+                        at = "" if value is None else f"{args.vary}_{value:g}_"
+                        trace = args.out / "traces" / f"{at}{mode}_rate{rate:g}_seed{seed}.jsonl"
                     metrics = run_episode(
-                        study.instance.graph, study.skus, study.counts, study.capacities, config
+                        study.instance.graph,
+                        study.skus,
+                        study.counts,
+                        study.capacities,
+                        config,
+                        trace_path=trace,
+                        timing_path=args.out / "timing.jsonl",
                     )
                     row = metrics.model_dump(mode="json")
                     if value is not None:
@@ -140,9 +168,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     done.add((value, mode, rate, seed))
                     at = "" if value is None else f"{args.vary} {value:g} "
                     print(f"{at}{mode} rate {rate} seed {seed}: throughput {metrics.throughput:.3f}")
+            # With --stop-when-overloaded, a rate at which no seed of any rule keeps up ends the
+            # sweep, since a higher rate cannot change a capacity. The rates above capacity
+            # that some seed still passes are kept, for the load and demand appendix.
+            if not args.stop_when_overloaded:
+                continue
+            at_rate = [
+                row for row in rows if row.get("value") == value and row["arrival_rate"] == rate
+            ]
+            if at_rate and not any(row_keeps_up(row, f_up) for row in at_rate):
+                if rate != max(sweep_rates):
+                    print(f"no seed keeps up at rate {rate}, the higher rates are skipped")
+                break
 
     study = build_study(spec)
-    f_up = spec.experiment.keep_up_threshold
     by_value: dict[Any, list[dict[str, Any]]] = {}
     for row in rows:
         by_value.setdefault(row.get("value"), []).append(row)
@@ -156,8 +195,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _trips(spec, study.instance.graph) + "".join(sections), encoding="utf-8"
     )
     report: dict[str, Any] = {"num_agents": num_agents, "f_up": f_up}
-    if set(found) == {None}:
-        report["by_mode"] = found[None]
+    if set(found) <= {None}:  # no setting varied, or no row at all
+        report["by_mode"] = found.get(None, {})
     else:
         report["varied"] = args.vary or rows[0]["varied"]
         report["by_value"] = {f"{value:g}": capacities for value, capacities in found.items()}
@@ -179,12 +218,13 @@ def with_setting(spec: TrainingSpec, setting: str, value: float) -> TrainingSpec
 def capacity(rows: list[dict[str, Any]], f_up: float) -> dict[str, float | None]:
     """The capacity of one rule from its rows: the highest rate at which it, and every lower
     rate, keeps up on every seed, the first rate that fails, and the main load, LOAD_SHARE of
-    the capacity. The check is eq:throughput with f_up, worked out from the row's counts so
-    a row written before the check changed is read the same way. A value is None when no
+    the capacity. The check is eq:throughput with f_up, for picks and put-aways separately
+    ([A59]), worked out from the row's counts so a row written before the check changed is read
+    the same way. A value is None when no
     rate passes or none fails."""
     passes_by_rate: dict[float, bool] = {}
     for row in rows:
-        passed = keeps_up(row["num_completed_tasks"], row["backlog"], f_up)
+        passed = row_keeps_up(row, f_up)
         rate = row["arrival_rate"]
         passes_by_rate[rate] = passes_by_rate.get(rate, True) and bool(passed)
     highest = first_failing = None
@@ -242,11 +282,8 @@ def _trips(spec: TrainingSpec, graph: WarehouseGraph) -> str:
         "",
         "## Trip distance of the storage vertices",
         "",
-        f"Smallest {shortest:.1f}, largest {longest:.1f}, ratio {longest / shortest:.2f}.",
-        "",
-        "| vertex | d_trip |",
-        "|---|---|",
-        *(f"| {v} | {d:.1f} |" for v, d in trips.items()),
+        f"Smallest {shortest:.1f}, largest {longest:.1f}, ratio {longest / shortest:.2f}, over "
+        f"{len(trips)} storage vertices. The ratio bounds what storage can save on a trip.",
         "",
     ]
     return "\n".join(lines) + "\n"
@@ -263,29 +300,27 @@ def _tables(
     level = "##" if title is None else "###"
     lines = [] if title is None else [f"## {title}", ""]
     lines += [
-        f"{level} Means over seeds",
+        f"{level} The check per rate",
         "",
-        "| rule | rate | seeds | keep up | " + " | ".join(name for name, _ in _COLUMNS) + " |",
+        "| rule | rate | seeds | keep up | " + " | ".join(name for name, _, _ in _COLUMNS) + " |",
         "|---|---|---|---|" + "---|" * len(_COLUMNS),
     ]
     by_condition: dict[tuple[str, float], list[dict[str, Any]]] = {}
     for row in rows:
         by_condition.setdefault((row["storage_mode"], row["arrival_rate"]), []).append(row)
     for (mode, rate), runs in sorted(by_condition.items()):
-        passed = sum(
-            bool(keeps_up(run["num_completed_tasks"], run["backlog"], f_up)) for run in runs
-        )
+        passed = sum(bool(row_keeps_up(run, f_up)) for run in runs)
         cells = [mode, f"{rate:g}", str(len(runs)), f"{passed} / {len(runs)}"]
-        for _, field in _COLUMNS:
-            if field is None:
-                values = [
-                    run["num_released_putaways"] / run["num_storage_updates"]
-                    for run in runs
-                    if run["num_storage_updates"]
-                ]
+        for _, field, how in _COLUMNS:
+            values = [run[field] for run in runs if run.get(field) is not None]
+            if not values:
+                cells.append("n/a")
+            elif how == "count":
+                cells.append(f"{sum(1 for v in values if v)} / {len(runs)}")
+            elif how == "max":
+                cells.append(f"{max(values):g}")
             else:
-                values = [run[field] for run in runs if run[field] is not None]
-            cells.append(f"{statistics.fmean(values):.3f}" if values else "n/a")
+                cells.append(f"{statistics.fmean(values):.2f}")
         lines.append("| " + " | ".join(cells) + " |")
 
     lines += [

@@ -18,9 +18,14 @@ from slap_mapd_coupling.environment.multi_agent_env import (
     _relocation_distance,
 )
 from slap_mapd_coupling.evaluation.evaluator import (
+    backlog_slope,
     completed_share,
+    endpoint_wait_metrics,
+    keep_up_parts,
     keeps_up,
     order_metrics,
+    robot_busy_share,
+    row_keeps_up,
     run_episode,
 )
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
@@ -114,7 +119,6 @@ def test_service_time_splits_into_three_parts_that_add_up():
 def test_keeps_up_is_unset_without_a_threshold():
     metrics = _run(_graph(), _config(horizon=30))
     assert metrics.keeps_up is None
-    assert metrics.keep_up_ratio == metrics.throughput / metrics.arrival_rate
 
 
 def test_keeps_up_checks_throughput_against_the_release_rate():
@@ -146,6 +150,56 @@ def test_keeps_up_passes_at_f_up_of_the_released_tasks_and_fails_below():
     assert keeps_up(79, 21, 0.8) is False
     assert keeps_up(0, 0, 0.8) is True  # nothing released, nothing to keep up with
     assert keeps_up(80, 20, None) is None
+
+
+def test_the_check_fails_when_put_aways_fall_behind_while_the_picks_keep_up():
+    # The 32-agent demand run of the 2026-10-22 sweep, in round numbers. Counted together,
+    # 1360 of 1500 tasks (0.91) finished, but only 300 of 450 put-aways (0.67) did ([A59]).
+    assert keeps_up(1360, 140, 0.8) is True
+    assert keep_up_parts(1060, 0, 300, 150, 0.8) == (False, True, False)
+    assert keep_up_parts(1060, 0, 0, 0, 0.8) == (True, True, True)  # no put-away released
+    assert keep_up_parts(1060, 0, 300, 150, None) == (None, None, None)
+
+
+def test_a_saved_row_is_checked_by_kind_with_or_without_the_put_away_backlog():
+    row = dict(num_completed_tasks=1360, backlog=140, num_completed_putaways=300)
+    assert row_keeps_up({**row, "putaway_backlog": 140}, 0.8) is False
+    assert row_keeps_up({**row, "putaway_backlog": 0}, 0.8) is True
+    # A row from before [A59] with put-aways cannot be checked by kind.
+    assert row_keeps_up({**row, "num_released_putaways": 440}, 0.8) is None
+    # A template row has no put-aways, and the check is the one over every task.
+    assert row_keeps_up(dict(num_completed_tasks=80, backlog=20), 0.8) is True
+
+
+def test_the_backlog_slope_is_read_over_the_second_half_per_100_steps():
+    assert backlog_slope([50, 0, 0, 1, 2, 3]) == pytest.approx(100.0)  # 0..3, one per step
+    assert backlog_slope([0, 0, 7, 7, 7]) == pytest.approx(0.0)
+    assert backlog_slope([4]) is None
+
+
+def _span(task_id: int, assigned: int | None, finished: int | None) -> Task:
+    task = Task(task_id=task_id, release_time=0, pickup_vertex=1, delivery_vertex=2, sku="a")
+    if assigned is not None:
+        task = task.assign(1, assigned).pick_up(assigned + 1)
+    if finished is not None:
+        task = task.complete(finished)
+    return task
+
+
+def test_the_busy_share_counts_active_spans_up_to_the_horizon():
+    tasks = [_span(1, 0, 5), _span(2, 10, None), _span(3, None, None)]
+    # 5 steps, then 10 to the horizon of 20, over two agents.
+    assert robot_busy_share(tasks, 2, 20) == pytest.approx(15 / 40)
+    assert robot_busy_share([], 0, 20) == 0.0
+
+
+def test_the_endpoint_wait_is_averaged_per_kind_and_unset_without_token_passing():
+    picks = [_span(1, 0, 5), _span(2, 0, 6)]
+    found = endpoint_wait_metrics({1: (4, 2)}, picks, [])
+    assert found["mean_pick_wait_pickup_taken"] == 2.0
+    assert found["mean_pick_wait_delivery_taken"] == 1.0
+    assert found["mean_putaway_wait_pickup_taken"] is None
+    assert set(endpoint_wait_metrics(None, picks, []).values()) == {None}
 
 
 def test_crowding_is_a_fraction_for_the_reference_planner():

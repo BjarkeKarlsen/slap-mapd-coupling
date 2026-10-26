@@ -51,7 +51,6 @@ _MATCHED_FIELDS = (
 # Every scored quantity of sec:pf:measures that is a number per run. Each is
 # reported as a mean over seeds with a confidence interval, per arm.
 _SCORED_QUANTITIES = (
-    "keep_up_ratio",
     "throughput",
     "mean_crowding",
     "mean_relocated_units",

@@ -43,10 +43,12 @@ _PUTAWAY_FIELDS = (
 _ORDER_FIELDS = (
     "mean_order_completion",
     "num_completed_orders",
+    "orders_per_timestep",
     "mean_tasks_per_line",
     "num_lines_waited",
 )
 _COLD_STOCK_FIELDS = ("mean_cold_prime_share", "mean_unit_age_at_pick")
+_SHELF_FILL_FIELDS = ("peak_shelf_fill_share", "mean_shelf_fill_share")
 _ARRIVAL_FIELDS = (
     "mean_stock_wait",
     "num_waiting_orders",
@@ -56,6 +58,7 @@ _ARRIVAL_FIELDS = (
     *_PUTAWAY_FIELDS,
     *_ORDER_FIELDS,
     *_COLD_STOCK_FIELDS,
+    *_SHELF_FILL_FIELDS,
 )
 
 
@@ -65,10 +68,11 @@ class RunMetrics(BaseModel):
     prose, so a reviewer can grep an equation label straight to the field
     that reports it.
 
-    The score has one result, total service time, valid only if the run
-    keeps up. The three parts of service time and crowding explain it;
-    relocations and runtime are costs reported next to it. Nothing here is
-    a weighted sum: each field is a count or an average.
+    The score has one result, the mean service time of picks, valid only if
+    the run keeps up (tab:measures). The three parts of service time and
+    crowding explain it, and the put-away service time and runtime are costs
+    reported next to it. Nothing here is a weighted sum: each field is a
+    count or an average.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -90,13 +94,18 @@ class RunMetrics(BaseModel):
     # --- keeping up, eq:throughput: a check, applied first ---
     num_completed_tasks: NonNegativeInt  # |C_T|
     throughput: NonNegativeFloat  # Lambda_T = |C_T| / T
-    # Lambda_T / lambda_task, throughput over the nominal rate. Reported, no longer the check.
-    keep_up_ratio: NonNegativeFloat
+    # Lambda_T / m, whether each agent finishes fewer tasks as the fleet grows ([A33], RQ4).
+    throughput_per_agent: NonNegativeFloat = 0.0
     # |C_T| / (|C_T| + B_T), the share of the released tasks that finished. None iff nothing
     # was released.
     completed_share: NonNegativeFloat | None = None
-    # The keep-up check, Lambda_T >= f_up (|C_T| + B_T) / T. None unless f_up is configured.
+    # The keep-up check, eq:throughput, applied to picks and to put-aways separately ([A59]).
+    # True iff both parts pass. None unless f_up is configured.
     keeps_up: bool | None = None
+    # Its two parts, |C^pick_T| >= f_up (|C^pick_T| + B^pick_T) and the same for put-aways. A
+    # run with no put-away released passes the put-away part.
+    keeps_up_picks: bool | None = None
+    keeps_up_putaways: bool | None = None
     # The longest run of consecutive blocked ticks of any task, finished or still active at T.
     longest_stand_still: NonNegativeInt = 0
     # longest_stand_still > the stall length, a jam the fleet may have caught up from. None
@@ -110,6 +119,13 @@ class RunMetrics(BaseModel):
     # B_T = |Q_T| + |B_T|, plus the orders waiting for stock under the arrival model, the last
     # entry of the B_t trace
     backlog: NonNegativeInt
+    # B^put_T, the put-aways in B_T. The rest of B_T, B^pick_T, is the picks and the orders
+    # waiting for stock ([A59]). Always 0 without robot put-away.
+    putaway_backlog: NonNegativeInt = 0
+    # The least-squares slope of B_t over the second half of the run, per 100 timesteps. Shows a
+    # backlog still growing at T, which one finite horizon cannot rule out ([A55]). None with
+    # fewer than two timesteps in the second half.
+    backlog_slope: float | None = None
 
     # --- the result, the total service time zeta^tot_T, and its split ---
     # Every task released by T adds min(t^finish, T) - t^released, and every order line still
@@ -145,6 +161,9 @@ class RunMetrics(BaseModel):
     # lines still waits. None without such an order.
     mean_order_completion: NonNegativeFloat | None = None
     num_completed_orders: NonNegativeInt = 0
+    # Arrival stock model only. num_completed_orders / T, reported next to throughput, which
+    # counts tasks ([A56]). None under the template model.
+    orders_per_timestep: NonNegativeFloat | None = None
     # Arrival stock model only. Tasks per order line, over the lines with no units still
     # missing, so how often a line is split over shelves. None without such a line.
     mean_tasks_per_line: NonNegativeFloat | None = None
@@ -153,6 +172,21 @@ class RunMetrics(BaseModel):
 
     # --- congestion, eq:crowding ---
     mean_crowding: NonNegativeFloat = Field(le=1.0)  # bar_delta_T in [0,1]
+    # The share of agent-timesteps in which an agent holds an active task, from its assignment
+    # to its finish or T. A long wait for an agent while agents stand idle points at the task
+    # rule rather than the fleet size. Diagnostic, not in the thesis.
+    robot_busy_share: NonNegativeFloat = Field(default=0.0, le=1.0)
+    # Token Passing only, None otherwise. The mean over completed picks, and over completed
+    # put-aways, of the timesteps the task waited while some agent was idle and another agent's
+    # path ended at the task's pickup or at its delivery vertex, so Token Passing's task rule
+    # kept it from the idle agent (planners/token_passing.py). A pick's pickup is a shelf and
+    # its delivery a delivery vertex. A put-away's pickup is where stock arrives (a receiving
+    # vertex with arrival.receiving: receiving) and its delivery a shelf. A timestep with both
+    # ends taken counts in both. Diagnostic, not in the thesis.
+    mean_pick_wait_pickup_taken: NonNegativeFloat | None = None
+    mean_pick_wait_delivery_taken: NonNegativeFloat | None = None
+    mean_putaway_wait_pickup_taken: NonNegativeFloat | None = None
+    mean_putaway_wait_delivery_taken: NonNegativeFloat | None = None
 
     # --- slow-loop cost, eq:relocation ---
     # floor(T / Delta); 0 under F_fix. Under the arrival model the number of arrivals, under
@@ -172,6 +206,14 @@ class RunMetrics(BaseModel):
     unplaced_units: NonNegativeInt = 0  # arriving units that fit on no shelf, over the episode
     # Units F_fix placed off their SKU's home shelf, over the episode. 0 under the adaptive rules.
     overflow_units: NonNegativeInt = 0
+
+    # --- shelf fill, arrival stock model only. Diagnostic, not in the thesis ---
+    # After each arrival, stock on its way counted, the used capacity of a shelf over its
+    # capacity. The fullest shelf over the run, and the mean over arrivals of the mean over
+    # shelves. A rule that piles stock onto a few shelves has a peak near 1 and a low mean. None
+    # without an arrival.
+    peak_shelf_fill_share: NonNegativeFloat | None = None
+    mean_shelf_fill_share: NonNegativeFloat | None = None
 
     # --- cold stock, arrival stock model only, evaluation only ---
     # The share of the prime shelves' capacity that holds SKUs no longer among the top
@@ -247,7 +289,18 @@ class RunMetrics(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _keep_up_is_both_parts(self) -> "RunMetrics":
+        parts = (self.keeps_up_picks, self.keeps_up_putaways)
+        if self.keeps_up is None or any(part is None for part in parts):
+            return self
+        if self.keeps_up != all(parts):
+            raise ValueError("keeps_up must be True iff keeps_up_picks and keeps_up_putaways are.")
+        return self
+
+    @model_validator(mode="after")
     def _backlog_is_sum(self) -> "RunMetrics":
+        if self.putaway_backlog > self.backlog:
+            raise ValueError("putaway_backlog is part of backlog, so it cannot exceed it.")
         if self.backlog != self.num_waiting_tasks + self.num_active_tasks + self.num_waiting_orders:
             raise ValueError(
                 "backlog must equal num_waiting_tasks + num_active_tasks + num_waiting_orders "

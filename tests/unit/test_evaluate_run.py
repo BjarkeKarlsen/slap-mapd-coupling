@@ -112,7 +112,6 @@ def _real_metrics(seed, storage_mode, service_time):
         observation_depth=5,
         num_completed_tasks=20,
         throughput=0.2,
-        keep_up_ratio=0.8,
         keeps_up=True,
         num_waiting_tasks=0,
         num_active_tasks=0,

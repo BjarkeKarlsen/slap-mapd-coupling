@@ -159,6 +159,10 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
         "episode_max_agent_override_share": (
             max(log.overrides_by_agent.values()) / overrides if overrides else 0.0
         ),
+        # The timing log, seconds per part of the step over the episode (engineering only).
+        **{f"seconds_{stage}": seconds for stage, seconds in log.stage_seconds.items()},
+        "seconds_routing": sum(log.routing_runtime_seconds),
+        "seconds_assignment": sum(log.assignment_runtime_seconds),
     }
 
 
@@ -319,6 +323,17 @@ def iteration_record(i: int, result: Mapping[str, Any]) -> dict[str, Any]:
     for key in keys:
         value = runners.get(key)
         record[key] = float(value) if _is_number(value) else None
+    # The timing log: the per-episode seconds of every part of the step (`episode_metrics`),
+    # the iteration's wall-clock time, and RLlib's own timers, flattened. Engineering only.
+    for key, value in sorted(runners.items()):
+        if key.startswith("seconds_") and _is_number(value):
+            record[key] = float(value)
+    wall = result.get("time_this_iter_s")
+    if _is_number(wall):
+        record["time_this_iter_s"] = float(wall)
+    for key, value in sorted((result.get("timers") or {}).items()):
+        if _is_number(value):
+            record[f"timer_{key}"] = float(value)
     return record
 
 

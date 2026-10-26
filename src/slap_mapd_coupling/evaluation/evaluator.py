@@ -10,6 +10,7 @@ meaningful (sec:impl:instances, evaluation/comparison.py).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Sequence
 
@@ -39,6 +40,7 @@ def run_episode(
     config: ExperimentConfig,
     trace_path: Path | None = None,
     *,
+    timing_path: Path | None = None,
     policy: ModulePolicy | None = None,
     encoding_config: LocalSubgraphEncodingConfig | None = None,
     zones: Sequence[frozenset[VertexId]] | None = None,
@@ -64,6 +66,9 @@ def run_episode(
     With `trace_path` the episode also writes a per-step trace there
     (evaluation/trace.py). The writer only reads the environment, so the
     returned RunMetrics are the same with or without it.
+
+    With `timing_path` one JSON line is appended there with the wall-clock seconds and calls of
+    every part of the step (`episode_timing`). Engineering only, it changes no result.
     """
     if config.planner is not None:
         env, step = _planner_run(
@@ -90,7 +95,37 @@ def run_episode(
             for _ in range(config.horizon):
                 step()
                 writer.record(env)
-    return _to_run_metrics(env, config)
+    metrics = _to_run_metrics(env, config)
+    if timing_path is not None:
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        with timing_path.open("a", encoding="utf-8") as sink:
+            sink.write(json.dumps(episode_timing(env, config)) + "\n")
+    return metrics
+
+
+def episode_timing(env: WarehouseMAPDEnv, config: ExperimentConfig) -> dict[str, Any]:
+    """The timing log of one episode: who ran, then seconds and calls per part of the step.
+    Routing is whatever produced the actions (planning, or observations and forward pass for a
+    learned arm), and `observations` is the observation build alone, inside routing."""
+    log = env.log
+    return {
+        "controller": config.router_name,
+        "storage_mode": config.storage_mode,
+        "num_agents": config.num_agents,
+        "arrival_rate": config.arrival_rate,
+        "seed": config.seed,
+        "horizon": config.horizon,
+        "seconds": {
+            **log.stage_seconds,
+            "routing": sum(log.routing_runtime_seconds),
+            "assignment": sum(log.assignment_runtime_seconds),
+        },
+        "calls": {
+            **log.stage_calls,
+            "routing": len(log.routing_runtime_seconds),
+            "assignment": len(log.assignment_runtime_seconds),
+        },
+    }
 
 
 def _planner_run(
@@ -167,12 +202,108 @@ def completed_share(num_completed: int, backlog: int) -> float | None:
 
 
 def keeps_up(num_completed: int, backlog: int, keep_up_threshold: float | None) -> bool | None:
-    """The keep-up check, eq:throughput, Lambda_T >= f_up (|C_T| + B_T) / T. Both sides are
-    multiplied by T, so no rounding of the division decides a run on the threshold. None
-    unless f_up is set."""
+    """One part of the keep-up check, eq:throughput, for one kind of task:
+    |C_T| / T >= f_up (|C_T| + B_T) / T. Both sides are multiplied by T, so no rounding of the
+    division decides a run on the threshold. None unless f_up is set."""
     if keep_up_threshold is None:
         return None
     return num_completed >= keep_up_threshold * (num_completed + backlog)
+
+
+def keep_up_parts(
+    completed_picks: int,
+    pick_backlog: int,
+    completed_putaways: int,
+    putaway_backlog: int,
+    keep_up_threshold: float | None,
+) -> tuple[bool | None, bool | None, bool | None]:
+    """The keep-up check of eq:throughput, applied to picks and to put-aways separately
+    ([A59]): (keeps up, picks pass, put-aways pass). The run keeps up iff both parts pass. With
+    no put-away released the put-away part passes. All three None unless f_up is set."""
+    picks = keeps_up(completed_picks, pick_backlog, keep_up_threshold)
+    putaways = keeps_up(completed_putaways, putaway_backlog, keep_up_threshold)
+    if picks is None or putaways is None:
+        return None, None, None
+    return picks and putaways, picks, putaways
+
+
+def row_keeps_up(row: Mapping[str, Any], keep_up_threshold: float | None) -> bool | None:
+    """The keep-up check of [A59] read off a saved row, so a sweep can apply a threshold to
+    rows it wrote earlier. None for a row with put-aways but no `putaway_backlog`, one written
+    before [A59]. Its put-aways released and not completed cannot stand in, because they count
+    the put-aways of an arrival at T, which B_T leaves out, and on the 2026-10-22 sweep that
+    turned 20 passing seeds into 1. A row without put-aways is a template row, checked over
+    every task."""
+    completed_putaways = row.get("num_completed_putaways", 0)
+    if "putaway_backlog" in row:
+        putaway_backlog = row["putaway_backlog"]
+    elif row.get("num_released_putaways", 0) == 0:
+        putaway_backlog = 0
+    else:
+        return None
+    pick_backlog = max(row["backlog"] - putaway_backlog, 0)
+    return keep_up_parts(
+        row["num_completed_tasks"] - completed_putaways,
+        pick_backlog,
+        completed_putaways,
+        putaway_backlog,
+        keep_up_threshold,
+    )[0]
+
+
+def backlog_slope(backlog_by_t: Sequence[int]) -> float | None:
+    """The least-squares slope of B_t over the second half of the trace, per 100 timesteps
+    ([A55]). None with fewer than two points."""
+    half = list(backlog_by_t[len(backlog_by_t) // 2 :])
+    n = len(half)
+    if n < 2:
+        return None
+    mean_x = (n - 1) / 2
+    mean_y = sum(half) / n
+    spread = sum((x - mean_x) ** 2 for x in range(n))
+    return 100 * sum((x - mean_x) * (y - mean_y) for x, y in enumerate(half)) / spread
+
+
+def robot_busy_share(tasks: Sequence[Task], num_agents: int, horizon: int) -> float:
+    """The share of agent-timesteps in [0, T) in which an agent holds an active task. An agent
+    holds at most one active task at a time, so the tasks' active spans add up."""
+    if num_agents == 0 or horizon == 0:
+        return 0.0
+    busy = 0
+    for task in tasks:
+        if task.assignment_time is None:
+            continue
+        end = horizon if task.finish_time is None else min(task.finish_time, horizon)
+        busy += max(end - task.assignment_time, 0)
+    return busy / (num_agents * horizon)
+
+
+def endpoint_wait_metrics(
+    endpoint_wait: Mapping[TaskId, tuple[int, int]] | None,
+    picks: Sequence[Task],
+    putaways: Sequence[Task],
+) -> dict[str, float | None]:
+    """Token Passing's endpoint wait, averaged over the completed picks and put-aways, split by
+    the end that was taken. Every value None without a Token Passing assigner, or without a
+    completed task of that kind."""
+
+    def means(tasks: Sequence[Task]) -> tuple[float | None, float | None]:
+        if endpoint_wait is None or not tasks:
+            return None, None
+        counts = [endpoint_wait.get(task.task_id, (0, 0)) for task in tasks]
+        return (
+            sum(c[0] for c in counts) / len(tasks),
+            sum(c[1] for c in counts) / len(tasks),
+        )
+
+    pick_pickup, pick_delivery = means(picks)
+    putaway_pickup, putaway_delivery = means(putaways)
+    return dict(
+        mean_pick_wait_pickup_taken=pick_pickup,
+        mean_pick_wait_delivery_taken=pick_delivery,
+        mean_putaway_wait_pickup_taken=putaway_pickup,
+        mean_putaway_wait_delivery_taken=putaway_delivery,
+    )
 
 
 def order_metrics(
@@ -249,13 +380,12 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     completed = [task for task in env.tasks if task.finish_time is not None]
     num_completed = len(completed)
 
-    # The keep-up check, against the tasks released in the run, and throughput, reported.
+    # The tasks released in the run, for the keep-up check below, and throughput, reported.
     backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
     share = completed_share(num_completed, backlog)
     # Stalls: the longest time an agent holding a task stood still in a row.
     longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
     throughput = num_completed / horizon  # Lambda_T
-    keep_up_ratio = throughput / config.arrival_rate
 
     # Mean service time and its split, eq:meanservice / eq:split, over the completed picks.
     # After assignment an agent either moves or stands still at every timestep, and every
@@ -290,6 +420,22 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         if task.release_time < horizon and task.status(horizon) == "waiting"
     )
     num_active = sum(1 for task in env.tasks if task.status(horizon) == "active")
+    # B^put_T, the put-aways among them, counted the same way ([A59]). The rest of B_T, with the
+    # orders waiting for stock, is B^pick_T.
+    putaway_backlog = sum(
+        1
+        for task in env.tasks
+        if task.kind == "putaway"
+        and task.release_time < horizon
+        and task.status(horizon) in ("waiting", "active")
+    )
+    keep_up, keep_up_picks, keep_up_putaways = keep_up_parts(
+        num_picks,
+        backlog - putaway_backlog,
+        len(putaways),
+        putaway_backlog,
+        config.keep_up_threshold,
+    )
     # Under the arrival model, orders released and still waiting for stock. They count in B_T.
     # Always 0 under the template model.
     num_waiting_orders = len(env.waiting_orders)
@@ -340,6 +486,12 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 if env.log.cold_prime_share_by_update
                 else None
             ),
+            peak_shelf_fill_share=max(env.log.shelf_fill_peak_by_update, default=None),
+            mean_shelf_fill_share=(
+                sum(env.log.shelf_fill_mean_by_update) / len(env.log.shelf_fill_mean_by_update)
+                if env.log.shelf_fill_mean_by_update
+                else None
+            ),
             mean_unit_age_at_pick=(
                 env.log.picked_unit_age_sum / env.log.picked_units
                 if env.log.picked_units
@@ -349,6 +501,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 env.tasks, env.log.order_line_by_task, env.waiting_orders, env.log.lines_waited
             ),
         )
+        arrival_fields["orders_per_timestep"] = arrival_fields["num_completed_orders"] / horizon
 
     # Routing time is whatever produced the actions: planning for a planner, and the
     # observation build, forward pass and sampling for a learned arm.
@@ -367,19 +520,25 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         observation_depth=config.observation_depth,
         num_completed_tasks=num_completed,
         throughput=throughput,
-        keep_up_ratio=keep_up_ratio,
+        throughput_per_agent=throughput / config.num_agents if config.num_agents else 0.0,
         completed_share=share,
-        keeps_up=keeps_up(num_completed, backlog, config.keep_up_threshold),
+        keeps_up=keep_up,
+        keeps_up_picks=keep_up_picks,
+        keeps_up_putaways=keep_up_putaways,
         longest_stand_still=longest_stand_still,
         stalled=None if config.stall_length is None else longest_stand_still > config.stall_length,
         num_waiting_tasks=num_waiting,
         num_active_tasks=num_active,
         backlog=backlog,
+        putaway_backlog=putaway_backlog,
+        backlog_slope=backlog_slope(env.log.backlog_by_t),
         mean_service_time=mean_service_time,
         mean_wait_for_agent=mean_wait,
         mean_travel_time=mean_travel,
         mean_blocked_time=mean_blocked,
         mean_crowding=mean_crowding,
+        robot_busy_share=robot_busy_share(env.tasks, config.num_agents, horizon),
+        **endpoint_wait_metrics(getattr(env.assigner, "endpoint_wait", None), picks, putaways),
         num_storage_updates=num_storage_updates,
         mean_relocated_units=mean_relocated,
         mean_relocation_distance=mean_relocation_distance,

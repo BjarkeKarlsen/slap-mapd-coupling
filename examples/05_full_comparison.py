@@ -52,7 +52,6 @@ _METRIC_FIELDS = (
     "num_completed_tasks",
     "backlog",
     "throughput",
-    "keep_up_ratio",
     "keeps_up",
     "mean_service_time",
     "mean_wait_for_agent",

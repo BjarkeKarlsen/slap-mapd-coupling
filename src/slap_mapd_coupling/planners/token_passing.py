@@ -67,6 +67,9 @@ class TokenPassingPlanner:
         self._graph: WarehouseGraph | None = None
         self._hops_to: dict[VertexId, dict[VertexId, int]] = {}
         self.num_diverged = 0
+        # Per task, the timesteps it waited while an agent was idle and another path ended at
+        # its (pickup, delivery) vertex. A diagnostic of the task rule, read by the evaluator.
+        self.endpoint_wait: dict[TaskId, tuple[int, int]] = {}
 
     def reset(self, episode_seed: int) -> None:
         """Empty the token. Nothing here is random, so the seed is not used."""
@@ -74,6 +77,7 @@ class TokenPassingPlanner:
         self._graph = None
         self._hops_to = {}
         self.num_diverged = 0
+        self.endpoint_wait = {}
 
     def assign(
         self,
@@ -92,6 +96,7 @@ class TokenPassingPlanner:
         )
 
         assignments: dict[TaskId, AgentId] = {}
+        idle = False  # an agent asked, held no task and found none it could take
         for agent_id in sorted(locations):
             if not self._asks(agent_id, t):
                 continue
@@ -116,8 +121,22 @@ class TokenPassingPlanner:
                 unassigned.remove(task)
                 self._commit(agent_id, t, path)
             else:
+                idle = True
                 self._commit(agent_id, t, self._stay_or_park(agent_id, here, unassigned, t))
+        if idle:
+            self._count_endpoint_wait(unassigned)
         return assignments
+
+    def _count_endpoint_wait(self, unassigned: Sequence[Task]) -> None:
+        """Count a timestep for every task still waiting whose pickup or delivery vertex is
+        where a path ends, the reason rule 1 kept it from the idle agent."""
+        ends = {path[-1] for _, path in self._paths.values()}
+        for task in unassigned:
+            pickup = task.pickup_vertex in ends
+            delivery = task.delivery_vertex in ends
+            if pickup or delivery:
+                at_pickup, at_delivery = self.endpoint_wait.get(task.task_id, (0, 0))
+                self.endpoint_wait[task.task_id] = (at_pickup + pickup, at_delivery + delivery)
 
     def plan(
         self,

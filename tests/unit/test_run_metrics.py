@@ -19,7 +19,6 @@ def _base(**overrides) -> dict:
         observation_depth=3,
         num_completed_tasks=0,
         throughput=0.0,
-        keep_up_ratio=0.0,
         num_waiting_tasks=0,
         num_active_tasks=0,
         backlog=0,
@@ -38,7 +37,6 @@ def _with_service_time(**overrides) -> dict:
     values = dict(
         num_completed_tasks=3,
         throughput=0.15,
-        keep_up_ratio=0.75,
         mean_service_time=25 / 3,
         mean_wait_for_agent=2.0,
         mean_travel_time=16 / 3,

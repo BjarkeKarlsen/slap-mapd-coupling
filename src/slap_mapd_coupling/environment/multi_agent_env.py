@@ -240,6 +240,13 @@ class EpisodeLog:
     overflow_units_by_update: list[int] = field(default_factory=list)
     # Arrival stock model only: the SKUs held at more than one storage vertex after each arrival.
     split_skus_by_update: list[int] = field(default_factory=list)
+    # Arrival stock model only: after each arrival, the used capacity of the fullest shelf over
+    # its capacity, and the mean of that share over the shelves, stock on its way counted.
+    shelf_fill_peak_by_update: list[float] = field(default_factory=list)
+    shelf_fill_mean_by_update: list[float] = field(default_factory=list)
+    # The timing log: seconds and calls per part of the step (STAGES), engineering only.
+    stage_seconds: dict[str, float] = field(default_factory=dict)
+    stage_calls: dict[str, int] = field(default_factory=dict)
     # Arrival stock model with cold_stock_top_k only: after each arrival, the share of the prime
     # shelves' capacity that holds units of SKUs outside the top k of the ranking at that step.
     cold_prime_share_by_update: list[float] = field(default_factory=list)
@@ -288,6 +295,14 @@ class EpisodeLog:
     def record_moving_tick(self, task_id: TaskId) -> None:
         """The task's agent moved, which ends its run of blocked ticks."""
         self.blocked_run_by_task.pop(task_id, None)
+
+    def record_stage_time(self, stage: str, seconds: float) -> None:
+        """Wall-clock time of one part of a step, for the timing log: conflict resolution,
+        applying the moves and the task lifecycle, the storage update, the reward, releasing
+        and assigning tasks, the crowding measure, and a learned arm's observations. Engineering
+        only: it is not a measure of the thesis and changes no result."""
+        self.stage_seconds[stage] = self.stage_seconds.get(stage, 0.0) + seconds
+        self.stage_calls[stage] = self.stage_calls.get(stage, 0) + 1
 
     def record_routing_runtime(self, seconds: float) -> None:
         """Whoever produces the actions times itself and records it here."""
@@ -366,6 +381,11 @@ class WarehouseMAPDEnv:
         self.last_proposed: dict[AgentId, Action] = {}
         self.last_overridden: frozenset[AgentId] = frozenset()
         self.reset()
+
+    @property
+    def assigner(self) -> Assigner | None:
+        """The assigner that replaces the shared rule, Token Passing for instance, or None."""
+        return self._assigner
 
     @property
     def congestion_by_agent(self) -> Mapping[AgentId, float]:
@@ -496,7 +516,9 @@ class WarehouseMAPDEnv:
         }
 
         # Stage 4: conflict resolution.
+        clock = time.perf_counter()
         result = resolve_conflicts(self.graph, self.fleet, proposed, self._priority)
+        clock = self._timed("conflict_resolution", clock)
         self.last_proposed = dict(proposed)
         self.last_overridden = result.overridden
 
@@ -530,6 +552,7 @@ class WarehouseMAPDEnv:
                 self.log.record_moving_tick(task.task_id)
 
         self.log.backlog_by_t.append(self._backlog(next_t))
+        clock = self._timed("apply_and_lifecycle", clock)
 
         # Stage 6: storage update, only at a storage epoch (Delta = None
         # means F_fix's Delta = infinity: never triggers, by construction).
@@ -539,16 +562,20 @@ class WarehouseMAPDEnv:
                 self._arrive(delta)
             else:
                 self._update_storage(delta)
+            clock = self._timed("storage_update", clock)
 
         rewards = self._compute_rewards(
             before_locations, active_by_agent, result.overridden, next_t, congestion
         )
+        clock = self._timed("reward", clock)
 
         self._t = next_t
         episode_done = self._t >= self.config.horizon
         if not episode_done:
             self._release_and_assign()
+            clock = self._timed("release_and_assign", clock)
             self._record_crowding()
+            self._timed("crowding", clock)
         observations = dict(self.fleet.locations())
         terminated: dict[AgentId | str, bool] = {aid: False for aid in self.fleet.agents}
         terminated["__all__"] = False
@@ -559,6 +586,12 @@ class WarehouseMAPDEnv:
         }
         infos["__all__"] = {}
         return observations, rewards, terminated, truncated, infos
+
+    def _timed(self, stage: str, since: float) -> float:
+        """Log the time since `since` as `stage` and return the clock now."""
+        now = time.perf_counter()
+        self.log.record_stage_time(stage, now - since)
+        return now
 
     def _update_storage(self, delta: int) -> None:
         """Stage 6 under the template stock model: the storage update relocates stock."""
@@ -661,6 +694,13 @@ class WarehouseMAPDEnv:
         self.log.unplaced_units_by_update.append(result.unplaced_units)
         self.log.overflow_units_by_update.append(result.overflow_units)
         self.log.split_skus_by_update.append(_split_skus(self.storage))
+        # How full the shelves are once the arrival is placed, stock on its way counted, as a
+        # share of each shelf's capacity: the fullest shelf and the mean over shelves. Shows how
+        # far a rule piles stock onto a few shelves.
+        shares = _fill_shares(self._shelf_and_transit() if robots else self.storage)
+        if shares:
+            self.log.shelf_fill_peak_by_update.append(max(shares))
+            self.log.shelf_fill_mean_by_update.append(sum(shares) / len(shares))
 
     def _shelf_and_transit(self) -> StorageState:
         """x_t + x^in_t, the stock on the shelves plus the stock on its way to them."""
@@ -1124,6 +1164,16 @@ def _prime_shelves(
     )
     block = -(-num_skus // len(nearest_first))  # SKUs per vertex, the ceiling in integers
     return nearest_first[: min(len(nearest_first), -(-top_k // block))]
+
+
+def _fill_shares(storage: StorageState) -> list[float]:
+    """The used capacity of every storage vertex over its capacity, units times unit size."""
+    used = dict.fromkeys(storage.capacities, 0.0)
+    for sku_id, per_vertex in storage.counts.items():
+        size = storage.skus[sku_id].unit_capacity
+        for v, units in per_vertex.items():
+            used[v] = used.get(v, 0.0) + units * size
+    return [used[v] / cap for v, cap in storage.capacities.items() if cap > 0]
 
 
 def _split_skus(storage: StorageState) -> int:

@@ -6,7 +6,7 @@ import pytest
 
 from slap_mapd_coupling.core.agents import is_collision_free
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.evaluation.evaluator import _planner_run
+from slap_mapd_coupling.evaluation.evaluator import _planner_run, _to_run_metrics, keeps_up
 from slap_mapd_coupling.instances.validation import check_well_formedness
 from slap_mapd_coupling.training.spec import build_experiment_config, build_study, load_spec
 
@@ -79,3 +79,70 @@ def test_token_passing_delivers_putaways_and_keeps_the_correctness_checks(mode):
     first, second = episode(), episode()
     assert any(task.kind == "putaway" and task.finish_time is not None for task in first.tasks)
     assert first.tasks == second.tasks and first.storage == second.storage
+
+
+def test_a_putaway_episode_is_checked_for_picks_and_putaways_separately():
+    spec = load_spec(PUTAWAY_CONFIGS[0])
+    study = build_study(spec)
+    config = build_experiment_config(spec, 300_000, "demand")
+    config = ExperimentConfig.model_validate(
+        {
+            **config.model_dump(),
+            "controller": None,
+            "planner": "token_passing",
+            "horizon": 300,
+            "keep_up_threshold": 0.8,
+        }
+    )
+    env, step = _planner_run(
+        study.instance.graph, study.skus, study.counts, study.capacities, config, "token_passing"
+    )
+    for _ in range(300):
+        step()
+    metrics = _to_run_metrics(env, config)
+    open_putaways = sum(
+        1
+        for task in env.tasks
+        if task.kind == "putaway"
+        and task.release_time < 300
+        and task.status(300) in ("waiting", "active")
+    )
+    assert metrics.putaway_backlog == open_putaways
+    picks = keeps_up(
+        metrics.num_completed_tasks - metrics.num_completed_putaways,
+        metrics.backlog - metrics.putaway_backlog,
+        0.8,
+    )
+    putaways = keeps_up(metrics.num_completed_putaways, metrics.putaway_backlog, 0.8)
+    assert (metrics.keeps_up, metrics.keeps_up_picks, metrics.keeps_up_putaways) == (
+        picks and putaways,
+        picks,
+        putaways,
+    )
+    assert metrics.throughput_per_agent == metrics.throughput / config.num_agents
+    assert metrics.orders_per_timestep == metrics.num_completed_orders / 300
+    assert 0.0 < metrics.robot_busy_share <= 1.0
+    assert metrics.backlog_slope is not None
+    # Token Passing reports its endpoint wait, for the picks and the put-aways.
+    assert metrics.mean_pick_wait_pickup_taken is not None
+    assert metrics.mean_putaway_wait_delivery_taken is not None
+
+
+def test_the_shelf_fill_is_a_share_of_capacity_after_every_arrival():
+    spec = load_spec(PUTAWAY_CONFIGS[0])
+    study = build_study(spec)
+    config = build_experiment_config(spec, 300_000, "demand")
+    config = ExperimentConfig.model_validate(
+        {**config.model_dump(), "controller": None, "planner": "token_passing", "horizon": 300}
+    )
+    env, step = _planner_run(
+        study.instance.graph, study.skus, study.counts, study.capacities, config, "token_passing"
+    )
+    for _ in range(300):
+        step()
+    peaks, means = env.log.shelf_fill_peak_by_update, env.log.shelf_fill_mean_by_update
+    assert len(peaks) == len(means) == len(env.log.arrived_units_by_update) > 0
+    assert all(0.0 < mean <= peak <= 1.0 for peak, mean in zip(peaks, means))
+    metrics = _to_run_metrics(env, config)
+    assert metrics.peak_shelf_fill_share == max(peaks)
+    assert metrics.mean_shelf_fill_share == sum(means) / len(means)

@@ -22,7 +22,6 @@ def _run(seed: int, service_time: float, storage_mode: str = "fixed", **override
         observation_depth=3,
         num_completed_tasks=90,
         throughput=0.9,
-        keep_up_ratio=0.9,
         keeps_up=True,
         num_waiting_tasks=1,
         num_active_tasks=2,
@@ -176,7 +175,7 @@ def test_every_scored_quantity_has_an_interval_per_arm():
     assert result.adaptive_summary["mean_crowding"].ci_low == pytest.approx(0.05)
     assert result.adaptive_summary["mean_service_time"].mean == pytest.approx(9.0)
     assert result.adaptive_summary["total_service_time"].mean == pytest.approx(90.0)
-    for name in ("keep_up_ratio", "throughput", "mean_relocated_units", "mean_travel_time"):
+    for name in ("throughput", "mean_relocated_units", "mean_travel_time"):
         assert name in result.fixed_summary
 
 

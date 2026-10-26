@@ -490,4 +490,5 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         # (sec:impl:cost). The observation after the last step feeds no decision.
         if self.core.t < self._config.horizon:
             self.core.log.record_routing_runtime(time.perf_counter() - start)
+        self.core.log.record_stage_time("observations", time.perf_counter() - start)
         return observations

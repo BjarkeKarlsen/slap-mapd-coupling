@@ -112,7 +112,6 @@ def show_run_metrics_shape() -> None:
         observation_depth=3,
         num_completed_tasks=0,
         throughput=0.0,
-        keep_up_ratio=0.0,
         num_waiting_tasks=3,
         num_active_tasks=0,
         backlog=3,
