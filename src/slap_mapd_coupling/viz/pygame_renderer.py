@@ -242,10 +242,16 @@ class Timeline:
 
 
 class TraceReplay(Timeline):
-    """A trace file, read once."""
+    """A trace file, read once.
+
+    The units on the slots come from the stock lines, written every few steps. What
+    waits on each slot, dock and workstation is worked out at every step from the task
+    list at the end of the trace, since a put-away often waits at its dock for fewer
+    steps than lie between two stock lines. A trace without a task list shows the stock
+    lines as they are."""
 
     def __init__(self, path: Path) -> None:
-        from slap_mapd_coupling.evaluation.trace import load_stock, load_trace
+        from slap_mapd_coupling.evaluation.trace import load_stock, load_tasks, load_trace
 
         super().__init__()
         self.path = path
@@ -253,7 +259,48 @@ class TraceReplay(Timeline):
         self.steps = steps
         for line in load_stock(path):
             self.add_stock(line)
+        self.tasks = load_tasks(path)
         self.marks()
+
+    def stock_at(self, t: int) -> Mapping[str, Any] | None:
+        line = super().stock_at(t)
+        if line is None or not self.tasks:
+            return line
+        shelves = {
+            v: {"units": e["units"], "queued": 0, "coming": 0, "putaways": 0, "incoming": {}}
+            for v, e in line["shelves"].items()
+        }
+        docks: dict[str, dict[str, int]] = {}
+        workstations: dict[str, int] = {}
+
+        def shelf(v: int) -> dict[str, Any]:
+            return shelves.setdefault(
+                str(v), {"units": {}, "queued": 0, "coming": 0, "putaways": 0, "incoming": {}}
+            )
+
+        def after(time: int | None) -> bool:
+            return time is None or time > t
+
+        # The same rules as stock_line in evaluation/trace.py, read from the task list.
+        for task in self.tasks:
+            if task["released"] > t:
+                continue
+            if task["kind"] == "pick":
+                if after(task["finished"]):
+                    workstations[str(task["to"])] = workstations.get(str(task["to"]), 0) + 1
+                if after(task["pickup_at"]):
+                    held = task["assigned"] is not None and task["assigned"] <= t
+                    shelf(task["from"])["coming" if held else "queued"] += 1
+            elif after(task["finished"]):
+                entry = shelf(task["to"])
+                entry["putaways"] += 1
+                entry["incoming"][task["sku"]] = (
+                    entry["incoming"].get(task["sku"], 0) + task["quantity"]
+                )
+                if after(task["pickup_at"]):
+                    at_dock = docks.setdefault(str(task["from"]), {})
+                    at_dock[task["sku"]] = at_dock.get(task["sku"], 0) + task["quantity"]
+        return {**line, "shelves": shelves, "docks": docks, "workstations": workstations}
 
 
 class WarehouseRenderer:

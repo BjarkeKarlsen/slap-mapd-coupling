@@ -84,6 +84,15 @@ def test_a_trace_replays_with_every_layer_on_and_off(tmp_path):
             writer.record(env)
 
     data = TraceReplay(path)
+    # At a stock line's own step, what the replay works out from the task list is what the
+    # writer saw.
+    for line in data.stock:
+        derived = data.stock_at(line["t"])
+        assert derived["docks"] == line["docks"]
+        assert derived["workstations"] == line["workstations"]
+        waiting = ("queued", "coming", "putaways", "incoming")
+        for v, entry in line["shelves"].items():
+            assert {k: entry[k] for k in waiting} == {k: derived["shelves"][v][k] for k in waiting}
     renderer = WarehouseRenderer(None, header=data.header, window_size=(640, 480))
     try:
         for index in (0, 7, 14):
