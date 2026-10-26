@@ -133,6 +133,9 @@ def test_trace_ends_with_every_task_and_its_counts_match_the_last_step(tmp_path)
     _, steps = load_trace(path)
     assert sum(task["finished"] is not None for task in tasks) == steps[-1]["completed"]
     assert len(tasks) == steps[-1]["released"]
+    last = steps[-1]
+    assert last["picks_done"] + last["putaways_done"] == last["completed"]
+    assert last["picks_released"] + last["putaways_released"] == last["released"]
     for task in tasks:
         if task["finished"] is not None:
             assert task["released"] <= task["assigned"] <= task["pickup_at"] <= task["finished"]
@@ -159,6 +162,8 @@ def test_stock_lines_follow_the_stock_and_the_tasks_waiting_on_each_shelf(tmp_pa
     assert {v: n for v, n in on_shelves.items() if n} == {
         v: n for v, n in env.storage.counts["tea"].items() if n
     }
+    open_picks = sum(1 for task in env.tasks if task.kind == "pick" and task.finish_time is None)
+    assert sum(last["workstations"].values()) == open_picks
     waiting = sum(entry["queued"] + entry["coming"] for entry in last["shelves"].values())
     assert waiting == sum(
         1 for task in env.tasks if task.kind == "pick" and task.pickup_time is None
@@ -429,9 +434,7 @@ def _still_trace(tmp_path: Path, num_steps: int) -> str:
     return str(path)
 
 
-def test_cli_counts_the_fleet_as_dead_after_50_still_steps_unless_told_otherwise(
-    tmp_path, capsys
-):
+def test_cli_counts_the_fleet_as_dead_after_50_still_steps_unless_told_otherwise(tmp_path, capsys):
     assert DEFAULT_DEAD_AFTER == 50
     path = _still_trace(tmp_path, 60)
     main([path])

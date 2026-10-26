@@ -106,6 +106,18 @@ def test_a_trace_replays_with_every_layer_on_and_off(tmp_path):
         assert renderer._step_action("seek:0.5", 0, 10) == 5
         renderer._step_action("pause", 5, 9)
         assert not renderer.paused
+        # Zoom keeps the point under the mouse in place, and a reset undoes it.
+        at = renderer._map_rect().center
+        before = renderer._pixels[storage[0]]
+        renderer._zoom_at(2.0, at)
+        assert renderer.zoom == 2.0 and renderer._pixels[storage[0]] != before
+        renderer.reset_view()
+        assert renderer._pixels[storage[0]] == before
+        for title in ("at", "doing", "goal", "still", "agent"):
+            renderer.sort, renderer.panel = title, "agents"
+            renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(14))
+        renderer.help = True
+        renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(14))
     finally:
         renderer.close()
 

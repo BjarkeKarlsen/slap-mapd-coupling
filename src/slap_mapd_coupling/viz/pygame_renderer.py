@@ -2,21 +2,22 @@
 
 Two ways to use it. Live, build a `WarehouseRenderer` once and call
 `.render_env(env)` after every step. Afterwards, replay a trace file
-(evaluation/trace.py):
+(evaluation/trace.py), or two side by side on the same step:
 
     python -m slap_mapd_coupling.viz.pygame_renderer trace.jsonl
+    python -m slap_mapd_coupling.viz.pygame_renderer fixed.jsonl --compare demand.jsonl
 
 A frame is drawn from the same lines the trace writes (a step line and a
 stock line), so a live run and the replay of its trace look the same.
 
-The window shows one thing at a time. Three tabs above the map choose what
-the map shows:
+The window shows one thing at a time. The tabs above the map choose what
+the map shows, and the tiles next to them always show the key numbers:
 
 - Agents. Every agent with its number, a dashed line to where it is
   walking, its last steps and the SKU it carries.
 - Stock. The units on every slot, split by SKU popularity rank and filled
-  against the slot capacity, the tasks waiting on each slot, and the stock
-  waiting at the docks by SKU name.
+  against the slot capacity, the tasks waiting on each slot, the units
+  waiting at each dock and the open picks of each workstation.
 - Congestion. A red patch on every vertex where agents holding a task stood
   still over the last 40 steps, how long each still agent has waited, and a
   red line from a blocked agent to the agent standing where it wanted to go.
@@ -24,15 +25,21 @@ the map shows:
 The tabs of the sidebar choose one panel: the episode counts, the stock,
 the docks, the congestion, the agents, the last tasks done, or the details
 of what is selected. Click an agent or a vertex on the map, or a row of a
-panel, to select it. Escape clears it.
+panel, to select it. Click a column title of the agent table to sort by it.
 
-The bar at the bottom pauses, steps back and forward and continues, a
-slider jumps to any step, and a second slider sets the speed in steps a
-second. A live run keeps every step it has drawn, so it can be paused,
-stepped back through and continued from where it stopped, and the renderer
-paces it at the chosen speed. Keys: space pauses or continues, left and
-right step (with shift, 10 steps), home and end jump, up and down halve or
-double the speed, 1 to 3 choose the map view.
+The map zooms with the mouse wheel and pans when dragged. The bar at the
+bottom has a timeline of the backlog over the episode, with a red mark
+where the whole fleet stood still and an orange mark where agents were
+blocked, and a click on it jumps there. Below it are the buttons to pause,
+step and continue, the step slider and the speed slider. A live run keeps
+every step it has drawn, so it can be paused, stepped back through and
+continued from where it stopped.
+
+Keys: space pauses or continues, left and right step (with shift, 10
+steps), home and end jump, up and down halve or double the speed, 1 to 3
+choose the map view, F follows the selected agent, R resets the zoom, S
+saves a screenshot, H shows the help and the legend, Escape clears the
+selection.
 """
 
 from __future__ import annotations
@@ -53,8 +60,8 @@ if TYPE_CHECKING:
 
 _MARGIN = 30
 _PANEL = 400  # width of the sidebar
-_TABS = 40  # height of the tab strip above the map
-_BAR = 52  # height of the control bar at the bottom
+_TOP = 52  # height of the strip above the map, the view tabs and the key numbers
+_BAR = 104  # height of the bar at the bottom, the timeline and the controls
 _TRAIL = 12  # steps of past positions drawn behind an agent
 _WINDOW = 40  # steps of history the congestion view counts over
 # Steps between two stock snapshots a live run keeps for stepping back. The current step
@@ -63,13 +70,17 @@ _LIVE_STOCK_EVERY = 10
 # The speed slider runs from the slowest to the fastest speed, in steps a second, on a log
 # scale.
 _SLOWEST, _FASTEST = 0.5, 240.0
+_ZOOM_MIN, _ZOOM_MAX = 1.0, 8.0
+_DRAG = 5  # pixels the mouse must move before a press on the map is a pan, not a click
 
 _WHITE = (255, 255, 255)
 _PAPER = (246, 247, 249)
 _RULE = (218, 223, 229)
 _RED = (200, 30, 30)
+_ORANGE = (224, 138, 30)
+_PURPLE = (122, 79, 163)
 _SELECT = (20, 120, 220)
-_MUTED = (165, 172, 180)
+_MUTED = (140, 148, 158)
 
 # Agent colour by what it is doing. A put-away gets its own colour, so the share of trips
 # that carry stock in is visible at a glance.
@@ -89,7 +100,7 @@ _ROLE_LABELS = {
 }
 # What the map can show, one at a time, in tab order. The keys 1 to 3 follow it.
 VIEWS = {"agents": "Agents", "stock": "Stock", "congestion": "Congestion"}
-# The panels of the sidebar, one at a time, in tab order.
+# The panels of the sidebar, one at a time, in tab order, and the title of each.
 PANELS = {
     "episode": "Episode",
     "stock": "Stock",
@@ -99,25 +110,28 @@ PANELS = {
     "done": "Done",
     "selected": "Selected",
 }
-
-
-# The panel title of each sidebar tab.
-_PANEL_TITLES = {
-    "episode": "Episode",
-    "stock": "Stock",
-    "docks": "Docks",
-    "congestion": "Congestion",
-    "agents": "Agents",
-    "done": "Last tasks done",
-    "selected": "Selected",
-}
-# The x of each column of the agent table, from the card's left edge.
-_COLUMNS = (0, 52, 104, 250, 310)
-
-
-def _stat(label: str, value: Any, colour=None, action=None) -> tuple:
-    """A panel row with a label on the left and its value on the right."""
-    return ("stat", label, value, colour, action)
+_PANEL_TITLES = {**PANELS, "done": "Last tasks done"}
+# The columns of the agent table: title, x from the card's left edge, and the sort key.
+_COLUMNS = (
+    ("agent", 0, lambda a, agent, still: int(a)),
+    ("at", 52, lambda a, agent, still: agent["at"]),
+    ("doing", 104, lambda a, agent, still: _doing(agent)),
+    ("goal", 250, lambda a, agent, still: -1 if agent.get("goal") is None else agent["goal"]),
+    ("still", 310, lambda a, agent, still: -still),
+)
+_HELP = (
+    ("space", "pause or continue"),
+    ("left, right", "step back or forward, with shift 10 steps"),
+    ("home, end", "first or last step"),
+    ("up, down", "faster or slower"),
+    ("1, 2, 3", "agents, stock or congestion view"),
+    ("wheel, drag", "zoom and pan the map"),
+    ("F", "follow the selected agent"),
+    ("R", "reset the zoom"),
+    ("S", "save a screenshot"),
+    ("H", "this help"),
+    ("Escape", "clear the selection"),
+)
 
 
 def _hex(colour: str) -> tuple[int, int, int]:
@@ -146,6 +160,17 @@ def _doing(agent: Mapping[str, Any]) -> str:
     return {"to_pickup": "to pickup", "to_delivery": "to workstation"}.get(
         agent.get("phase"), "idle"
     )
+
+
+def _pretty(name: Any) -> str:
+    """A config name as a reader would write it: token_passing becomes Token passing."""
+    text = str(name).replace("_", " ")
+    return text[:1].upper() + text[1:]
+
+
+def _stat(label: str, value: Any, colour=None, action=None) -> tuple:
+    """A panel row with a label on the left and its value on the right."""
+    return ("stat", label, value, colour, action)
 
 
 def header_from_graph(
@@ -178,6 +203,10 @@ class Timeline:
         self.steps: list[Mapping[str, Any]] = []
         self.stock: list[Mapping[str, Any]] = []
         self._stock_t: list[int] = []
+        # Per step, the backlog and whether the fleet stood still or an agent was blocked.
+        self.backlog: list[int] = []
+        self.stalled: list[bool] = []
+        self.blocked: list[bool] = []
 
     def add_stock(self, line: Mapping[str, Any]) -> None:
         self.stock.append(line)
@@ -192,6 +221,22 @@ class Timeline:
         """The step lines of the last `_WINDOW` steps up to step `index`."""
         return list(self.steps[max(0, index - _WINDOW + 1) : index + 1])
 
+    def marks(self) -> None:
+        """Bring the per-step series of the timeline up to date with the steps."""
+        for step in self.steps[len(self.backlog) :]:
+            agents = step["agents"].values()
+            self.backlog.append(step.get("backlog", 0))
+            busy = any(agent.get("task") is not None for agent in agents)
+            self.stalled.append(busy and not any(agent.get("moved") for agent in agents))
+            self.blocked.append(
+                any(
+                    agent.get("intent") is not None
+                    and agent["intent"] != agent["at"]
+                    and not agent.get("moved")
+                    for agent in agents
+                )
+            )
+
 
 class TraceReplay(Timeline):
     """A trace file, read once."""
@@ -200,10 +245,12 @@ class TraceReplay(Timeline):
         from slap_mapd_coupling.evaluation.trace import load_stock, load_trace
 
         super().__init__()
+        self.path = path
         self.header, steps = load_trace(path)
         self.steps = steps
         for line in load_stock(path):
             self.add_stock(line)
+        self.marks()
 
 
 class WarehouseRenderer:
@@ -211,9 +258,14 @@ class WarehouseRenderer:
 
     Pixel positions come from the same `positions` dict the matplotlib
     backend uses, so both backends agree on a given instance. The static
-    graph is drawn once onto a cached background surface. The tabs and the
-    buttons are drawn every frame, and a click is matched against what the
-    last frame drew.
+    graph is drawn onto a cached background surface, redrawn only when the
+    map is zoomed or panned. The tabs and the buttons are drawn every frame,
+    and a click is matched against what the last frame drew.
+
+    With `surface` the renderer draws onto that surface, a part of a larger
+    window, instead of opening its own window. Without `sidebar` it draws
+    the map, the key numbers and the bar only, as each half of a comparison
+    does.
     """
 
     def __init__(
@@ -223,6 +275,9 @@ class WarehouseRenderer:
         window_size: tuple[int, int] = (1440, 900),
         *,
         header: Mapping[str, Any] | None = None,
+        surface: Any = None,
+        sidebar: bool = True,
+        title: str = "",
     ) -> None:
         import pygame
 
@@ -234,18 +289,23 @@ class WarehouseRenderer:
             raise ValueError("the trace header has no positions, so it cannot be drawn.")
         self._pygame = pygame
         pygame.init()
-        pygame.display.set_caption("slap-mapd-coupling")
-        self._screen = pygame.display.set_mode(window_size)
-        self._size = window_size
+        if surface is None:
+            pygame.display.set_caption("slap-mapd-coupling")
+            surface = pygame.display.set_mode(window_size)
+        self._screen = surface
+        self._offset = surface.get_abs_offset()
+        self._size = surface.get_size()
+        self._panel_w = _PANEL if sidebar else 0
+        self._title = title
         self._header = header
         self._font = pygame.font.Font(None, 20)
         self._small = pygame.font.Font(None, 16)
-        self._title = pygame.font.Font(None, 22)
-        self._title.set_bold(True)
-        self._title_large = pygame.font.Font(None, 28)
-        self._title_large.set_bold(True)
         self._heading = pygame.font.Font(None, 15)
         self._heading.set_bold(True)
+        self._title_font = pygame.font.Font(None, 22)
+        self._title_font.set_bold(True)
+        self._title_large = pygame.font.Font(None, 28)
+        self._title_large.set_bold(True)
         self._value = pygame.font.Font(None, 20)
         self._value.set_bold(True)
         self._label = pygame.font.Font(None, 18)
@@ -253,49 +313,99 @@ class WarehouseRenderer:
         self._roles = {v["id"]: v for v in header["vertices"]}
         self._edges = {(int(s), int(t)) for s, t, _ in header["edges"]}
         positions = {int(v): (x, y) for v, (x, y) in header["positions"].items()}
-        self._pixels, self._unit = self._to_pixels(positions)
-        self._radius = max(3, int(self._unit * 0.22))
-        self._background = self._render_background()
+        self._base, unit = self._fit(positions)
+        self._base_radius = max(3, int(unit * 0.22))
+        self.zoom = 1.0
+        self._pan = (0.0, 0.0)
+        self._place()
         self.view = "agents"
         self.panel = "episode"
         self.selected: tuple[str, Any] | None = None  # ("agent", "3") or ("vertex", 41)
+        self.follow = False
+        self.help = False
+        self.hide_idle = False
+        self.sort = "agent"
         self.paused = False
         self.speed = 8.0  # steps a second, live and in a replay
         self._clock = pygame.time.Clock()
         self._drag: Callable[[], Any] | None = None
+        self._press: tuple[int, int] | None = None
+        self._panning = False
+        self._note = ""
         self._live = Timeline()
         self._hits: list[tuple[Any, Callable[[], Any]]] = []
         self._frame: Mapping[str, Any] | None = None
 
     # ------------------------------------------------------------ geometry
     def _map_rect(self):
-        return self._pygame.Rect(0, _TABS, self._size[0] - _PANEL, self._size[1] - _TABS - _BAR)
+        return self._pygame.Rect(
+            0, _TOP, self._size[0] - self._panel_w, self._size[1] - _TOP - _BAR
+        )
 
-    def _to_pixels(
-        self, positions: Mapping[VertexId, tuple[float, float]]
-    ) -> tuple[dict[VertexId, tuple[int, int]], float]:
+    def _fit(self, positions) -> tuple[dict[VertexId, tuple[float, float]], float]:
+        """Pixel positions that fit the whole warehouse in the map, and the shortest edge."""
         xs = [x for x, _ in positions.values()]
         ys = [y for _, y in positions.values()]
         x_min, x_max = min(xs), max(xs)
         y_min, y_max = min(ys), max(ys)
-        width = self._size[0] - _PANEL
-        height = self._size[1] - _TABS - _BAR
+        area = self._map_rect()
         scale = min(
-            (width - 2 * _MARGIN) / max(x_max - x_min, 1e-6),
-            (height - 2 * _MARGIN) / max(y_max - y_min, 1e-6),
+            (area.width - 2 * _MARGIN) / max(x_max - x_min, 1e-6),
+            (area.height - 2 * _MARGIN) / max(y_max - y_min, 1e-6),
         )
-        pixels: dict[VertexId, tuple[int, int]] = {}
-        for vertex_id, (x, y) in positions.items():
-            # Flip y: positions grow upwards, pygame's y grows downwards.
-            pixels[vertex_id] = (
-                int(_MARGIN + (x - x_min) * scale),
-                int(_TABS + _MARGIN + (y_max - y) * scale),
+        # Flip y: positions grow upwards, pygame's y grows downwards.
+        base = {
+            v: (area.left + _MARGIN + (x - x_min) * scale, area.top + _MARGIN + (y_max - y) * scale)
+            for v, (x, y) in positions.items()
+        }
+        lengths = [math.dist(base[s], base[t]) for s, t in self._edges if base[s] != base[t]]
+        return base, max(min(lengths, default=20.0), 6.0)
+
+    def _place(self) -> None:
+        """Pixel positions and marker size at the current zoom and pan, and the background."""
+        centre = self._map_rect().center
+        self._pixels = {
+            v: (
+                int(centre[0] + (x - centre[0]) * self.zoom + self._pan[0]),
+                int(centre[1] + (y - centre[1]) * self.zoom + self._pan[1]),
             )
-        # One pixel unit is the shortest edge drawn, so markers scale with the warehouse.
-        lengths = [
-            math.dist(pixels[s], pixels[t]) for s, t in self._edges if pixels[s] != pixels[t]
-        ]
-        return pixels, max(min(lengths, default=20.0), 6.0)
+            for v, (x, y) in self._base.items()
+        }
+        self._radius = max(3, int(self._base_radius * self.zoom**0.75))
+        self._background = self._render_background()
+
+    def _zoom_at(self, factor: float, at: tuple[int, int]) -> None:
+        """Zoom by `factor`, keeping the point under the mouse where it is."""
+        zoom = min(max(self.zoom * factor, _ZOOM_MIN), _ZOOM_MAX)
+        factor = zoom / self.zoom
+        centre = self._map_rect().center
+        dx, dy = self._pan
+        self._pan = (
+            (at[0] - centre[0]) * (1 - factor) + dx * factor,
+            (at[1] - centre[1]) * (1 - factor) + dy * factor,
+        )
+        self.zoom = zoom
+        if zoom == _ZOOM_MIN:
+            self._pan = (0.0, 0.0)
+        self._place()
+
+    def reset_view(self) -> None:
+        self.zoom, self._pan, self.follow = 1.0, (0.0, 0.0), False
+        self._place()
+
+    def _follow(self, step) -> None:
+        """Keep the selected agent in the middle of the map."""
+        if not self.follow or self.selected is None or self.selected[0] != "agent":
+            return
+        agent = step["agents"].get(self.selected[1])
+        if agent is None:
+            return
+        centre = self._map_rect().center
+        x, y = self._base[agent["at"]]
+        pan = ((centre[0] - x) * self.zoom, (centre[1] - y) * self.zoom)
+        if pan != self._pan:
+            self._pan = pan
+            self._place()
 
     def _role(self, v: VertexId) -> str | None:
         entry = self._roles.get(v, {})
@@ -304,11 +414,16 @@ class WarehouseRenderer:
                 return name
         return None
 
+    def _mouse(self) -> tuple[int, int]:
+        x, y = self._pygame.mouse.get_pos()
+        return x - self._offset[0], y - self._offset[1]
+
     # ---------------------------------------------------------- background
     def _render_background(self):
         pygame = self._pygame
         surface = pygame.Surface(self._size)
         surface.fill(_WHITE)
+        surface.set_clip(self._map_rect())
         edge, one_way = _hex(theme.PALETTE["edge"]), _hex(theme.PALETTE["one_way_edge"])
         for s, t in self._edges:
             p1, p2 = self._pixels[s], self._pixels[t]
@@ -326,23 +441,15 @@ class WarehouseRenderer:
                 pygame.draw.circle(surface, _hex(theme.PALETTE["transit"]), p, max(2, r // 2), 1)
             elif role != "storage":  # a slot is drawn every frame, with its stock
                 self._marker(surface, role, p, r)
+        surface.set_clip(None)
         return surface
 
     def _arrowhead(self, surface, p1, p2, colour) -> None:
         angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
-        tip = (
-            p2[0] - math.cos(angle) * self._radius,
-            p2[1] - math.sin(angle) * self._radius,
-        )
+        tip = (p2[0] - math.cos(angle) * self._radius, p2[1] - math.sin(angle) * self._radius)
         size = max(5, self._radius)
-        left = (
-            tip[0] - size * math.cos(angle - 0.45),
-            tip[1] - size * math.sin(angle - 0.45),
-        )
-        right = (
-            tip[0] - size * math.cos(angle + 0.45),
-            tip[1] - size * math.sin(angle + 0.45),
-        )
+        left = (tip[0] - size * math.cos(angle - 0.45), tip[1] - size * math.sin(angle - 0.45))
+        right = (tip[0] - size * math.cos(angle + 0.45), tip[1] - size * math.sin(angle + 0.45))
         self._pygame.draw.polygon(surface, colour, (tip, left, right))
 
     def _marker(self, surface, role: str, p: tuple[int, int], r: int) -> None:
@@ -365,20 +472,68 @@ class WarehouseRenderer:
 
     # --------------------------------------------------------------- events
     def handle(self, event) -> str | None:
-        """React to one pygame event: a click on a tab, a panel row, a button or the map,
-        or a key. Returns what a stepping loop has to do ("pause", "back", "back10",
-        "forward", "forward10", "start", "end", "slower", "faster", "seek:<share>"), or
-        None."""
+        """React to one pygame event: a click on a tab, a panel row, a button, the timeline
+        or the map, a drag or a wheel on the map, or a key. Returns what a stepping loop
+        has to do ("pause", "back", "back10", "forward", "forward10", "start", "end",
+        "slower", "faster", "seek:<share>", "speed:<share>"), or None."""
         pygame = self._pygame
         if event.type == pygame.KEYDOWN:
-            views = list(VIEWS)
-            key = getattr(event, "unicode", "")
-            if key in ("1", "2", "3"):
-                self.view = views[int(key) - 1]
+            return self._key(event)
+        pos = getattr(event, "pos", None)
+        if pos is not None:
+            pos = (pos[0] - self._offset[0], pos[1] - self._offset[1])
+        if event.type == pygame.MOUSEWHEEL:
+            at = self._mouse()
+            if self._map_rect().collidepoint(at):
+                self._zoom_at(1.25 if event.y > 0 else 0.8, at)
+            return None
+        if event.type == pygame.MOUSEBUTTONUP:
+            self._drag = None
+            pressed, self._press = self._press, None
+            if pressed is not None and not self._panning:
+                self._select_at(pressed)
+            self._panning = False
+            return None
+        if event.type == pygame.MOUSEMOTION:
+            if self._drag is not None:
+                return self._drag()
+            if self._press is not None and (self._panning or math.dist(self._press, pos) > _DRAG):
+                self._panning = True
+                dx, dy = event.rel
+                self._pan = (self._pan[0] + dx, self._pan[1] + dy)
+                self.follow = False
+                self._place()
+            return None
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if not (0 <= pos[0] < self._size[0] and 0 <= pos[1] < self._size[1]):
                 return None
-            if event.key == pygame.K_ESCAPE:
-                self.selected = None
-                return None
+            for rect, act in reversed(self._hits):
+                if rect.collidepoint(pos):
+                    if getattr(act, "drags", False):
+                        self._drag = act
+                    return act()
+            if self._map_rect().collidepoint(pos):
+                self._press = pos
+        return None
+
+    def _key(self, event) -> str | None:
+        pygame = self._pygame
+        key = getattr(event, "unicode", "").lower()
+        views = list(VIEWS)
+        if key in ("1", "2", "3"):
+            self.view = views[int(key) - 1]
+        elif key == "f":
+            self.follow = not self.follow
+        elif key == "r":
+            self.reset_view()
+        elif key == "h":
+            self.help = not self.help
+        elif key == "s":
+            return "shot"
+        elif event.key == pygame.K_ESCAPE:
+            self.selected = None
+            self.follow = False
+        else:
             jump = "10" if event.mod & pygame.KMOD_SHIFT else ""
             return {
                 pygame.K_SPACE: "pause",
@@ -389,18 +544,6 @@ class WarehouseRenderer:
                 pygame.K_UP: "faster",
                 pygame.K_DOWN: "slower",
             }.get(event.key)
-        if event.type == pygame.MOUSEBUTTONUP:
-            self._drag = None
-        if event.type == pygame.MOUSEMOTION and self._drag is not None:
-            return self._drag()
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            for rect, act in reversed(self._hits):
-                if rect.collidepoint(event.pos):
-                    if getattr(act, "drags", False):
-                        self._drag = act
-                    return act()
-            if self._map_rect().collidepoint(event.pos):
-                self._select_at(event.pos)
         return None
 
     def _select_at(self, pos) -> None:
@@ -415,13 +558,23 @@ class WarehouseRenderer:
             self._pick(("vertex", near))
         else:
             self.selected = None
+            self.follow = False
 
     def _pick(self, selection) -> None:
         self.selected = selection
-        self.panel = "selected"
+        if self._panel_w:
+            self.panel = "selected"
 
     def _hit(self, rect, action: Callable[[], Any]) -> None:
         self._hits.append((rect, action))
+
+    def screenshot(self, name: str = "viewer") -> Path:
+        """Save the whole window as a PNG in the working directory and return its path."""
+        t = self._frame["step"].get("t") if self._frame else None
+        path = Path.cwd() / f"{name}_t{t}.png"
+        self._pygame.image.save(self._pygame.display.get_surface(), str(path))
+        self._note = f"saved {path.name}"
+        return path
 
     # --------------------------------------------------------------- frames
     def render(self, fleet: FleetState, *, storage: StorageState | None = None) -> bool:
@@ -492,6 +645,7 @@ class WarehouseRenderer:
             if t <= live.steps[-1]["t"]:
                 self._live = live = Timeline()  # a new episode
         live.steps.append(step)
+        live.marks()
         if stock is not None and (not live.stock or (t or 0) % _LIVE_STOCK_EVERY == 0):
             live.add_stock(stock)
         head = len(live.steps) - 1
@@ -502,21 +656,18 @@ class WarehouseRenderer:
                     self.paused = False
                     return False
                 action = self.handle(event)
-                if action is not None:
+                if action == "shot":
+                    self.screenshot()
+                elif action is not None:
                     index = self._step_action(action, index, head)
             shown = live.steps[index]
             # The current step shows its own stock, a step back the last one kept.
             at = stock if index == head else live.stock_at(shown.get("t") or 0)
-            status = "live, paused at step {} of {}".format(shown.get("t"), step.get("t"))
+            status = "live, paused" if self.paused else "live"
             self.draw_frame(
-                shown,
-                at,
-                header,
-                live.history(index),
-                (index, head) if self.paused else None,
-                status if self.paused else "live",
-                live=True,
-            )
+                shown, at, header, live.history(index), (index, head), status,
+                live=True, timeline=live,
+            )  # fmt: skip
             pygame.display.flip()
             if not self.paused:
                 self._clock.tick(self.speed)
@@ -559,32 +710,42 @@ class WarehouseRenderer:
         status: str = "",
         *,
         live: bool = False,
+        timeline: Timeline | None = None,
     ) -> None:
-        """Draw one frame onto the window without handling events or flipping it. `slider`
-        is (shown index, last index) of the steps that can be stepped through."""
+        """Draw one frame onto the surface without handling events or flipping it. `slider`
+        is (shown index, last index) of the steps that can be stepped through, and
+        `timeline` holds those steps for the chart above the controls."""
+        pygame = self._pygame
         screen = self._screen
         self._hits = []
         history = history or [step]
         self._frame = {"step": step, "stock": stock, "header": header}
+        self._follow(step)
         screen.blit(self._background, (0, 0))
         debug = congestion(history)
         ranks = {k: i for i, k in enumerate(stock["ranking"])} if stock else {}
         shelves = stock["shelves"] if stock else {}
         docks = stock.get("docks", {}) if stock else {}
+        screen.set_clip(self._map_rect())
         if self.view == "congestion":
             self._draw_heat(debug["heat"])
         self._draw_slots(header, shelves, ranks)
-        if self.view == "stock":
-            self._draw_docks(docks)
+        if self.view == "stock" and stock is not None:
+            self._draw_queues(docks, stock.get("workstations", {}))
         self._draw_agents(step, _trails(history), debug)
         self._draw_selection(step)
-        self._draw_view_tabs()
-        self._draw_sidebar(step, stock, header, ranks, debug)
-        self._draw_controls(slider, status, live)
-        self._draw_hover(step, shelves, header, ranks, docks)
+        screen.set_clip(None)
+        self._draw_top(step, debug)
+        if self._panel_w:
+            self._draw_sidebar(step, stock, header, ranks, debug)
+        self._draw_controls(slider, status, live, timeline)
+        if self.help:
+            self._draw_help()
+        else:
+            self._draw_hover(step)
 
     def save(self, path: Path) -> None:
-        """Save the frame on the window as an image."""
+        """Save the frame on the surface as an image."""
         self._pygame.image.save(self._screen, str(path))
 
     # ------------------------------------------------------------------ map
@@ -623,10 +784,7 @@ class WarehouseRenderer:
                 for sku, units in held:
                     top = bottom - box.height * units * sizes.get(sku, 1.0) / cap
                     band = pygame.Rect(
-                        box.left,
-                        round(top),
-                        box.width,
-                        max(1, round(bottom) - round(top)),
+                        box.left, round(top), box.width, max(1, round(bottom) - round(top))
                     )
                     colour = rank_colour(ranks.get(sku, 0), len(ranks))
                     pygame.draw.rect(screen, colour, band.clip(box))
@@ -635,17 +793,29 @@ class WarehouseRenderer:
             if entry and self.view == "stock":
                 self._badges(p, r, entry)
 
-    def _draw_docks(self, docks: Mapping[str, Mapping[str, int]]) -> None:
-        """The stock waiting at each dock, SKU names and units, under the dock."""
-        colour = _hex(theme.ROLE_STYLES["receiving"].edge)
+    def _draw_queues(self, docks, workstations) -> None:
+        """Under each dock the units waiting there, under each workstation its open picks."""
         for v, units in docks.items():
-            if int(v) not in self._pixels or not units:
-                continue
-            x, y = self._pixels[int(v)]
-            held = sorted(units.items(), key=lambda kv: -kv[1])
-            text = ", ".join(f"{k} {u}" for k, u in held[:2]) + (" ..." if len(held) > 2 else "")
-            label = self._small.render(text, True, colour)
-            self._screen.blit(label, (max(2, x - self._radius), y + self._radius + 3))
+            if int(v) in self._pixels and units:
+                total = sum(units.values())
+                self._pill(
+                    self._pixels[int(v)], f"{total} unit" + ("" if total == 1 else "s"), _PURPLE
+                )
+        for v, count in workstations.items():
+            if int(v) in self._pixels and count:
+                self._pill(
+                    self._pixels[int(v)],
+                    f"{count} pick" + ("" if count == 1 else "s"),
+                    _hex("#c9761a"),
+                )
+
+    def _pill(self, p, text: str, colour) -> None:
+        pygame = self._pygame
+        label = self._small.render(text, True, _WHITE)
+        rect = pygame.Rect(0, 0, label.get_width() + 10, 15)
+        rect.midtop = (p[0], p[1] + self._radius + 4)
+        pygame.draw.rect(self._screen, colour, rect, border_radius=7)
+        self._screen.blit(label, label.get_rect(center=rect.center))
 
     def _badges(self, p, r, entry) -> None:
         """Waiting picks above the slot (no agent yet red, an agent on the way orange) and
@@ -694,8 +864,7 @@ class WarehouseRenderer:
             elif self.view == "stock":
                 colour = _MUTED
             else:
-                still = debug["still_for"].get(a, 0)
-                colour = _RED if still else _MUTED
+                colour = _RED if debug["still_for"].get(a, 0) else _MUTED
             pygame.draw.circle(screen, colour, at, r)
             if self.view == "congestion" and (agent.get("overridden") or a in debug["blocked"]):
                 pygame.draw.circle(screen, (0, 0, 0), at, r + 2, 2)
@@ -705,8 +874,7 @@ class WarehouseRenderer:
                 quantity = agent.get("quantity")
                 carried = agent["sku"] + ("" if quantity in (None, 1) else f" x{quantity}")
                 screen.blit(
-                    self._small.render(carried, True, colour),
-                    (at[0] + r + 2, at[1] - r - 8),
+                    self._small.render(carried, True, colour), (at[0] + r + 2, at[1] - r - 8)
                 )
             still = debug["still_for"].get(a, 0)
             if self.view == "congestion" and still >= 2:
@@ -745,7 +913,7 @@ class WarehouseRenderer:
                 1,
             )
 
-    # ----------------------------------------------------------------- tabs
+    # ------------------------------------------------------------- top strip
     def _tabs(
         self, items: Mapping[str, str], current: str, x: int, y: int, width: int, choose
     ) -> int:
@@ -764,17 +932,59 @@ class WarehouseRenderer:
             self._hit(tab, lambda name=name: choose(name))
         return y + 28
 
-    def _draw_view_tabs(self) -> None:
-        width = self._size[0] - _PANEL
-        self._pygame.draw.rect(self._screen, _PAPER, (0, 0, width, _TABS))
+    def _draw_top(self, step, debug) -> None:
+        """The view tabs, the help button and the key numbers, above the map."""
+        pygame = self._pygame
+        screen = self._screen
+        width = self._size[0] - self._panel_w
+        pygame.draw.rect(screen, _PAPER, (0, 0, width, _TOP))
+        pygame.draw.line(screen, _RULE, (0, _TOP - 1), (width, _TOP - 1))
         labels = {name: f"{i + 1}  {label}" for i, (name, label) in enumerate(VIEWS.items())}
-        self._tabs(labels, self.view, 10, 6, min(480, width - 20), self._set_view)
+        x = 10
+        if self._title:
+            title = self._title_font.render(self._title, True, _hex(theme.PALETTE["text"]))
+            screen.blit(title, (x, 18))
+            x += title.get_width() + 14
+        x = self._tabs(labels, self.view, x, 12, 330, self._set_view) and x + 330
+        accent = _hex(theme.PALETTE["one_way_edge"])
+        help_button = pygame.Rect(x + 6, 12, 28, 28)
+        pygame.draw.rect(screen, accent if self.help else _WHITE, help_button, border_radius=14)
+        pygame.draw.rect(screen, accent, help_button, 1, border_radius=14)
+        mark = self._font.render("?", True, _WHITE if self.help else accent)
+        screen.blit(mark, mark.get_rect(center=help_button.center))
+        self._hit(help_button, self._toggle_help)
+        t = step.get("t")
+        tiles = [("step", "-" if t is None else t)]
+        if "completed" in step:
+            tiles += [
+                ("done per step", f"{step['completed'] / max(t or 1, 1):.3f}"),
+                ("backlog", step["backlog"]),
+            ]
+        tiles.append(("still", len(debug["still_with_task"])))
+        if "orders_done" in step:
+            tiles.append(("orders done", step["orders_done"]))
+        right = width - 10
+        for label, value in reversed(tiles):
+            shown = self._value.render(str(value), True, _hex(theme.PALETTE["text"]))
+            name = self._heading.render(label.upper(), True, _MUTED)
+            w = max(shown.get_width(), name.get_width()) + 16
+            if right - w < help_button.right + 10:
+                break
+            tile = pygame.Rect(right - w, 6, w, 40)
+            pygame.draw.rect(screen, _WHITE, tile, border_radius=6)
+            pygame.draw.rect(screen, _RULE, tile, 1, border_radius=6)
+            screen.blit(name, (tile.left + 8, tile.top + 6))
+            screen.blit(shown, (tile.left + 8, tile.top + 20))
+            right = tile.left - 6
 
     def _set_view(self, name: str) -> None:
         self.view = name
 
     def _set_panel(self, name: str) -> None:
         self.panel = name
+
+    def _toggle_help(self) -> None:
+        self.help = not self.help
 
     # -------------------------------------------------------------- sidebar
     def _draw_sidebar(self, step, stock, header, ranks, debug) -> None:
@@ -787,11 +997,10 @@ class WarehouseRenderer:
         second = dict(list(PANELS.items())[4:])
         y = self._tabs(first, self.panel, x0 + 10, 6, _PANEL - 20, self._set_panel)
         y = self._tabs(second, self.panel, x0 + 10, y + 4, _PANEL - 20, self._set_panel)
-        card = pygame.Rect(x0 + 10, y + 10, _PANEL - 20, self._size[1] - y - 30 - 150)
+        card = pygame.Rect(x0 + 10, y + 10, _PANEL - 20, self._size[1] - y - 20)
         pygame.draw.rect(screen, _WHITE, card, border_radius=8)
         pygame.draw.rect(screen, _RULE, card, 1, border_radius=8)
         self._draw_rows(self._panel_rows(step, stock, header, ranks, debug), card)
-        self._draw_legend(x0 + 10, card.bottom + 10, _PANEL - 20)
 
     def _draw_rows(self, rows: list, card) -> None:
         """Draw a panel's rows inside its card, every row from the same left edge.
@@ -802,6 +1011,9 @@ class WarehouseRenderer:
         ("stat", label, value, colour, action): a label on the left and its value on the
         right, the value in `colour` when one is given,
         ("cells", texts, colour, action): one line of a table, the texts in fixed columns,
+        ("columns", titles): the column titles of a table, each a button that sorts by it,
+        ("bar", label, share, value, colour): a label and its value, and under them a bar
+        filled to `share`,
         ("note", text, colour): a line of plain text.
         `action`, when given, is what a click on the row does."""
         pygame = self._pygame
@@ -809,9 +1021,13 @@ class WarehouseRenderer:
         text = _hex(theme.PALETTE["text"])
         left, right = card.left + 14, card.right - 14
         y = card.top + 12
+        heights = {
+            "title": 34, "heading": 28, "stat": 21, "cells": 21, "columns": 24, "note": 21,
+            "bar": 32,
+        }  # fmt: skip
         for row in rows:
             kind = row[0]
-            height = {"title": 34, "heading": 28, "stat": 21, "cells": 21, "note": 21}[kind]
+            height = heights[kind]
             if y + height > card.bottom - 6:
                 screen.blit(self._small.render("more below, not shown", True, _MUTED), (left, y))
                 break
@@ -823,18 +1039,47 @@ class WarehouseRenderer:
                 screen.blit(self._heading.render(row[1].upper(), True, _MUTED), (left, y + 10))
             elif kind == "stat":
                 _, label, value, colour, action = row
-                screen.blit(self._font.render(label, True, text), (left, y))
+                screen.blit(self._font.render(_pretty(label), True, text), (left, y))
                 shown = self._value.render(str(value), True, colour or text)
                 screen.blit(shown, (right - shown.get_width(), y))
+            elif kind == "bar":
+                _, label, share, value, colour = row
+                screen.blit(self._font.render(_pretty(label), True, text), (left, y))
+                shown = self._value.render(str(value), True, text)
+                screen.blit(shown, (right - shown.get_width(), y))
+                track = pygame.Rect(left, y + 19, right - left, 6)
+                pygame.draw.rect(screen, _RULE, track, border_radius=3)
+                filled = track.copy()
+                filled.width = int(track.width * min(max(share, 0.0), 1.0))
+                if filled.width:
+                    pygame.draw.rect(screen, colour, filled, border_radius=3)
             elif kind == "cells":
                 _, cells, colour, action = row
-                for x, cell in zip(_COLUMNS, cells):
+                for (_, x, _), cell in zip(_COLUMNS, cells):
                     screen.blit(self._font.render(str(cell), True, colour), (left + x, y))
+            elif kind == "columns":
+                for i, (title, x, _) in enumerate(_COLUMNS):
+                    on = title == self.sort
+                    shown = self._heading.render(
+                        title.upper() + (" v" if on else ""), True, _SELECT if on else _MUTED
+                    )
+                    screen.blit(shown, (left + x, y + 4))
+                    width = (_COLUMNS[i + 1][1] if i + 1 < len(_COLUMNS) else 60) - x
+                    self._hit(
+                        pygame.Rect(left + x, y, width, height),
+                        lambda title=title: self._set_sort(title),
+                    )
             else:
-                screen.blit(self._font.render(row[1], True, row[2]), (left, y))
+                screen.blit(self._font.render(_pretty(row[1]), True, row[2]), (left, y))
             if action is not None:
                 self._hit(pygame.Rect(card.left, y - 2, card.width, height), action)
             y += height
+
+    def _set_sort(self, title: str) -> None:
+        self.sort = title
+
+    def _toggle_idle(self) -> None:
+        self.hide_idle = not self.hide_idle
 
     def _panel_rows(self, step, stock, header, ranks, debug) -> list:
         name = self.panel
@@ -847,29 +1092,50 @@ class WarehouseRenderer:
         if name == "episode":
             config = header.get("config", {})
             t = step.get("t")
+            accent = _hex(theme.PALETTE["one_way_edge"])
             who = config.get("planner") or config.get("controller")
             if who:
                 rows.append(("heading", "Run"))
-                rows.append(_stat("routing", who))
-                rows.append(_stat("storage rule", config.get("storage_mode")))
+                rows.append(_stat("routing", _pretty(who)))
+                rows.append(_stat("storage rule", _pretty(config.get("storage_mode"))))
                 rows.append(_stat("agents", config.get("num_agents")))
                 rows.append(_stat("seed", config.get("seed")))
             if t is not None:
                 rows.append(("heading", "Progress"))
                 horizon = config.get("horizon")
-                rows.append(_stat("step", f"{t} of {horizon}" if horizon else t))
+                if horizon:
+                    rows.append(("bar", "step", t / horizon, f"{t} of {horizon}", accent))
+                else:
+                    rows.append(_stat("step", t))
                 if t < (config.get("warmup") or 0):
                     rows.append(("note", "in the warm-up, not scored", _MUTED))
             if "orders_done" in step:
+                rows.append(("heading", "Orders"))
+                done, released = step["orders_done"], step["orders_released"]
                 rows.append(
-                    _stat("orders done", f"{step['orders_done']} of {step['orders_released']}")
-                )
+                    ("bar", "orders complete", done / max(released, 1), f"{done} of {released}",
+                     accent)
+                )  # fmt: skip
+            if "picks_done" in step:
+                rows.append(("heading", "Picks, slot to workstation"))
+                done, released = step["picks_done"], step["picks_released"]
+                rows.append(
+                    ("bar", "picks done", done / max(released, 1), f"{done} of {released}",
+                     _hex(_PHASE_COLOURS["to_delivery"]))
+                )  # fmt: skip
+                rows.append(("heading", "Put-aways, dock to slot"))
+                done, released = step["putaways_done"], step["putaways_released"]
+                rows.append(
+                    ("bar", "put-aways done", done / max(released, 1), f"{done} of {released}",
+                     _PURPLE)
+                )  # fmt: skip
             if "completed" in step:
+                rows.append(("heading", "All tasks"))
                 rows.append(_stat("tasks done", f"{step['completed']} of {step['released']}"))
                 rows.append(
                     _stat("tasks done per step", f"{step['completed'] / max(t or 1, 1):.3f}")
                 )
-                rows.append(_stat("backlog", step["backlog"]))
+                rows.append(_stat("backlog, tasks not yet done", step["backlog"]))
             return rows
         if stock is None and name in ("stock", "docks"):
             return rows + [("note", "This trace has no stock.", _MUTED)]
@@ -892,27 +1158,31 @@ class WarehouseRenderer:
                 rows.append(_stat("picks with an agent coming", coming, _hex("#e08a1e")))
                 rows.append(_stat("order lines short of stock", stock["orders_short"]))
             rows.append(("heading", "Most popular SKUs, units on the slots"))
-            for k in stock["ranking"][:8]:
+            for k in stock["ranking"][:10]:
                 rank = ranks[k]
                 rows.append(
                     _stat(f"{rank + 1}. {k}", totals.get(k, 0), rank_colour(rank, len(ranks)))
                 )
             return rows
         if name == "docks":
-            dock_colour = _hex(theme.ROLE_STYLES["receiving"].edge)
             docks = stock.get("docks", {})
             putaways = sum(e.get("putaways", 0) for e in shelves)
             rows.append(("heading", "Arrived stock"))
-            rows.append(
-                _stat("units waiting at the docks", sum(sum(u.values()) for u in docks.values()))
-            )
+            waiting = sum(sum(u.values()) for u in docks.values())
+            rows.append(_stat("units waiting at the docks", waiting))
             rows.append(_stat("put-aways not yet on a slot", putaways))
+            workstations = stock.get("workstations", {})
+            if workstations:
+                rows.append(("heading", "Open picks per workstation"))
+                for v, count in workstations.items():
+                    rows.append(
+                        _stat(f"workstation {v}", count, None,
+                              lambda v=int(v): self._pick(("vertex", v)))
+                    )  # fmt: skip
             for v, units in docks.items():
                 rows.append(("heading", f"Dock {v}"))
                 for k, u in sorted(units.items(), key=lambda kv: -kv[1]):
-                    rows.append(
-                        _stat(k, u, dock_colour, lambda v=int(v): self._pick(("vertex", v)))
-                    )
+                    rows.append(_stat(k, u, _PURPLE, lambda v=int(v): self._pick(("vertex", v))))
             return rows
         if name == "congestion":
             rows.append(("heading", "Now"))
@@ -926,28 +1196,29 @@ class WarehouseRenderer:
                 rows.append(("heading", "Who waits on whom"))
                 for a, blocker in sorted(debug["blocked_by"].items()):
                     rows.append(
-                        _stat(
-                            f"agent {a}",
-                            f"waits on {blocker}",
-                            _RED,
-                            lambda a=a: self._pick(("agent", a)),
-                        )
-                    )
+                        _stat(f"agent {a}", f"waits on {blocker}", _RED,
+                              lambda a=a: self._pick(("agent", a)))
+                    )  # fmt: skip
             rows.append(("heading", f"Still steps, last {_WINDOW} steps"))
             for v, c in sorted(debug["heat"].items(), key=lambda kv: -kv[1])[:6]:
                 rows.append(_stat(f"vertex {v}", c, _RED, lambda v=v: self._pick(("vertex", v))))
             return rows
         if name == "agents":
-            rows.append(("cells", ("agent", "at", "doing", "goal", "still"), _MUTED, None))
-            for a, agent in step["agents"].items():
+            idle = sum(1 for agent in step["agents"].values() if agent.get("phase") is None)
+            rows.append(
+                _stat("hide idle agents", f"{'on' if self.hide_idle else 'off'} ({idle} idle)",
+                      _SELECT, self._toggle_idle)
+            )  # fmt: skip
+            rows.append(("columns", [title for title, _, _ in _COLUMNS]))
+            (key,) = [k for title, _, k in _COLUMNS if title == self.sort]
+            agents = [
+                (a, agent, debug["still_for"].get(a, 0))
+                for a, agent in step["agents"].items()
+                if not (self.hide_idle and agent.get("phase") is None)
+            ]
+            for a, agent, still in sorted(agents, key=lambda item: key(*item)):
                 goal = agent.get("goal")
-                cells = (
-                    a,
-                    agent["at"],
-                    _doing(agent),
-                    "-" if goal is None else goal,
-                    debug["still_for"].get(a, 0),
-                )
+                cells = (a, agent["at"], _doing(agent), "-" if goal is None else goal, still)
                 rows.append(
                     ("cells", cells, _agent_colour(agent), lambda a=a: self._pick(("agent", a)))
                 )
@@ -959,13 +1230,9 @@ class WarehouseRenderer:
             what = "put away" if kind == "putaway" else "picked"
             rows.append(("heading", f"Step {t_done}, agent {agent_id}"))
             rows.append(
-                _stat(
-                    f"{sku} x{quantity} {what}",
-                    f"{source} to {target}",
-                    None,
-                    lambda a=agent_id: self._pick(("agent", str(a))),
-                )
-            )
+                _stat(f"{sku} x{quantity} {what}", f"{source} to {target}", None,
+                      lambda a=agent_id: self._pick(("agent", str(a))))
+            )  # fmt: skip
         return rows
 
     def _selected_rows(self, step, stock, header, ranks, debug) -> list:
@@ -977,18 +1244,22 @@ class WarehouseRenderer:
             if agent is None:
                 return []
             level = agent.get("congestion")
+
+            def shown(value):
+                return "-" if value is None else value
+
             rows = [
                 ("heading", f"Agent {key}"),
                 _stat("doing", _doing(agent), _agent_colour(agent)),
                 _stat("at vertex", agent["at"]),
-                _stat(
-                    "next vertex", agent.get("intent") if agent.get("intent") is not None else "-"
-                ),
-                _stat("goal", agent.get("goal") if agent.get("goal") is not None else "-"),
+                _stat("next vertex", shown(agent.get("intent"))),
+                _stat("goal", shown(agent.get("goal"))),
+                _stat("follow on the map", "on" if self.follow else "off", _SELECT,
+                      self._toggle_follow),
                 ("heading", "Task"),
-                _stat("task", agent.get("task") if agent.get("task") is not None else "none"),
-                _stat("kind", agent.get("kind") or "-"),
-            ]
+                _stat("task", shown(agent.get("task"))),
+                _stat("kind", shown(agent.get("kind"))),
+            ]  # fmt: skip
             if agent.get("sku") is not None:
                 rows.append(_stat("SKU", f"{agent['sku']} x{agent.get('quantity') or 1}"))
             rows.append(("heading", "Congestion"))
@@ -997,13 +1268,9 @@ class WarehouseRenderer:
             if key in debug["blocked_by"]:
                 blocker = debug["blocked_by"][key]
                 rows.append(
-                    _stat(
-                        "blocked by",
-                        f"agent {blocker}",
-                        _RED,
-                        lambda: self._pick(("agent", blocker)),
-                    )
-                )
+                    _stat("blocked by", f"agent {blocker}", _RED,
+                          lambda: self._pick(("agent", blocker)))
+                )  # fmt: skip
             if agent.get("overridden"):
                 rows.append(("note", "overridden by conflict resolution", _RED))
             return rows
@@ -1020,7 +1287,7 @@ class WarehouseRenderer:
         if entry:
             rows.append(_stat("picks waiting", entry["queued"], _hex("#c0392b")))
             rows.append(_stat("agent coming", entry["coming"], _hex("#e08a1e")))
-            rows.append(_stat("put-aways coming", entry["putaways"], _hex("#7a4fa3")))
+            rows.append(_stat("put-aways coming", entry["putaways"], _PURPLE))
             if entry["units"]:
                 rows.append(("heading", "Units by SKU"))
                 for k, u in sorted(entry["units"].items(), key=lambda kv: ranks.get(kv[0], 0)):
@@ -1029,12 +1296,15 @@ class WarehouseRenderer:
             if entry.get("incoming"):
                 rows.append(("heading", "On its way in"))
                 for k, u in entry["incoming"].items():
-                    rows.append(_stat(k, u, _hex("#7a4fa3")))
+                    rows.append(_stat(k, u, _PURPLE))
+        open_picks = (stock or {}).get("workstations", {}).get(str(v))
+        if open_picks:
+            rows.append(_stat("open picks", open_picks))
         waiting = (stock or {}).get("docks", {}).get(str(v), {})
         if waiting:
             rows.append(("heading", "Waiting here"))
             for k, u in waiting.items():
-                rows.append(_stat(k, u, _hex("#7a4fa3")))
+                rows.append(_stat(k, u, _PURPLE))
         agents = [
             (a, agent, "here" if agent["at"] == v else "walks here")
             for a, agent in step["agents"].items()
@@ -1044,23 +1314,38 @@ class WarehouseRenderer:
             rows.append(("heading", "Agents"))
             for a, agent, where in agents:
                 rows.append(
-                    _stat(
-                        f"agent {a}",
-                        where,
-                        _agent_colour(agent),
-                        lambda a=a: self._pick(("agent", a)),
-                    )
-                )
+                    _stat(f"agent {a}", where, _agent_colour(agent),
+                          lambda a=a: self._pick(("agent", a)))
+                )  # fmt: skip
         rows.append(_stat(f"still steps here, last {_WINDOW}", debug["heat"].get(v, 0), _RED))
         return rows
 
-    def _draw_legend(self, x: int, y: int, width: int) -> None:
-        """What the colours of the current map view mean."""
+    def _toggle_follow(self) -> None:
+        self.follow = not self.follow
+
+    # ------------------------------------------------------------- help
+    def _draw_help(self) -> None:
+        """The keys and what the colours of the current view mean, over the map."""
         pygame = self._pygame
         screen = self._screen
+        area = self._map_rect()
+        box = pygame.Rect(0, 0, min(460, area.width - 40), min(420, area.height - 40))
+        box.topright = (area.right - 20, area.top + 20)
+        layer = pygame.Surface(box.size, pygame.SRCALPHA)
+        layer.fill((255, 255, 255, 240))
+        screen.blit(layer, box.topleft)
+        pygame.draw.rect(screen, _RULE, box, 1, border_radius=8)
         text = _hex(theme.PALETTE["text"])
-        screen.blit(self._title.render(f"{VIEWS[self.view]} view", True, text), (x, y))
-        y += 24
+        x, y = box.left + 16, box.top + 14
+        screen.blit(self._title_large.render("Help", True, text), (x, y))
+        y += 34
+        for key, what in _HELP:
+            screen.blit(self._value.render(key, True, text), (x, y))
+            screen.blit(self._font.render(what, True, text), (x + 110, y))
+            y += 19
+        y += 8
+        screen.blit(self._heading.render(f"{VIEWS[self.view]} view".upper(), True, _MUTED), (x, y))
+        y += 18
 
         def dot(cx, cy, colour, label):
             pygame.draw.circle(screen, colour, (cx + 6, cy + 7), 6)
@@ -1069,47 +1354,47 @@ class WarehouseRenderer:
         if self.view == "agents":
             dot(x, y, _hex(_PHASE_COLOURS[None]), "idle")
             dot(x + 120, y, _hex(_PHASE_COLOURS["to_pickup"]), "to pickup")
-            dot(x, y + 20, _hex(_PHASE_COLOURS["to_delivery"]), "to workstation")
-            dot(x + 120, y + 20, _hex(_PHASE_COLOURS["putaway"]), "put-away")
+            dot(x + 240, y, _hex(_PHASE_COLOURS["to_delivery"]), "to workstation")
+            dot(x, y + 20, _hex(_PHASE_COLOURS["putaway"]), "put-away")
             screen.blit(
                 self._small.render("dashed line: where the agent walks", True, text),
-                (x, y + 44),
+                (x + 120, y + 22),
             )
         elif self.view == "stock":
             screen.blit(
-                self._small.render("slot fill by SKU rank, popular to rare", True, text),
-                (x, y),
+                self._small.render("slot fill by SKU rank, popular to rare", True, text), (x, y)
             )
             for i in range(160):
                 colour = rank_colour(i, 160)
                 pygame.draw.line(screen, colour, (x + i * 2, y + 16), (x + i * 2, y + 26), 2)
             dot(x, y + 34, _hex("#c0392b"), "picks waiting")
             dot(x + 120, y + 34, _hex("#e08a1e"), "agent coming")
-            dot(x + 240, y + 34, _hex("#7a4fa3"), "put-aways")
+            dot(x + 240, y + 34, _PURPLE, "put-aways")
         else:
             dot(x, y, _RED, "agent still with a task")
-            dot(x + 180, y, _MUTED, "moving or idle")
+            dot(x + 200, y, _MUTED, "moving or idle")
             screen.blit(
-                self._small.render("red patch: still steps here, last 40 steps", True, text),
+                self._small.render(
+                    f"red patch: still steps here, last {_WINDOW} steps", True, text
+                ),
                 (x, y + 22),
             )
             screen.blit(
-                self._small.render("red line: blocked by that agent", True, text),
-                (x, y + 40),
+                self._small.render("red line: blocked by that agent", True, text), (x, y + 40)
             )
 
     # ------------------------------------------------------------- controls
-    def _draw_controls(self, slider, status: str, live: bool) -> None:
+    def _draw_controls(self, slider, status: str, live: bool, timeline: Timeline | None) -> None:
         pygame = self._pygame
         screen = self._screen
-        width = self._size[0] - _PANEL
+        width = self._size[0] - self._panel_w
         y = self._size[1] - _BAR
         pygame.draw.rect(screen, _PAPER, (0, y, width, _BAR))
         pygame.draw.line(screen, _RULE, (0, y), (width, y))
         accent = _hex(theme.PALETTE["one_way_edge"])
-        x = 12
-        if slider is None and not live:
-            return
+        if slider is not None and timeline is not None:
+            self._draw_timeline(pygame.Rect(12, y + 8, width - 24, 40), timeline, slider)
+        x, row = 12, y + 60
         pause = "continue" if self.paused else "pause"
         buttons = [(pause, "pause")]
         if slider is not None:
@@ -1122,25 +1407,64 @@ class WarehouseRenderer:
             ]
         for label, action in buttons:
             text = self._font.render(label, True, _WHITE)
-            button = pygame.Rect(x, y + 12, max(text.get_width() + 18, 34), 28)
+            button = pygame.Rect(x, row, max(text.get_width() + 18, 34), 28)
             pygame.draw.rect(screen, accent, button, border_radius=6)
             screen.blit(text, text.get_rect(center=button.center))
             self._hit(button, lambda action=action: action)
             x = button.right + 6
         # The speed slider sits at the right end of the bar, the step slider between.
-        speed_track = pygame.Rect(width - 170, y + 28, 150, 8)
+        speed_track = pygame.Rect(width - 170, row + 16, 150, 8)
         share = math.log(self.speed / _SLOWEST) / math.log(_FASTEST / _SLOWEST)
         self._slider(speed_track, share, "speed:")
         label = self._small.render(
             f"speed {self.speed:g} steps a second", True, _hex(theme.PALETTE["text"])
         )
-        screen.blit(label, (speed_track.left, y + 4))
+        screen.blit(label, (speed_track.left, row))
         if slider is not None:
             index, last = slider
-            track = pygame.Rect(x + 10, y + 28, speed_track.left - x - 40, 8)
+            track = pygame.Rect(x + 10, row + 16, speed_track.left - x - 40, 8)
             self._slider(track, index / max(last, 1), "seek:")
             x = track.left
-        screen.blit(self._small.render(status, True, _hex(theme.PALETTE["text"])), (x, y + 4))
+        if self._note:
+            status = f"{status}   {self._note}"
+        screen.blit(self._small.render(status, True, _hex(theme.PALETTE["text"])), (x, row))
+
+    def _draw_timeline(self, area, timeline: Timeline, slider: tuple[int, int]) -> None:
+        """The backlog over the steps that can be stepped through, a red mark where the whole
+        fleet stood still, an orange mark where an agent was blocked, and the shown step."""
+        pygame = self._pygame
+        screen = self._screen
+        index, last = slider
+        pygame.draw.rect(screen, _WHITE, area, border_radius=4)
+        pygame.draw.rect(screen, _RULE, area, 1, border_radius=4)
+        n = len(timeline.backlog)
+        if n == 0:
+            return
+        top = max(max(timeline.backlog), 1)
+        columns = max(1, area.width - 4)
+        points = []
+        for c in range(columns):
+            lo = c * n // columns
+            hi = max(lo + 1, (c + 1) * n // columns)
+            x = area.left + 2 + c
+            if any(timeline.stalled[lo:hi]):
+                pygame.draw.line(screen, _RED, (x, area.top + 2), (x, area.top + 9))
+            elif any(timeline.blocked[lo:hi]):
+                pygame.draw.line(screen, _ORANGE, (x, area.top + 2), (x, area.top + 6))
+            value = max(timeline.backlog[lo:hi])
+            points.append((x, area.bottom - 3 - (area.height - 14) * value / top))
+        if len(points) > 1:
+            pygame.draw.lines(screen, _hex(theme.PALETTE["one_way_edge"]), False, points, 2)
+        cursor = area.left + 2 + columns * index / max(last, 1)
+        pygame.draw.line(screen, _SELECT, (cursor, area.top), (cursor, area.bottom), 2)
+        label = self._small.render(f"backlog, peak {top}", True, _MUTED)
+        screen.blit(label, (area.right - label.get_width() - 6, area.top + 3))
+
+        def act() -> str:
+            return "seek:" + str((self._mouse()[0] - area.left) / area.width)
+
+        act.drags = True  # type: ignore[attr-defined]
+        self._hit(area, act)
 
     def _slider(self, track, share: float, action: str) -> None:
         """A slider bar filled to `share`, which answers a click or a drag with `action`
@@ -1153,16 +1477,16 @@ class WarehouseRenderer:
         pygame.draw.circle(self._screen, accent, (done.right, track.centery), 8)
 
         def act() -> str:
-            return action + str((pygame.mouse.get_pos()[0] - track.left) / track.width)
+            return action + str((self._mouse()[0] - track.left) / track.width)
 
         act.drags = True  # type: ignore[attr-defined]
         self._hit(track.inflate(0, 24), act)
 
     # ---------------------------------------------------------------- hover
-    def _draw_hover(self, step, shelves, header, ranks, docks) -> None:
+    def _draw_hover(self, step) -> None:
         pygame = self._pygame
-        mx, my = pygame.mouse.get_pos()
-        if not self._map_rect().collidepoint((mx, my)):
+        mx, my = self._mouse()
+        if not self._map_rect().collidepoint((mx, my)) or self._press is not None:
             return
         near = min(self._pixels, key=lambda v: math.dist(self._pixels[v], (mx, my)))
         if math.dist(self._pixels[near], (mx, my)) > self._radius + 4:
@@ -1175,7 +1499,7 @@ class WarehouseRenderer:
         surfaces = [self._small.render(s, True, (20, 20, 20)) for s in lines]
         w = max(s.get_width() for s in surfaces) + 12
         h = 15 * len(surfaces) + 8
-        x = min(mx + 14, self._size[0] - _PANEL - w - 4)
+        x = min(mx + 14, self._size[0] - self._panel_w - w - 4)
         y = min(my + 14, self._size[1] - _BAR - h - 4)
         pygame.draw.rect(self._screen, (255, 255, 240), (x, y, w, h), border_radius=4)
         pygame.draw.rect(self._screen, (120, 120, 120), (x, y, w, h), 1, border_radius=4)
@@ -1246,18 +1570,43 @@ def congestion(history: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def replay(path: Path, *, window_size: tuple[int, int] = (1440, 900), fps: float = 8.0) -> None:
-    """Open a trace in a window and step through it (controls in the module docstring)."""
-    data = TraceReplay(path)
-    if not data.steps:
-        raise ValueError(f"{path} has no steps.")
-    renderer = WarehouseRenderer(None, header=data.header, window_size=window_size)
-    renderer.paused = True
-    renderer.speed = fps
-    pygame = renderer._pygame
+def replay(
+    path: Path,
+    *,
+    window_size: tuple[int, int] = (1440, 900),
+    fps: float = 8.0,
+    compare: Path | None = None,
+) -> None:
+    """Open a trace in a window and step through it (controls in the module docstring).
+    With `compare`, open a second trace beside it, both kept on the same step, without the
+    sidebar."""
+    import pygame
+
+    traces = [TraceReplay(path)] + ([TraceReplay(compare)] if compare is not None else [])
+    for data in traces:
+        if not data.steps:
+            raise ValueError(f"{data.path} has no steps.")
+    pygame.init()
+    pygame.display.set_caption("slap-mapd-coupling")
+    window = pygame.display.set_mode(window_size)
+    width = window_size[0] // len(traces)
+    renderers = []
+    for i, data in enumerate(traces):
+        config = data.header.get("config", {})
+        title = _pretty(config.get("storage_mode", "")) if compare is not None else ""
+        part = window.subsurface((i * width, 0, width, window_size[1]))
+        renderers.append(
+            WarehouseRenderer(
+                None, header=data.header, surface=part, sidebar=compare is None, title=title
+            )
+        )
+    for renderer in renderers:
+        renderer.paused, renderer.speed = True, fps
+    first = renderers[0]
     clock = pygame.time.Clock()
+    # The steps are matched by index, so two traces of one configuration stay on one t.
+    last = min(len(data.steps) for data in traces) - 1
     index = 0
-    last = len(data.steps) - 1
     try:
         while True:
             for event in pygame.event.get():
@@ -1265,38 +1614,50 @@ def replay(path: Path, *, window_size: tuple[int, int] = (1440, 900), fps: float
                     event.type == pygame.KEYDOWN and event.key == pygame.K_q
                 ):
                     return
-                action = renderer.handle(event)
-                if action is not None:
-                    index = renderer._step_action(action, index, last)
-            step = data.steps[index]
-            state = "paused" if renderer.paused else "playing"
-            status = f"{path.name}   step {step['t']} of {data.steps[-1]['t']}   {state}"
-            renderer.draw_frame(
-                step,
-                data.stock_at(step["t"]),
-                data.header,
-                data.history(index),
-                (index, last),
-                status,
-            )
+                if event.type == pygame.KEYDOWN:
+                    actions = [renderer.handle(event) for renderer in renderers]
+                    action = actions[0]
+                else:
+                    x = pygame.mouse.get_pos()[0]
+                    owner = renderers[min(x // width, len(renderers) - 1)]
+                    action = owner.handle(event)
+                    for renderer in renderers:
+                        if renderer is not owner and event.type == pygame.MOUSEBUTTONUP:
+                            renderer.handle(event)
+                if action == "shot":
+                    first.screenshot(Path(path).stem)
+                elif action is not None:
+                    index = first._step_action(action, index, last)
+                    for renderer in renderers[1:]:
+                        renderer.paused, renderer.speed = first.paused, first.speed
+            for renderer, data in zip(renderers, traces):
+                step = data.steps[index]
+                state = "paused" if renderer.paused else "playing"
+                status = f"{data.path.name}   step {step['t']} of {data.steps[last]['t']}   {state}"
+                renderer.draw_frame(
+                    step, data.stock_at(step["t"]), data.header, data.history(index),
+                    (index, last), status, timeline=data,
+                )  # fmt: skip
             pygame.display.flip()
-            if not renderer.paused:
+            if not first.paused:
                 if index == last:
-                    renderer.paused = True
+                    for renderer in renderers:
+                        renderer.paused = True
                 else:
                     index += 1
-            clock.tick(30 if renderer.paused else renderer.speed)
+            clock.tick(30 if first.paused else first.speed)
     finally:
-        renderer.close()
+        pygame.quit()
 
 
 def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Replay an episode trace in a window.")
     parser.add_argument("trace", type=Path)
+    parser.add_argument("--compare", type=Path, default=None, help="a second trace beside it")
     parser.add_argument("--fps", type=float, default=8.0, help="steps per second when playing")
     parser.add_argument("--size", type=int, nargs=2, default=(1440, 900), metavar=("W", "H"))
     args = parser.parse_args(list(argv) if argv is not None else None)
-    replay(args.trace, window_size=tuple(args.size), fps=args.fps)
+    replay(args.trace, window_size=tuple(args.size), fps=args.fps, compare=args.compare)
 
 
 if __name__ == "__main__":

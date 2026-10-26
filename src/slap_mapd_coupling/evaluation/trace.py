@@ -207,6 +207,11 @@ def step_line(env: WarehouseMAPDEnv, previous: Mapping[int, VertexId]) -> dict[s
         "t": t,
         "completed": len(finished),
         "released": len(env.tasks),
+        # The same split by kind: picks to a workstation, put-aways from a dock to a shelf.
+        "picks_done": sum(1 for task in finished if task.kind == "pick"),
+        "picks_released": sum(1 for task in env.tasks if task.kind == "pick"),
+        "putaways_done": sum(1 for task in finished if task.kind == "putaway"),
+        "putaways_released": sum(1 for task in env.tasks if task.kind == "putaway"),
         "backlog": env.log.backlog_by_t[-1] if env.log.backlog_by_t else 0,
         "orders_done": len(orders - open_orders),
         "orders_released": len(orders),
@@ -231,11 +236,13 @@ def stock_line(env: WarehouseMAPDEnv) -> dict[str, Any]:
     pickup shelf until it is picked up, `queued` while no agent holds it and `coming` once
     one does. A put-away waits on its shelf until it is delivered, and `incoming` holds the
     units by SKU it brings. Stock from outside waits at its dock until an agent picks it up,
-    listed under `docks` by SKU. Only shelves and docks with something to report are
-    listed."""
+    listed under `docks` by SKU. `workstations` counts the picks released and not yet
+    delivered that go to each workstation. Only shelves, docks and workstations with
+    something to report are listed."""
     t = env.t
     shelves: dict[VertexId, dict[str, Any]] = {}
     docks: dict[VertexId, dict[str, int]] = {}
+    workstations: dict[VertexId, int] = {}
 
     def shelf(v: VertexId) -> dict[str, Any]:
         return shelves.setdefault(
@@ -249,6 +256,8 @@ def stock_line(env: WarehouseMAPDEnv) -> dict[str, Any]:
     for task in env.tasks:
         if task.release_time > t:
             continue
+        if task.kind == "pick" and (task.finish_time is None or task.finish_time > t):
+            workstations[task.delivery_vertex] = workstations.get(task.delivery_vertex, 0) + 1
         if task.kind == "pick" and (task.pickup_time is None or task.pickup_time > t):
             held = task.assignment_time is not None and task.assignment_time <= t
             shelf(task.pickup_vertex)["coming" if held else "queued"] += 1
@@ -266,6 +275,7 @@ def stock_line(env: WarehouseMAPDEnv) -> dict[str, Any]:
         "orders_short": len(env.waiting_orders),
         "shelves": {str(v): entry for v, entry in sorted(shelves.items())},
         "docks": {str(v): units for v, units in sorted(docks.items())},
+        "workstations": {str(v): n for v, n in sorted(workstations.items())},
     }
 
 
