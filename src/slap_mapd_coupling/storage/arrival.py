@@ -19,6 +19,11 @@ shelves:
   by access distance, ties by id, the same order for every SKU.
 - "congestion" (F_cng). SKUs as in "demand", each into its own order of storage vertices by the
   congestion-aware score with weight beta (storage/congestion.py).
+- "random". SKUs by id, each into the storage vertices in a uniformly random order drawn
+  afresh for every SKU, so each shelf it fills is drawn uniformly among the shelves with room.
+  It uses no demand and no distance, only the room left, and is a check on "demand": whether its
+  gain comes from where it puts stock or only from spreading it. The draws come from `rng`, a
+  stream the environment seeds from the run seed.
 
 A shelf takes as many units as fit in its free capacity. Units that fit nowhere are not placed
 and are counted as unplaced.
@@ -41,6 +46,7 @@ Choices flagged, not fixed by the thesis yet:
 from __future__ import annotations
 
 import math
+import random
 from typing import Callable, NamedTuple, Protocol, runtime_checkable
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -75,7 +81,9 @@ class PutAwayRule(Protocol):
     SKU (`arrival_amounts`), the same under every rule. `home` maps each SKU to its home shelf,
     which only "fixed" uses, and `congestion_weight` is beta, which only "congestion" uses.
     `receiving` is V_rcv, None for the delivery vertices. `trip` ranks the shelves by the trip
-    distance (robots carry the put-away), False by the access distance as before.
+    distance (robots carry the put-away), False by the access distance as before. `rng` is the
+    run's put-away stream, which only "random" uses. Every rule takes it, so the environment
+    can pass it to any of them.
     The returned storage satisfies the capacity constraint, which StorageState enforces.
     """
 
@@ -92,6 +100,7 @@ class PutAwayRule(Protocol):
         *,
         receiving: list[VertexId] | None = None,
         trip: bool = False,
+        rng: random.Random | None = None,
     ) -> PutAwayResult: ...
 
 
@@ -260,6 +269,7 @@ def putaway_fixed(
     *,
     receiving: list[VertexId] | None = None,
     trip: bool = False,
+    rng: random.Random | None = None,
 ) -> PutAwayResult:
     """Dedicated storage: the home shelf first, then the nearest shelves with room."""
     by_access = _shelf_ranking(graph, receiving, trip)
@@ -285,6 +295,7 @@ def putaway_demand(
     *,
     receiving: list[VertexId] | None = None,
     trip: bool = False,
+    rng: random.Random | None = None,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into the nearest shelves with room."""
     by_access = _shelf_ranking(graph, receiving, trip)
@@ -304,6 +315,7 @@ def putaway_congestion(
     *,
     receiving: list[VertexId] | None = None,
     trip: bool = False,
+    rng: random.Random | None = None,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into its shelves by the congestion-aware score."""
     if congestion_weight is None:
@@ -346,3 +358,30 @@ def putaway_congestion(
         )
 
     return _put_away(x_prev, amounts, _by_demand(x_prev, demand_estimate), shelf_order)
+
+
+@register_putaway_rule("random")
+def putaway_random(
+    x_prev: StorageState,
+    graph: WarehouseGraph,
+    amounts: dict[SkuId, int],
+    home: dict[SkuId, VertexId],
+    demand_estimate: DemandEstimate,
+    traversal_estimate: TrafficEstimate,
+    waiting_estimate: TrafficEstimate,
+    congestion_weight: float | None,
+    *,
+    receiving: list[VertexId] | None = None,
+    trip: bool = False,
+    rng: random.Random | None = None,
+) -> PutAwayResult:
+    """SKUs by id, each into the shelves in a random order: the first shelf of a uniformly
+    random order that has room is uniform among the shelves with room."""
+    if rng is None:
+        raise ValueError(
+            "the random put-away rule requires rng, the run's put-away stream, which the "
+            "environment passes; a caller that does not indicates a bug."
+        )
+    storage = storage_vertices(graph)
+    orders = {sku_id: rng.sample(storage, len(storage)) for sku_id in sorted(x_prev.skus)}
+    return _put_away(x_prev, amounts, sorted(x_prev.skus), lambda sku_id: orders[sku_id])

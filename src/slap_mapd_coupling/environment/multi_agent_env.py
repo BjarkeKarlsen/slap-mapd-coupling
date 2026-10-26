@@ -122,6 +122,9 @@ from slap_mapd_coupling.storage.registry import get_storage_rule
 # config.seed, gives an independent-enough reproducible stream without a
 # dedicated ExperimentConfig field (see module docstring).
 _ORDER_SEED_OFFSET = 1_000_000_007
+# The put-away stream of the "random" rule, seeded from the episode seed in the same way, so a
+# seed always gives the same draws and they never share the order stream.
+_PUTAWAY_SEED_OFFSET = 2_000_000_011
 
 
 class OrderLine(NamedTuple):
@@ -327,7 +330,10 @@ class WarehouseMAPDEnv:
         self._storage_capacities = dict(storage_capacities)
         self._initial_counts = {k: dict(v) for k, v in initial_storage_counts.items()}
         self._assigner = assigner
-        self._storage_rule = get_storage_rule(config.storage_mode)
+        # The template model's storage rule. "random" exists only as a put-away rule.
+        self._storage_rule = (
+            get_storage_rule(config.storage_mode) if config.stock_model == "template" else None
+        )
         self._edge_cost = {(edge.source, edge.target): edge.cost for edge in graph.edges}
         # The order draw of the arrival model looks at every SKU, never at stock. The SKUs keep
         # the order of `skus`, which the popularity ranking starts from.
@@ -450,6 +456,7 @@ class WarehouseMAPDEnv:
         self._next_task_id = 1
         self._priority = priority_permutation(episode_seed, agent_ids)
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
+        self._putaway_rng = random.Random(episode_seed + _PUTAWAY_SEED_OFFSET)
         self._estimator = WindowEstimator()
         self.last_proposed = {}
         self.last_overridden = frozenset()
@@ -599,6 +606,7 @@ class WarehouseMAPDEnv:
         # over the last Delta steps only (environment/storage_estimates.py), then
         # a fresh window. Causal by construction: the order released at next_t
         # itself is only released after this stage.
+        assert self._storage_rule is not None
         estimates = self._estimator.close_window(delta)
         before_storage = self.storage
         self.storage = self._storage_rule(
@@ -649,6 +657,8 @@ class WarehouseMAPDEnv:
             options["receiving"] = self._receiving_vertices
         if robots:
             options["trip"] = True
+        if self.config.storage_mode == "random":
+            options["rng"] = self._putaway_rng
         result = self._putaway_rule(
             given,
             self.graph,
