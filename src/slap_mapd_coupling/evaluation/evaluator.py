@@ -21,7 +21,7 @@ from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.core.tasks import Task, TaskId
 from slap_mapd_coupling.environment.multi_agent_env import OrderLine, WarehouseMAPDEnv
 from slap_mapd_coupling.evaluation.metrics import RunMetrics
-from slap_mapd_coupling.evaluation.trace import EpisodeTraceWriter
+from slap_mapd_coupling.evaluation.trace import DEFAULT_STOCK_EVERY, EpisodeTraceWriter
 from slap_mapd_coupling.planners import get_planner
 from slap_mapd_coupling.planners.driver import step_with_planner
 from slap_mapd_coupling.planners.registry import PlannerName
@@ -45,6 +45,8 @@ def run_episode(
     encoding_config: LocalSubgraphEncodingConfig | None = None,
     zones: Sequence[frozenset[VertexId]] | None = None,
     pooling: Pooling | None = None,
+    positions: Mapping[VertexId, tuple[float, float]] | None = None,
+    stock_every: int = DEFAULT_STOCK_EVERY,
 ) -> RunMetrics:
     """Run one full episode (config.horizon timesteps) and reduce it to
     one RunMetrics row.
@@ -65,7 +67,9 @@ def run_episode(
 
     With `trace_path` the episode also writes a per-step trace there
     (evaluation/trace.py). The writer only reads the environment, so the
-    returned RunMetrics are the same with or without it.
+    returned RunMetrics are the same with or without it. `positions` go into
+    the trace header for drawing it, and a stock line is written every
+    `stock_every` steps.
 
     With `timing_path` one JSON line is appended there with the wall-clock seconds and calls of
     every part of the step (`episode_timing`). Engineering only, it changes no result.
@@ -91,7 +95,9 @@ def run_episode(
         for _ in range(config.horizon):
             step()
     else:
-        with EpisodeTraceWriter(trace_path, env) as writer:
+        with EpisodeTraceWriter(
+            trace_path, env, positions=positions, stock_every=stock_every
+        ) as writer:
             for _ in range(config.horizon):
                 step()
                 writer.record(env)

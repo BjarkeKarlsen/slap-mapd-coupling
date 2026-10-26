@@ -44,6 +44,7 @@ from typing import Any, Sequence
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageMode
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.evaluation.evaluator import row_keeps_up, run_episode
+from slap_mapd_coupling.evaluation.trace import DEFAULT_STOCK_EVERY
 from slap_mapd_coupling.storage.arrival import trip_distance
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.spec import (
@@ -113,6 +114,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="write a per-step trace (evaluation/trace.py) for the first N seeds of each run",
     )
     parser.add_argument(
+        "--stock-every",
+        type=int,
+        default=DEFAULT_STOCK_EVERY,
+        help="steps between two stock lines of a trace",
+    )
+    parser.add_argument(
         "--stop-when-overloaded",
         action="store_true",
         help="skip the rates above one at which no seed keeps up",
@@ -165,6 +172,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         config,
                         trace_path=trace,
                         timing_path=args.out / "timing.jsonl",
+                        positions=study.instance.positions,
+                        stock_every=args.stock_every,
                     )
                     row = metrics.model_dump(mode="json")
                     if value is not None:

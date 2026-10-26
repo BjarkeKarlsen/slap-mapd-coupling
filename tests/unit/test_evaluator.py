@@ -249,9 +249,9 @@ def test_run_episode_with_a_trace_path_returns_the_same_metrics(tmp_path):
     # Decision runtime is wall-clock time, so it differs between any two runs.
     exclude = {"mean_decision_runtime_seconds"}
     assert with_trace.model_dump(exclude=exclude) == without.model_dump(exclude=exclude)
-    lines = path.read_text().splitlines()
-    assert len(lines) == config.horizon + 1
-    assert json.loads(lines[0])["type"] == "header"
+    types = [json.loads(line)["type"] for line in path.read_text().splitlines()]
+    assert types[0] == "header" and types[-1] == "tasks"
+    assert types.count("step") == config.horizon
 
 
 def _run_traced(graph: WarehouseGraph, config: ExperimentConfig, path):

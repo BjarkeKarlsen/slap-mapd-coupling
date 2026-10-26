@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -116,17 +115,16 @@ def render_episode(
     policy.reset(config.seed)
 
     renderer = WarehouseRenderer(instance.graph, instance.positions)
+    renderer.speed = 1 / delay  # the renderer paces the run, and its slider changes it
     try:
-        running = renderer.render(adapter.core.fleet, storage=adapter.core.storage)
-        time.sleep(delay)
+        running = renderer.render_env(adapter.core)
         for _ in range(config.horizon):
             if not running:
                 break
             observations, _, terminated, truncated, _ = adapter.step(
                 policy(observations, adapter.core.t)
             )
-            running = renderer.render(adapter.core.fleet, storage=adapter.core.storage)
-            time.sleep(delay)
+            running = renderer.render_env(adapter.core)
             if truncated["__all__"] or terminated["__all__"]:
                 break
     finally:
