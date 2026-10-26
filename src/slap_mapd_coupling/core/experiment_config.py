@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeFloat,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
     model_validator,
@@ -74,6 +75,9 @@ class ExperimentConfig(BaseModel):
     arrival_rate: PositiveFloat  # lambda_task
     seed: int
     horizon: PositiveInt  # T, the evaluation horizon (tab:evalparams)
+    # T_warm, the warm-up left out of the measures ([A66]), chosen by Welch's method. The
+    # measures cover the tasks released in [T_warm, T). 0 measures the whole run.
+    warmup: NonNegativeInt = 0
 
     wait_cost: NonNegativeFloat  # c_wait
     storage_epoch_length: PositiveInt | None = None  # Delta; None means F_fix (Delta = infinity)
@@ -108,6 +112,9 @@ class ExperimentConfig(BaseModel):
     demand_skew: NonNegativeFloat | None = None
     demand_rotation_period: PositiveInt | None = None  # None means no rotation
     demand_rotation_shift: PositiveInt | None = None
+    # The shift as a share of the SKUs instead, rounded to a whole number of places and at least
+    # one, so the ranking turns once in about the same time whatever the number of SKUs.
+    demand_rotation_share: float | None = Field(default=None, gt=0.0, lt=1.0)
 
     # The stock model. Under "arrival" Delta is the arrival period for every storage rule,
     # F_fix included, and nothing is relocated, so there is no nu. Under stock_rule "topup" each
@@ -199,13 +206,19 @@ class ExperimentConfig(BaseModel):
     def _demand_parameters(self) -> "ExperimentConfig":
         """A rotation reorders a popularity ranking, so it needs a skew, and a period and a
         shift only mean something together."""
+        shifts = (self.demand_rotation_shift, self.demand_rotation_share)
         if self.demand_rotation_period is not None:
             if self.demand_skew is None:
                 raise ValueError("demand_rotation_period requires demand_skew.")
-            if self.demand_rotation_shift is None:
-                raise ValueError("demand_rotation_period requires demand_rotation_shift.")
-        elif self.demand_rotation_shift is not None:
-            raise ValueError("demand_rotation_shift requires demand_rotation_period.")
+            if sum(shift is not None for shift in shifts) != 1:
+                raise ValueError(
+                    "demand_rotation_period requires one of demand_rotation_shift and "
+                    "demand_rotation_share."
+                )
+        elif any(shift is not None for shift in shifts):
+            raise ValueError(
+                "demand_rotation_shift and demand_rotation_share require demand_rotation_period."
+            )
         if self.cold_stock_top_k is not None and self.demand_skew is None:
             raise ValueError("cold_stock_top_k needs a popularity ranking, so demand_skew.")
         return self
@@ -215,6 +228,13 @@ class ExperimentConfig(BaseModel):
         if (self.controller is None) == (self.planner is None):
             raise ValueError("Set exactly one of controller and planner.")
         return self
+
+    def rotation_shift(self, num_skus: int) -> int | None:
+        """The places the popularity ranking rotates by each period, for `num_skus` SKUs: the
+        shift, or the share of the SKUs rounded and at least one. None without a rotation."""
+        if self.demand_rotation_share is not None:
+            return max(1, round(self.demand_rotation_share * num_skus))
+        return self.demand_rotation_shift
 
     @property
     def router_name(self) -> ControllerArchitecture | PlannerName:
@@ -250,6 +270,13 @@ class ExperimentConfig(BaseModel):
                     "congestion_sensitive=True with storage_mode='congestion' requires "
                     "congestion_weight (beta)."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _warmup_inside_the_horizon(self) -> "ExperimentConfig":
+        """The measured window [T_warm, T] must hold at least one step."""
+        if self.warmup >= self.horizon:
+            raise ValueError(f"warmup = {self.warmup} must be below the horizon {self.horizon}.")
         return self
 
     @model_validator(mode="after")

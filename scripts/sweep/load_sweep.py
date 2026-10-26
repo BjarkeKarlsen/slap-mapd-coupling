@@ -64,6 +64,7 @@ VARIABLE = (
     "demand.skew",
     "demand.rotation_period",
     "demand.rotation_shift",
+    "demand.rotation_share",
     "arrival.margin",
     "arrival.refill_units",
     "arrival.service_level",
@@ -75,13 +76,13 @@ VARIABLE = (
 )
 # The summary columns: label, RunMetrics field, and how the seeds are summed up. Each has a use
 # (notes/measures_catalogue.md in thesis-progress). The two keep-up parts show which kind fails
-# ([A59]), the longest stand-still is what the stall length is chosen from, the backlog slope
-# shows a backlog still growing at T ([A55]), and overflow and unplaced units go in the load and
-# demand appendix. Service times are read from the rows and the plots, not from here.
+# ([A59]), the longest gap between finished tasks is what the stall length is chosen from (D18),
+# the backlog slope shows a backlog still growing at T ([A55]), and overflow and unplaced units go
+# in the load and demand appendix. Service times are read from the rows and the plots, not from here.
 _COLUMNS = (
     ("picks keep up", "keeps_up_picks", "count"),
     ("put-aways keep up", "keeps_up_putaways", "count"),
-    ("longest stand-still, highest", "longest_stand_still", "max"),
+    ("longest gap between finishes, highest", "longest_completion_gap", "max"),
     ("backlog slope per 100 steps", "backlog_slope", "mean"),
     ("overflow units", "overflow_units", "mean"),
     ("unplaced units", "unplaced_units", "mean"),
@@ -100,6 +101,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--storage-modes", nargs="+", default=["fixed"], dest="modes")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--horizon", type=int, default=None, help="overrides the spec's T")
+    parser.add_argument(
+        "--warmup", type=int, default=None, help="overrides the spec's warm-up T_warm"
+    )
     parser.add_argument("--vary", choices=VARIABLE, default=None, help="a setting to sweep")
     parser.add_argument("--values", type=float, nargs="+", help="the values of --vary")
     parser.add_argument(
@@ -118,8 +122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("give --vary and --values together")
 
     spec = load_spec(args.config)
-    if args.horizon is not None:
-        spec = override_spec(spec, horizon=args.horizon)
+    if args.horizon is not None or args.warmup is not None:
+        spec = override_spec(spec, horizon=args.horizon, warmup=args.warmup)
     args.out.mkdir(parents=True, exist_ok=True)
     rows_path = args.out / ROWS
     rows = _read_rows(rows_path)

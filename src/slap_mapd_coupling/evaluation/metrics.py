@@ -89,6 +89,11 @@ class RunMetrics(BaseModel):
     arrival_rate: NonNegativeFloat
     seed: int
     horizon: NonNegativeInt  # T
+    # T_warm, the warm-up left out of the measures ([A66]). The counts, means and the keep-up
+    # check below cover the tasks released in [T_warm, T), and throughput is per step of the
+    # window. 0 measures the whole run. The totals of the service time, the order measures and
+    # the robot busy share still cover the whole run.
+    warmup: NonNegativeInt = 0
     observation_depth: PositiveInt  # d_obs, the window the run was scored under
     # "template" (stock never runs out) or "arrival" (stock arrives every Delta steps).
     stock_model: StockModel = "template"
@@ -108,9 +113,12 @@ class RunMetrics(BaseModel):
     # run with no put-away released passes the put-away part.
     keeps_up_picks: bool | None = None
     keeps_up_putaways: bool | None = None
-    # The longest run of consecutive blocked ticks of any task, finished or still active at T.
+    # The longest run of consecutive blocked ticks of any task, finished or still active at T. A
+    # diagnostic, since under Token Passing standing still is often planned.
     longest_stand_still: NonNegativeInt = 0
-    # longest_stand_still > the stall length, a jam the fleet may have caught up from. None
+    # The longest stretch of steps in [T_warm, T] in which no robot finished a task (D18).
+    longest_completion_gap: NonNegativeInt = 0
+    # longest_completion_gap > the stall length, a jam the fleet may have caught up from. None
     # unless the stall length is configured, since tab:evalparams leaves it TBD.
     stalled: bool | None = None
     num_waiting_tasks: NonNegativeInt  # |Q_T|

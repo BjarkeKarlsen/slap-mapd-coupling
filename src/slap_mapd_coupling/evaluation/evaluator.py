@@ -251,10 +251,12 @@ def row_keeps_up(row: Mapping[str, Any], keep_up_threshold: float | None) -> boo
     )[0]
 
 
-def backlog_slope(backlog_by_t: Sequence[int]) -> float | None:
-    """The least-squares slope of B_t over the second half of the trace, per 100 timesteps
-    ([A55]). None with fewer than two points."""
-    half = list(backlog_by_t[len(backlog_by_t) // 2 :])
+def backlog_slope(backlog_by_t: Sequence[int], warmup: int = 0) -> float | None:
+    """The least-squares slope of B_t per 100 timesteps ([A55]), over the measured window
+    [warmup, T] when there is a warm-up, and over the second half of the trace without one.
+    None with fewer than two points."""
+    start = warmup if warmup else len(backlog_by_t) // 2
+    half = list(backlog_by_t[start:])
     n = len(half)
     if n < 2:
         return None
@@ -262,6 +264,20 @@ def backlog_slope(backlog_by_t: Sequence[int]) -> float | None:
     mean_y = sum(half) / n
     spread = sum((x - mean_x) ** 2 for x in range(n))
     return 100 * sum((x - mean_x) * (y - mean_y) for x, y in enumerate(half)) / spread
+
+
+def longest_completion_gap(tasks: Sequence[Task], warmup: int, horizon: int) -> int:
+    """The longest stretch of steps in [warmup, T] in which no robot finished a task, the
+    stall measure at fleet level (D18): from the start of the window to the first finish, between
+    two finishes, and from the last finish to T. A healthy fleet finishes tasks all the time, so
+    a long gap is a jam under any controller."""
+    finishes = sorted(
+        task.finish_time
+        for task in tasks
+        if task.finish_time is not None and warmup <= task.finish_time <= horizon
+    )
+    marks = [warmup, *finishes, horizon]
+    return max(later - earlier for earlier, later in zip(marks, marks[1:]))
 
 
 def robot_busy_share(tasks: Sequence[Task], num_agents: int, horizon: int) -> float:
@@ -377,15 +393,20 @@ def total_service(
 
 def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetrics:
     horizon = config.horizon
-    completed = [task for task in env.tasks if task.finish_time is not None]
+    # The measured window [T_warm, T] ([A66]). A task, or an order line still waiting for stock,
+    # counts in the measures when it was released in the window, so the empty start is left
+    # out. Without a warm-up every task counts, as before.
+    warmup = config.warmup
+    tasks = [task for task in env.tasks if task.release_time >= warmup]
+    waiting_lines = [line for line in env.waiting_orders if line.release_time >= warmup]
+    completed = [task for task in tasks if task.finish_time is not None]
     num_completed = len(completed)
 
-    # The tasks released in the run, for the keep-up check below, and throughput, reported.
-    backlog = env.log.backlog_by_t[-1]  # B_T -- logged online, not recomputed here
-    share = completed_share(num_completed, backlog)
-    # Stalls: the longest time an agent holding a task stood still in a row.
+    # Stalls: the longest time an agent holding a task stood still in a row, a diagnostic, and
+    # the longest stretch in the window in which no task finished, the stall measure (D18).
     longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
-    throughput = num_completed / horizon  # Lambda_T
+    completion_gap = longest_completion_gap(env.tasks, warmup, horizon)
+    throughput = num_completed / (horizon - warmup)  # Lambda_T over the window
 
     # Mean service time and its split, eq:meanservice / eq:split, over the completed picks.
     # After assignment an agent either moves or stands still at every timestep, and every
@@ -415,16 +436,21 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     # B_t is logged before stage 1 and stage 6 release tasks at t, so the put-aways of an
     # arrival at T are not in B_T, and they are left out here too. No pick is released at T.
     num_waiting = sum(
-        1
-        for task in env.tasks
-        if task.release_time < horizon and task.status(horizon) == "waiting"
+        1 for task in tasks if task.release_time < horizon and task.status(horizon) == "waiting"
     )
-    num_active = sum(1 for task in env.tasks if task.status(horizon) == "active")
+    num_active = sum(1 for task in tasks if task.status(horizon) == "active")
+    # Under the arrival model, orders released and still waiting for stock. They count in B_T.
+    # Always 0 under the template model.
+    num_waiting_orders = len(waiting_lines)
+    # B_T, the tasks released in the window and not finished at T, and the lines still waiting
+    # for stock. Without a warm-up it is the last entry of the B_t trace.
+    backlog = num_waiting + num_active + num_waiting_orders
+    share = completed_share(num_completed, backlog)
     # B^put_T, the put-aways among them, counted the same way ([A59]). The rest of B_T, with the
     # orders waiting for stock, is B^pick_T.
     putaway_backlog = sum(
         1
-        for task in env.tasks
+        for task in tasks
         if task.kind == "putaway"
         and task.release_time < horizon
         and task.status(horizon) in ("waiting", "active")
@@ -436,9 +462,6 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         putaway_backlog,
         config.keep_up_threshold,
     )
-    # Under the arrival model, orders released and still waiting for stock. They count in B_T.
-    # Always 0 under the template model.
-    num_waiting_orders = len(env.waiting_orders)
 
     # The mean crowding: the mean of delta_i(t) over agents and
     # timesteps, recorded every timestep for every controller.
@@ -470,7 +493,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 else None
             ),
             num_waiting_orders=num_waiting_orders,
-            num_released_putaways=sum(1 for task in env.tasks if task.kind == "putaway"),
+            num_released_putaways=sum(1 for task in tasks if task.kind == "putaway"),
             num_completed_putaways=len(putaways),
             mean_putaway_service_time=(
                 sum(task.service_time or 0 for task in putaways) / len(putaways)
@@ -519,6 +542,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         arrival_rate=config.arrival_rate,
         seed=config.seed,
         horizon=horizon,
+        warmup=warmup,
         observation_depth=config.observation_depth,
         num_completed_tasks=num_completed,
         throughput=throughput,
@@ -528,12 +552,13 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         keeps_up_picks=keep_up_picks,
         keeps_up_putaways=keep_up_putaways,
         longest_stand_still=longest_stand_still,
-        stalled=None if config.stall_length is None else longest_stand_still > config.stall_length,
+        longest_completion_gap=completion_gap,
+        stalled=None if config.stall_length is None else completion_gap > config.stall_length,
         num_waiting_tasks=num_waiting,
         num_active_tasks=num_active,
         backlog=backlog,
         putaway_backlog=putaway_backlog,
-        backlog_slope=backlog_slope(env.log.backlog_by_t),
+        backlog_slope=backlog_slope(env.log.backlog_by_t, warmup),
         mean_service_time=mean_service_time,
         mean_wait_for_agent=mean_wait,
         mean_travel_time=mean_travel,
