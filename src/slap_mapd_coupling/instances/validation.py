@@ -94,6 +94,25 @@ def _reachable_avoiding(
     return False
 
 
+def _endpoints_reached_avoiding_others(
+    graph: WarehouseGraph, start: VertexId, endpoints: set[VertexId]
+) -> set[VertexId]:
+    """The endpoints w with a start->w path whose inner vertices are no endpoint: a BFS from
+    start that enters an endpoint but never leaves it."""
+    reached: set[VertexId] = set()
+    visited = {start}
+    queue: deque[VertexId] = deque([start])
+    while queue:
+        v = queue.popleft()
+        for w in graph.out_neighbours(v):
+            if w in endpoints:
+                reached.add(w)
+            elif w not in visited:
+                visited.add(w)
+                queue.append(w)
+    return reached
+
+
 def check_connectivity(
     graph: WarehouseGraph, target_vertices: set[VertexId] | None = None
 ) -> ConnectivityReport:
@@ -152,8 +171,12 @@ def check_well_formedness(graph: WarehouseGraph, fleet_size: int) -> WellFormedn
     if endpoint_count_ok:
         endpoint_set = set(endpoints)
         for v in endpoints:
+            # One search from v, entering an endpoint but never leaving it, finds every w
+            # with a v->w path avoiding the other endpoints. Only the pairs it misses are
+            # searched again, for their blocker.
+            reached = _endpoints_reached_avoiding_others(graph, v, endpoint_set)
             for w in endpoints:
-                if v == w:
+                if v == w or w in reached:
                     continue
                 others = endpoint_set - {v, w}
                 if others and not _reachable_avoiding(graph, v, w, others):

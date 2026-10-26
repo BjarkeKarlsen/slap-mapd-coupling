@@ -26,7 +26,11 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageM
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.evaluation.evaluator import run_episode
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_and_validate
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    fleet_defaults,
+    generate_and_validate,
+)
 
 FLEET_SIZE = 6
 
@@ -39,18 +43,7 @@ ILLUSTRATIVE_OBSERVATION_DEPTH = 2  # d_obs
 
 
 def build_instance() -> WarehouseGraph:
-    params = GeneratorParams(
-        num_aisles=5,
-        aisle_length=4,
-        num_cross_aisles=3,
-        one_way_fraction=0.0,
-        default_edge_cost=1.0,
-        wait_cost=0.2,
-        num_storage_vertices=8,
-        num_delivery_vertices=3,
-        num_endpoints=FLEET_SIZE,
-        seed=1,
-    )
+    params = GeneratorParams(**fleet_defaults(FLEET_SIZE), wait_cost=0.2)
     graph, report = generate_and_validate(params, fleet_size=FLEET_SIZE, require_well_formed=False)
     if not report.accepted:
         raise RuntimeError(f"Instance rejected: {report.model_dump_json(indent=2)}")
