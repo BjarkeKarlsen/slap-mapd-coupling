@@ -62,6 +62,13 @@ and the put-away rule of the storage mode decides which shelves it goes to, with
 already on a shelf (storage/arrival.py). An order waiting for stock is served by stage 1 of the
 next step, after the arrival.
 
+Under the refill rule (config.stock_rule == "refill") each SKU counts the units ordered since its
+last refill, picked, promised and waited for alike, from the moment its line is released. At an
+arrival a SKU gets one refill of Q units for every Q counted, and the remainder carries over.
+Every refill is one put-away of Q units to one shelf. Stock on a shelf or on its way, less the
+units lines still wait for, then stays within (S_k - Q, S_k] right after each arrival, S_k being
+the starting stock.
+
 A pick task promises its units when it is created and takes them at pickup. Until then they are
 reserved, r_t: they stay on the shelf and take up its room, but no other line can take them. So
 the pickup rule serves lines from x_t - r_t, and the shelf room frees only when the robot picks
@@ -69,7 +76,7 @@ the units up. The arrival amounts count x_t - r_t, the units still free to promi
 
 When robots carry the put-away (config.stock_putaway == "robots", sec:pf:storage) the arriving
 units do not reach the shelf at the arrival. Every (SKU, shelf) the rule put units on gives one
-put-away task, released at the arrival, from the receiving vertex nearest the shelf (ties by
+put-away task, or under the refill rule every refill does, released at the arrival, from the receiving vertex nearest the shelf (ties by
 vertex id) to the shelf, in SKU id then vertex id order. Until it is delivered its units are on
 their way, x^in_t: they take up room on the shelf, so the rule sees shelf stock plus stock on
 its way, but no line can take them. On delivery they move onto the shelf. Free agents take picks
@@ -113,6 +120,7 @@ from slap_mapd_coupling.storage.arrival import (
     arrival_amounts,
     get_putaway_rule,
     nearest_receiving_point,
+    refill_amounts,
 )
 from slap_mapd_coupling.storage.base import EdgeKey
 from slap_mapd_coupling.storage.registry import get_storage_rule
@@ -236,6 +244,9 @@ class EpisodeLog:
     lines_waited: set[tuple[int, int]] = field(default_factory=set)
     # Arrival stock model only: the units that arrived at each arrival, placed or not.
     arrived_units_by_update: list[int] = field(default_factory=list)
+    # Refill rule only: the refills of each arrival, placed or not, and every SKU that got one.
+    refills_by_update: list[int] = field(default_factory=list)
+    refilled_skus: set[SkuId] = field(default_factory=set)
     # Arrival stock model only: the arriving units that fit on no shelf at each arrival.
     unplaced_units_by_update: list[int] = field(default_factory=list)
     # Arrival stock model only: the units F_fix placed off their SKU's home shelf at each
@@ -449,6 +460,8 @@ class WarehouseMAPDEnv:
         }
         # Robot put-away only: x^in_t, the units on their way to each shelf.
         self._in_transit: dict[SkuId, dict[VertexId, int]] = {}
+        # Refill rule only: the units of each SKU ordered since its last refill.
+        self._ordered_since_refill: dict[SkuId, int] = dict.fromkeys(self._sku_ids, 0)
         # Arrival stock model only: r_t, the units on each shelf promised to picks not yet
         # picked up.
         self._reserved: dict[SkuId, dict[VertexId, int]] = {}
@@ -629,26 +642,33 @@ class WarehouseMAPDEnv:
         template model, and every storage rule closes it, since Delta is the arrival period.
         Orders still waiting are served by stage 1 of the next step, not here."""
         assert self._putaway_rule is not None
-        assert self.config.stock_margin is not None
-        assert self.config.stock_floor is not None
         estimates = self._estimator.close_window(delta)
-        # q^wait_t(k), the units of k that lines still wait for.
-        waiting_by_sku: dict[SkuId, int] = {}
-        for line in self._waiting_orders:
-            waiting_by_sku[line.sku] = waiting_by_sku.get(line.sku, 0) + line.missing
         robots = self.config.stock_putaway == "robots"
         # The arrivals count the stock on its way as stock, so it is not ordered again.
         given = self._shelf_and_transit() if robots else self.storage
-        # Reserved units are already promised, so the amounts count only the free ones. The
-        # rule still sees them, because they take up room until they are picked up.
-        amounts = arrival_amounts(
-            self._unreserved(given),
-            estimates.units,
-            delta,
-            self.config.stock_margin,
-            self.config.stock_floor,
-            waiting_by_sku,
-        )
+        refill_units = self.config.refill_units
+        if refill_units is not None:
+            # The units waited for are counted already, from when their line was released.
+            amounts, self._ordered_since_refill = refill_amounts(
+                self._ordered_since_refill, refill_units
+            )
+        else:
+            assert self.config.stock_margin is not None
+            assert self.config.stock_floor is not None
+            # q^wait_t(k), the units of k that lines still wait for.
+            waiting_by_sku: dict[SkuId, int] = {}
+            for line in self._waiting_orders:
+                waiting_by_sku[line.sku] = waiting_by_sku.get(line.sku, 0) + line.missing
+            # Reserved units are already promised, so the amounts count only the free ones. The
+            # rule still sees them, because they take up room until they are picked up.
+            amounts = arrival_amounts(
+                self._unreserved(given),
+                estimates.units,
+                delta,
+                self.config.stock_margin,
+                self.config.stock_floor,
+                waiting_by_sku,
+            )
         # With robot put-away the rule sees shelf stock plus stock on its way, so the room
         # of a put-away not yet delivered stays reserved.
         # Only the options a run sets are passed, so a rule written before them still works.
@@ -659,6 +679,9 @@ class WarehouseMAPDEnv:
             options["trip"] = True
         if self.config.storage_mode == "random":
             options["rng"] = self._putaway_rng
+        if refill_units is not None:
+            options["refill_units"] = refill_units
+            options["unit_estimate"] = estimates.units
         result = self._putaway_rule(
             given,
             self.graph,
@@ -682,18 +705,21 @@ class WarehouseMAPDEnv:
             for sku_id, v, units in sorted(placed, key=lambda p: (p[0], p[1])):
                 per_vertex = self._in_transit.setdefault(sku_id, {})
                 per_vertex[v] = per_vertex.get(v, 0) + units
-                self.tasks.append(
-                    Task(
-                        task_id=self._next_task_id,
-                        release_time=arrival_t,
-                        pickup_vertex=nearest_receiving_point(self.graph, v, receiving),
-                        delivery_vertex=v,
-                        sku=sku_id,
-                        quantity=units,
-                        kind="putaway",
+                # One put-away per refill, so two refills on one shelf are two trips.
+                loads = [units] if refill_units is None else [refill_units] * (units // refill_units)
+                for load in loads:
+                    self.tasks.append(
+                        Task(
+                            task_id=self._next_task_id,
+                            release_time=arrival_t,
+                            pickup_vertex=nearest_receiving_point(self.graph, v, receiving),
+                            delivery_vertex=v,
+                            sku=sku_id,
+                            quantity=load,
+                            kind="putaway",
+                        )
                     )
-                )
-                self._next_task_id += 1
+                    self._next_task_id += 1
         else:
             for sku_id, v, units in placed:
                 self._lots.setdefault((sku_id, v), []).append([arrival_t, units])
@@ -701,6 +727,9 @@ class WarehouseMAPDEnv:
         if self.config.cold_stock_top_k is not None:
             self.log.cold_prime_share_by_update.append(self._cold_prime_share(arrival_t))
         self.log.arrived_units_by_update.append(result.arrived_units)
+        if refill_units is not None:
+            self.log.refills_by_update.append(result.arrived_units // refill_units)
+            self.log.refilled_skus.update(k for k, units in amounts.items() if units > 0)
         self.log.unplaced_units_by_update.append(result.unplaced_units)
         self.log.overflow_units_by_update.append(result.overflow_units)
         self.log.split_skus_by_update.append(_split_skus(self.storage))
@@ -838,8 +867,11 @@ class WarehouseMAPDEnv:
             lines = self._draw_single_line_orders(t, ranked)
         else:
             lines = self._draw_order_lines(t, ranked)
+        counting = self.config.refill_units is not None
         for line in lines:
             self._estimator.record_order(line.sku, line.missing)
+            if counting:
+                self._ordered_since_refill[line.sku] += line.missing
         self._waiting_orders.extend(lines)
 
         # The lines are served from the free units, x_t - r_t.

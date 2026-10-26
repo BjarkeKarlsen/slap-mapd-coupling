@@ -23,7 +23,7 @@ SEEDS=${SEEDS:-50}
 # config's Delta. The demand settings are fixed by the thesis ([A34]), so their sweep is a
 # robustness check only. cold_stock_top_k changes a measure, not a run, so it is not swept.
 SWEEPS=(
-    "arrival.margin|fixed demand|0.25 0.5 1.0 1.5 2.0"
+    "arrival.refill_units|fixed demand random|15 30 60"
     "storage_rule.epoch_length|fixed demand congestion|50 100 200 400"
     "storage_rule.congestion_weight|congestion|0.0 0.5 1.0 2.0 3.0 4.0"
     "demand.skew|fixed demand|0.5 1.0 1.5"

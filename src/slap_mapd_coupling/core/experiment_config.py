@@ -29,6 +29,10 @@ ReceivingVertices = Literal["delivery", "receiving"]
 # "robots": every (SKU, shelf) of an arrival is a put-away task, and the units are on their
 # way, x^in_t, until it is delivered (sec:pf:storage).
 StockPutaway = Literal["instant", "robots"]
+# How much stock arrives, arrival model only. "topup": every SKU is filled up to its last
+# period's orders, with a margin and a floor. "refill": stock is replaced a refill of Q units at a
+# time, once Q units have been ordered since the last refill (the (R, nQ) policy).
+StockRule = Literal["topup", "refill"]
 
 
 class LinesPerOrder(BaseModel):
@@ -106,13 +110,20 @@ class ExperimentConfig(BaseModel):
     demand_rotation_shift: PositiveInt | None = None
 
     # The stock model. Under "arrival" Delta is the arrival period for every storage rule,
-    # F_fix included, and nothing is relocated, so there is no nu. Each SKU is filled up to
-    # max(stock_floor, ceil((1 + stock_margin) * its orders in the last period)). The margin
-    # epsilon, the floor and the receiving vertices are study parameters, so the arrival model
-    # takes no defaults, and "template", today's model, is the default.
+    # F_fix included, and nothing is relocated, so there is no nu. Under stock_rule "topup" each
+    # SKU is filled up to max(stock_floor, ceil((1 + stock_margin) * its orders in the last
+    # period)). Under "refill" a SKU gets floor(counted / refill_units) refills of refill_units
+    # units at each arrival, counted being its units ordered since its last refill, and the
+    # remainder carries over. The service level only sizes the starting stock (training/spec.py),
+    # and is kept here so a run records it. The margin epsilon, the floor, Q, the service level
+    # and the receiving vertices are study parameters, so the arrival model takes no defaults,
+    # and "template", today's model, is the default.
     stock_model: StockModel = "template"
+    stock_rule: StockRule = "topup"
     stock_margin: NonNegativeFloat | None = None  # epsilon
     stock_floor: PositiveInt | None = None  # the fewest units a SKU is filled up to
+    refill_units: PositiveInt | None = None  # Q
+    service_level: float | None = Field(default=None, gt=0.0, lt=1.0)
     stock_receiving: ReceivingVertices | None = None  # V_rcv
     stock_putaway: StockPutaway = "instant"
     # Order lines, arrival model only. An order is lines of distinct SKUs, each asking for a
@@ -153,22 +164,29 @@ class ExperimentConfig(BaseModel):
         """The template model has no arrivals, so it takes no stock settings. The arrival model
         needs all of them, and Delta under every storage rule, and it relocates nothing, so it
         takes no nu."""
-        stock = ("stock_margin", "stock_floor", "stock_receiving")
+        topup = ("stock_margin", "stock_floor")
+        refill = ("refill_units", "service_level")
         if self.units_per_line is not None and self.units_per_line[0] > self.units_per_line[1]:
             raise ValueError(f"units_per_line = {self.units_per_line} must be (low, high).")
         if self.stock_model == "template":
             if self.stock_putaway != "instant":
                 raise ValueError("stock_putaway only applies to stock_model='arrival'.")
+            if self.stock_rule != "topup":
+                raise ValueError("stock_rule only applies to stock_model='arrival'.")
             for name in ("lines_per_order", "units_per_line", "cold_stock_top_k"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")
-            for name in stock:
+            for name in (*topup, *refill, "stock_receiving"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")
             return self
-        for name in (*stock, "storage_epoch_length"):
+        needed, unused = (topup, refill) if self.stock_rule == "topup" else (refill, topup)
+        for name in (*needed, "stock_receiving", "storage_epoch_length"):
             if getattr(self, name) is None:
                 raise ValueError(f"stock_model='arrival' requires {name}.")
+        for name in unused:
+            if getattr(self, name) is not None:
+                raise ValueError(f"{name} does not apply to stock_rule={self.stock_rule!r}.")
         if self.reassignment_cap is not None:
             raise ValueError(
                 "stock_model='arrival' relocates nothing, so do not set reassignment_cap (nu)."

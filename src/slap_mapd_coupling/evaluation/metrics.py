@@ -39,6 +39,8 @@ _PUTAWAY_FIELDS = (
     "mean_split_skus",
     "unplaced_units",
     "overflow_units",
+    "num_refills",
+    "num_refilled_skus",
 )
 _ORDER_FIELDS = (
     "mean_order_completion",
@@ -206,6 +208,10 @@ class RunMetrics(BaseModel):
     unplaced_units: NonNegativeInt = 0  # arriving units that fit on no shelf, over the episode
     # Units F_fix placed off their SKU's home shelf, over the episode. 0 under the adaptive rules.
     overflow_units: NonNegativeInt = 0
+    # Refill rule only, 0 under the top-up rule: the refills over the episode, placed or not,
+    # which are the storage decisions of a run, and how many SKUs got at least one.
+    num_refills: NonNegativeInt = 0
+    num_refilled_skus: NonNegativeInt = 0
 
     # --- shelf fill, arrival stock model only. Diagnostic, not in the thesis ---
     # After each arrival, stock on its way counted, the used capacity of a shelf over its

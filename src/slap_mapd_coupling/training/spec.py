@@ -14,11 +14,13 @@ study parameter.
 
 from __future__ import annotations
 
+import functools
 import math
 import statistics
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
+import numpy as np
 import yaml  # type: ignore[import-untyped]
 from pydantic import (
     BaseModel,
@@ -38,6 +40,7 @@ from slap_mapd_coupling.core.experiment_config import (
     LinesPerOrder,
     ReceivingVertices,
     StockPutaway,
+    StockRule,
     StorageMode,
 )
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
@@ -66,7 +69,10 @@ class StorageSettings(BaseModel):
     """The SKUs and where they start.
 
     There are `num_skus` SKUs, named by `sku_names` when it is given and sku_000, sku_001 and so
-    on otherwise. The popularity ranking of `DemandSettings` starts from the order of that list,
+    on otherwise. Under the refill rule `start_fill` may be given instead of `num_skus`: the
+    number of SKUs is then derived, the fewest whose starting stock fills that share of the
+    shelves' capacity, so every warehouse starts equally full whatever its number of storage
+    vertices (`derived_num_skus`). `sku_names` then names as many of the first SKUs as it has. The popularity ranking of `DemandSettings` starts from the order of that list,
     so the first name is the most popular at t = 0. Their unit capacities b_k cycle through `unit_capacities`, so the SKUs differ in size.
     Every storage vertex has the capacity `vertex_capacity`. Every SKU starts with
     `initial_units` units, all at one storage vertex, chosen by `initial_placement`:
@@ -79,11 +85,19 @@ class StorageSettings(BaseModel):
       and the SKU at rank r goes to vertex number r // ceil(|K| / |V_str|) in that order, so the
       most popular SKUs fill the vertex nearest the delivery vertices first.
     - "demand_sized_blocks": the blocks of "demand_blocks", with each SKU's units sized to its
-      expected units ordered over one arrival period, for the arrival stock model. The SKU at
-      rank r starts with max(initial_units, ceil((1 + epsilon) * lambda_task * Delta * q_bar *
-      w_r)) units, w_r being its popularity at t = 0 and q_bar the mean of `units_per_line` (1
-      without it), so every SKU holds at least `initial_units`. It needs
-      the `arrival` section for epsilon and the `storage_rule` section for Delta.
+      expected units ordered over one arrival period, for the arrival stock model. Under the
+      top-up rule the SKU at rank r starts with max(initial_units, ceil((1 + epsilon) *
+      lambda_task * Delta * q_bar * w_r)) units, w_r being its popularity at t = 0 and q_bar the
+      mean of `units_per_line` (1 without it), so every SKU holds at least `initial_units`.
+      Under the refill rule it starts with S_k = Q + the service-level quantile of its units
+      ordered in one period at its t = 0 popularity, the quantile taken from a simulation of the
+      order process (`period_demand_quantiles`), and takes no `initial_units`. It needs
+      the `arrival` section and the `storage_rule` section for Delta.
+
+    Under the refill rule `vertex_capacity` may be left out, and is then derived: the most room
+    the starting stock of the SKUs of one storage vertex takes, sum of S_k * b_k, rounded up.
+    A SKU's stock plus its stock on the way stays at most S_k, so F_fix, which puts refills on
+    the home shelf first, has room for them there.
 
     A new task picks a SKU in stock, then a vertex holding it, so more SKUs mean more distinct
     pickups.
@@ -91,18 +105,26 @@ class StorageSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    num_skus: PositiveInt
+    num_skus: PositiveInt | None = None
+    # The share of the shelves' capacity the starting stock fills, refill rule only. Set it or
+    # num_skus, not both.
+    start_fill: float | None = Field(default=None, gt=0.0, le=1.0)
     sku_names: tuple[str, ...] | None = None
     unit_capacities: tuple[PositiveFloat, ...] = Field(min_length=1)
-    vertex_capacity: PositiveFloat
-    initial_units: PositiveInt
+    # None derives it from the starting stock, refill rule only.
+    vertex_capacity: PositiveFloat | None = None
+    # The units every SKU starts with, and under the top-up rule its floor. The refill rule
+    # sizes the starting stock by the service level and takes none.
+    initial_units: PositiveInt | None = None
     initial_placement: Literal["by_number", "demand_blocks", "demand_sized_blocks"] = "by_number"
 
     @model_validator(mode="after")
     def _one_name_per_sku(self) -> "StorageSettings":
+        if (self.num_skus is None) == (self.start_fill is None):
+            raise ValueError("Set exactly one of storage.num_skus and storage.start_fill.")
         if self.sku_names is None:
             return self
-        if len(self.sku_names) != self.num_skus:
+        if self.num_skus is not None and len(self.sku_names) != self.num_skus:
             raise ValueError(
                 f"sku_names has {len(self.sku_names)} names for num_skus={self.num_skus}."
             )
@@ -110,11 +132,14 @@ class StorageSettings(BaseModel):
             raise ValueError("sku_names must be distinct and non-empty.")
         return self
 
-    def sku_ids(self) -> list[SkuId]:
-        """The SKU ids in list order, the order the popularity ranking starts from."""
-        if self.sku_names is not None:
-            return list(self.sku_names)
-        return [f"sku_{i:03d}" for i in range(self.num_skus)]
+    def sku_ids(self, count: int | None = None) -> list[SkuId]:
+        """The SKU ids in list order, the order the popularity ranking starts from. `count` is
+        the number of SKUs when it is derived from `start_fill`, and the first ones take the
+        names of `sku_names`."""
+        count = self.num_skus if count is None else count
+        assert count is not None
+        names = list(self.sku_names or ())[:count]
+        return names + [f"sku_{i:03d}" for i in range(len(names), count)]
 
 
 class DemandSettings(BaseModel):
@@ -163,17 +188,27 @@ class ArrivalSettings(BaseModel):
     template model, where stock never runs out.
 
     Every Delta steps stock arrives at the `receiving` vertices, and the storage rule decides
-    which shelves it goes to. Each SKU is filled up to
-    max(initial_units, ceil((1 + margin) * its orders in the last period)), so `initial_units`
-    of the `storage` section is the floor. `margin` is epsilon. Neither has a default, because
-    both are study parameters. `receiving: receiving` needs `num_receiving_vertices` above 0
-    in the `instance` section. `putaway: robots` makes the robots carry the stock to its
-    shelves (sec:pf:storage).
+    which shelves it goes to. How much arrives is set by `rule`:
+
+    - "topup": each SKU is filled up to max(initial_units, ceil((1 + margin) * its orders in the
+      last period)), so `initial_units` of the `storage` section is the floor. `margin` is
+      epsilon.
+    - "refill": stock is replaced a refill at a time. A SKU gets one refill of `refill_units`
+      (Q) units for every Q units ordered since its last refill, each refill one put-away to one
+      shelf. It starts with Q plus the `service_level` quantile of a period's orders (see
+      `StorageSettings`), the (R, nQ) policy of inventory control.
+
+    None of them has a default, because all are study parameters. `receiving: receiving` needs
+    `num_receiving_vertices` above 0 in the `instance` section. `putaway: robots` makes the
+    robots carry the stock to its shelves (sec:pf:storage).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    margin: NonNegativeFloat
+    rule: StockRule = "topup"
+    margin: NonNegativeFloat | None = None
+    refill_units: PositiveInt | None = None
+    service_level: float | None = Field(default=None, gt=0.0, lt=1.0)
     receiving: ReceivingVertices
     putaway: StockPutaway = "instant"
     # Order lines (tab:evalparams). None is one line of one unit per order.
@@ -182,15 +217,36 @@ class ArrivalSettings(BaseModel):
     # The SKUs that count as popular in the cold-stock measure. None leaves it off.
     cold_stock_top_k: PositiveInt | None = None
 
+    @model_validator(mode="after")
+    def _rule_settings(self) -> "ArrivalSettings":
+        """The top-up rule takes the margin, the refill rule Q and the service level."""
+        needed, unused = (
+            (("margin",), ("refill_units", "service_level"))
+            if self.rule == "topup"
+            else (("refill_units", "service_level"), ("margin",))
+        )
+        for name in needed:
+            if getattr(self, name) is None:
+                raise ValueError(f"arrival.rule {self.rule!r} needs arrival.{name}.")
+        for name in unused:
+            if getattr(self, name) is not None:
+                raise ValueError(f"arrival.{name} does not apply to arrival.rule {self.rule!r}.")
+        return self
+
 
 class StockSizing(NamedTuple):
     """What "demand_sized_blocks" sizes the starting stock by: lambda_task, Delta, epsilon and
-    q_bar, the mean units per line."""
+    q_bar, the mean units per line, under the top-up rule. Under the refill rule Q, the service
+    level and the order lines, which the simulated order process draws by, with margin None."""
 
     arrival_rate: float
     epoch_length: int
-    margin: float
+    margin: float | None
     mean_units: float = 1.0
+    refill_units: int | None = None
+    service_level: float | None = None
+    lines_per_order: LinesPerOrder | None = None
+    units_per_line: tuple[int, int] | None = None
 
 
 class ExperimentSettings(BaseModel):
@@ -300,6 +356,32 @@ class TrainingSpec(BaseModel):
             raise ValueError(
                 "initial_placement 'demand_sized_blocks' needs the arrival section for its margin."
             )
+        refill = self.arrival is not None and self.arrival.rule == "refill"
+        if refill:
+            if self.storage.initial_placement != "demand_sized_blocks":
+                raise ValueError(
+                    "arrival.rule 'refill' sizes the starting stock by the service level, so it "
+                    "needs initial_placement 'demand_sized_blocks'."
+                )
+            if self.storage.initial_units is not None:
+                raise ValueError(
+                    "arrival.rule 'refill' sizes the starting stock by the service level and "
+                    "has no floor, so storage.initial_units does not apply."
+                )
+            if self.storage.start_fill is not None and self.storage.vertex_capacity is not None:
+                raise ValueError(
+                    "storage.start_fill derives the number of SKUs at the derived shelf "
+                    "capacity, so it takes no storage.vertex_capacity."
+                )
+        else:
+            if self.storage.start_fill is not None:
+                raise ValueError("storage.start_fill applies to arrival.rule 'refill' only.")
+            if self.storage.initial_units is None:
+                raise ValueError("storage.initial_units is needed unless arrival.rule is 'refill'.")
+            if self.storage.vertex_capacity is None:
+                raise ValueError(
+                    "storage.vertex_capacity can only be derived under arrival.rule 'refill'."
+                )
         return self
 
     @model_validator(mode="after")
@@ -403,13 +485,72 @@ def build_storage(
     `StorageSettings`. `demand` gives the popularity ranking "demand_blocks" and
     "demand_sized_blocks" place by, and None ranks the SKUs in list order, as the uniform draw
     has no ranking. "demand_sized_blocks" needs `sizing`. Raises if the initial counts break the
-    capacity constraint."""
+    capacity constraint. With `start_fill` the number of SKUs is derived first."""
+    count = storage.num_skus
+    if count is None:
+        count = derived_num_skus(storage, graph, demand, sizing)
+    skus, capacity, counts, _ = _stock_for(storage, graph, demand, sizing, count)
+    return skus, capacity, counts
+
+
+def derived_num_skus(
+    storage: StorageSettings,
+    graph: WarehouseGraph,
+    demand: DemandSettings | None,
+    sizing: StockSizing | None,
+) -> int:
+    """The fewest SKUs whose starting stock fills `start_fill` of the shelves' capacity, by
+    bisection. The fill rises with the number of SKUs but not strictly, since the derived
+    capacity follows the fullest shelf, so the count found is the first in the bisection with
+    fill at least `start_fill`, and the fill it gives is reported by `starting_fill`."""
+    assert storage.start_fill is not None
+    slots = sum(1 for vertex in graph.vertices.values() if vertex.role.storage)
+    low, high = 1, 1
+    while starting_fill(storage, graph, demand, sizing, high) < storage.start_fill:
+        low, high = high + 1, high * 2
+        if high > 64 * slots:
+            raise ValueError(f"no number of SKUs fills {storage.start_fill} of the shelves.")
+    while low < high:
+        middle = (low + high) // 2
+        if starting_fill(storage, graph, demand, sizing, middle) >= storage.start_fill:
+            high = middle
+        else:
+            low = middle + 1
+    return low
+
+
+def starting_fill(
+    storage: StorageSettings,
+    graph: WarehouseGraph,
+    demand: DemandSettings | None,
+    sizing: StockSizing | None,
+    count: int,
+) -> float:
+    """The share of the shelves' capacity the starting stock of `count` SKUs fills."""
+    _, capacity, _, used = _stock_for(storage, graph, demand, sizing, count)
+    return sum(used.values()) / sum(capacity.values())
+
+
+def _stock_for(
+    storage: StorageSettings,
+    graph: WarehouseGraph,
+    demand: DemandSettings | None,
+    sizing: StockSizing | None,
+    count: int | None,
+) -> tuple[
+    dict[SkuId, SkuType],
+    dict[VertexId, float],
+    dict[SkuId, dict[VertexId, int]],
+    dict[VertexId, float],
+]:
+    """`build_storage` for `count` SKUs, with the room the starting stock takes on each
+    storage vertex."""
     storage_vertices = sorted(v for v, vertex in graph.vertices.items() if vertex.role.storage)
     skus: dict[SkuId, SkuType] = {}
-    for i, sku_id in enumerate(storage.sku_ids()):
+    for i, sku_id in enumerate(storage.sku_ids(count)):
         unit_capacity = storage.unit_capacities[i % len(storage.unit_capacities)]
         skus[sku_id] = SkuType(sku_id=sku_id, unit_capacity=unit_capacity)
-    units = dict.fromkeys(skus, storage.initial_units)
+    units = dict.fromkeys(skus, storage.initial_units or 0)
     if storage.initial_placement in ("demand_blocks", "demand_sized_blocks"):
         home = _demand_blocks(list(skus), graph, storage_vertices, demand)
     else:
@@ -419,20 +560,28 @@ def build_storage(
     if storage.initial_placement == "demand_sized_blocks":
         if sizing is None:
             raise ValueError("initial_placement 'demand_sized_blocks' needs the stock sizing.")
-        units = _sized_units(list(skus), storage.initial_units, demand, sizing)
+        if sizing.refill_units is None:
+            assert storage.initial_units is not None  # TrainingSpec checks the top-up rule's
+            units = _sized_units(list(skus), storage.initial_units, demand, sizing)
+        else:
+            units = refill_starting_stock(list(skus), demand, sizing)
     counts: dict[SkuId, dict[VertexId, int]] = {}
     used = dict.fromkeys(storage_vertices, 0.0)
     for sku_id, sku in skus.items():
         counts[sku_id] = {home[sku_id]: units[sku_id]}
         used[home[sku_id]] += sku.unit_capacity * units[sku_id]
-    over = {v: u for v, u in used.items() if u > storage.vertex_capacity}
+    capacity = storage.vertex_capacity
+    if capacity is None:
+        # Derived: the room the starting stock of the fullest vertex takes, rounded up.
+        capacity = float(math.ceil(max(used.values()) - 1e-9))
+    over = {v: u for v, u in used.items() if u > capacity}
     if over:
         raise ValueError(
-            f"The initial counts do not fit vertex_capacity={storage.vertex_capacity}: "
+            f"The initial counts do not fit vertex_capacity={capacity}: "
             f"used capacity by vertex {over}. Lower num_skus or initial_units, or raise "
             "vertex_capacity."
         )
-    return skus, {v: storage.vertex_capacity for v in storage_vertices}, counts
+    return skus, dict.fromkeys(storage_vertices, capacity), counts, used
 
 
 def _demand_blocks(
@@ -487,6 +636,88 @@ def _sized_units(
     }
 
 
+# The periods of the order process simulated for the service-level quantile, and the seed of
+# that simulation. Fixed, so a spec always gives the same starting stock, and apart from every
+# run's seeds, so the starting stock is the same under every run seed and storage rule.
+QUANTILE_PERIODS = 20_000
+QUANTILE_SEED = 7
+_QUANTILE_BLOCK = 256
+
+
+@functools.lru_cache(maxsize=64)
+def period_demand_quantiles(
+    num_skus: int,
+    skew: float,
+    arrival_rate: float,
+    epoch_length: int,
+    service_level: float,
+    lines_per_order: LinesPerOrder | None = None,
+    units_per_line: tuple[int, int] | None = None,
+    periods: int = QUANTILE_PERIODS,
+    seed: int = QUANTILE_SEED,
+) -> list[int]:
+    """The `service_level` quantile of the units ordered in one period of `epoch_length` steps,
+    per popularity rank, rank 0 first, from a simulation of the order process of
+    environment/multi_agent_env.py::_draw_order_lines with the ranking held still.
+
+    Orders arrive as Poisson(arrival_rate / mean lines) per step, so Poisson(epoch_length *
+    arrival_rate / mean lines) per period. Each has 1 + Poisson(mean - 1) lines of distinct
+    ranks drawn by the Zipf weights without replacement, and each line a quantity uniform on
+    `units_per_line`. The quantile is the smallest count whose share of periods at or below it
+    is at least the service level, so no distribution is assumed."""
+    rng = np.random.default_rng(seed)
+    weights = np.asarray(zipf_weights(num_skus, skew))
+    mean_lines = 1.0 if lines_per_order is None else lines_per_order.mean
+    low, high = units_per_line or (1, 1)
+    orders = rng.poisson(epoch_length * arrival_rate / mean_lines, size=periods)
+    period = np.repeat(np.arange(periods), orders)
+    if lines_per_order is None:
+        ranks = rng.choice(num_skus, size=period.size, p=weights)
+        quantities = rng.integers(low, high + 1, size=period.size)
+    else:
+        lines = np.minimum(1 + rng.poisson(mean_lines - 1.0, size=period.size), num_skus)
+        drawn = [rng.choice(num_skus, size=count, replace=False, p=weights) for count in lines]
+        ranks = np.concatenate(drawn) if drawn else np.zeros(0, dtype=np.int64)
+        period = np.repeat(period, lines)
+        quantities = rng.integers(low, high + 1, size=ranks.size)
+    # The units per period and rank, a block of ranks at a time, so a warehouse with thousands
+    # of SKUs never holds the whole table.
+    quantiles: list[int] = []
+    for start in range(0, num_skus, _QUANTILE_BLOCK):
+        stop = min(start + _QUANTILE_BLOCK, num_skus)
+        inside = (ranks >= start) & (ranks < stop)
+        units = np.zeros((periods, stop - start), dtype=np.int32)
+        np.add.at(units, (period[inside], ranks[inside] - start), quantities[inside])
+        block = np.quantile(units, service_level, axis=0, method="inverted_cdf")
+        quantiles.extend(int(q) for q in block)
+    return quantiles
+
+
+def refill_starting_stock(
+    sku_ids: list[SkuId], demand: DemandSettings | None, sizing: StockSizing
+) -> dict[SkuId, int]:
+    """S_k = Q + the service-level quantile of a period's units of k at its t = 0 popularity,
+    the starting units of every SKU under the refill rule (see `StorageSettings`). Without a
+    demand section every SKU weighs the same."""
+    assert sizing.refill_units is not None and sizing.service_level is not None
+    ranked = popularity_ranking(
+        sku_ids,
+        0,
+        None if demand is None else demand.rotation_period,
+        None if demand is None else demand.rotation_shift,
+    )
+    quantiles = period_demand_quantiles(
+        len(ranked),
+        0.0 if demand is None else demand.skew,
+        sizing.arrival_rate,
+        sizing.epoch_length,
+        sizing.service_level,
+        sizing.lines_per_order,
+        sizing.units_per_line,
+    )
+    return {sku_id: sizing.refill_units + quantiles[rank] for rank, sku_id in enumerate(ranked)}
+
+
 def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
     """What the starting stock of `spec` is sized by, or None when it is not sized."""
     if spec.storage.initial_placement != "demand_sized_blocks":
@@ -496,7 +727,14 @@ def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
     units = spec.arrival.units_per_line
     mean_units = 1.0 if units is None else (units[0] + units[1]) / 2
     return StockSizing(
-        spec.arrival_rate, spec.storage_rule.epoch_length, spec.arrival.margin, mean_units
+        spec.arrival_rate,
+        spec.storage_rule.epoch_length,
+        spec.arrival.margin,
+        mean_units,
+        spec.arrival.refill_units,
+        spec.arrival.service_level,
+        spec.arrival.lines_per_order,
+        units,
     )
 
 
@@ -574,8 +812,13 @@ def build_experiment_config(
             rule.congestion_weight if rule is not None and storage_mode == "congestion" else None
         ),
         stock_model="template" if arrival is None else "arrival",
+        stock_rule="topup" if arrival is None else arrival.rule,
         stock_margin=None if arrival is None else arrival.margin,
-        stock_floor=None if arrival is None else spec.storage.initial_units,
+        stock_floor=(
+            None if arrival is None or arrival.rule != "topup" else spec.storage.initial_units
+        ),
+        refill_units=None if arrival is None else arrival.refill_units,
+        service_level=None if arrival is None else arrival.service_level,
         stock_receiving=None if arrival is None else arrival.receiving,
         stock_putaway="instant" if arrival is None else arrival.putaway,
         lines_per_order=None if arrival is None else arrival.lines_per_order,
