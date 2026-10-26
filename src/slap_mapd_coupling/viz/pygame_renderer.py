@@ -724,6 +724,7 @@ class WarehouseRenderer:
         screen.blit(self._background, (0, 0))
         debug = congestion(history)
         ranks = {k: i for i, k in enumerate(stock["ranking"])} if stock else {}
+        self._sku_count = len(ranks)
         shelves = stock["shelves"] if stock else {}
         docks = stock.get("docks", {}) if stock else {}
         screen.set_clip(self._map_rect())
@@ -1012,6 +1013,8 @@ class WarehouseRenderer:
         right, the value in `colour` when one is given,
         ("cells", texts, colour, action): one line of a table, the texts in fixed columns,
         ("columns", titles): the column titles of a table, each a button that sorts by it,
+        ("sku", rank, name, amount, action): a SKU in a box, its popularity rank first in a
+        square of the rank's colour, then its name, then the amount in a box of its own,
         ("bar", label, share, value, colour): a label and its value, and under them a bar
         filled to `share`,
         ("note", text, colour): a line of plain text.
@@ -1024,6 +1027,7 @@ class WarehouseRenderer:
         heights = {
             "title": 34, "heading": 28, "stat": 21, "cells": 21, "columns": 24, "note": 21,
             "bar": 32,
+            "sku": 29,
         }  # fmt: skip
         for row in rows:
             kind = row[0]
@@ -1042,6 +1046,9 @@ class WarehouseRenderer:
                 screen.blit(self._font.render(_pretty(label), True, text), (left, y))
                 shown = self._value.render(str(value), True, colour or text)
                 screen.blit(shown, (right - shown.get_width(), y))
+            elif kind == "sku":
+                _, rank, sku, amount, action = row
+                self._draw_sku(pygame.Rect(left, y, right - left, 25), rank, sku, amount)
             elif kind == "bar":
                 _, label, share, value, colour = row
                 screen.blit(self._font.render(_pretty(label), True, text), (left, y))
@@ -1074,6 +1081,34 @@ class WarehouseRenderer:
             if action is not None:
                 self._hit(pygame.Rect(card.left, y - 2, card.width, height), action)
             y += height
+
+    def _draw_sku(self, box, rank: int, sku: str, amount: Any) -> None:
+        """One boxed SKU row: the rank in its colour, the name, the amount."""
+        pygame = self._pygame
+        screen = self._screen
+        text = _hex(theme.PALETTE["text"])
+        pygame.draw.rect(screen, _PAPER, box, border_radius=6)
+        pygame.draw.rect(screen, _RULE, box, 1, border_radius=6)
+        colour = rank_colour(rank, self._sku_count)
+        square = pygame.Rect(box.left, box.top, 34, box.height)
+        pygame.draw.rect(screen, colour, square, border_radius=6)
+        # Dark text on the pale end of the scale, white on the dark end.
+        ink = text if sum(colour) > 560 else _WHITE
+        number = self._value.render(str(rank + 1), True, ink)
+        screen.blit(number, number.get_rect(center=square.center))
+        name = self._font.render(sku, True, text)
+        screen.blit(name, (square.right + 10, box.centery - name.get_height() // 2))
+        shown = self._value.render(str(amount), True, text)
+        pill = pygame.Rect(0, 0, max(shown.get_width() + 16, 40), box.height - 6)
+        pill.midright = (box.right - 3, box.centery)
+        pygame.draw.rect(screen, _WHITE, pill, border_radius=5)
+        pygame.draw.rect(screen, _RULE, pill, 1, border_radius=5)
+        screen.blit(shown, shown.get_rect(center=pill.center))
+
+    def _sku_rows(self, units: Mapping[str, int], ranks: Mapping[str, int], action=None) -> list:
+        """The boxed rows of a SKU list, most popular first."""
+        held = sorted(units.items(), key=lambda kv: ranks.get(kv[0], len(ranks)))
+        return [("sku", ranks.get(k, len(ranks)), k, u, action) for k, u in held]
 
     def _set_sort(self, title: str) -> None:
         self.sort = title
@@ -1158,12 +1193,8 @@ class WarehouseRenderer:
                 rows.append(_stat("picks with an agent coming", coming, _hex("#e08a1e")))
                 rows.append(_stat("order lines short of stock", stock["orders_short"]))
             rows.append(("heading", "Most popular SKUs, units on the slots"))
-            for k in stock["ranking"][:10]:
-                rank = ranks[k]
-                rows.append(
-                    _stat(f"{rank + 1}. {k}", totals.get(k, 0), rank_colour(rank, len(ranks)))
-                )
-            return rows
+            top = {k: totals.get(k, 0) for k in stock["ranking"][:10]}
+            return rows + self._sku_rows(top, ranks)
         if name == "docks":
             docks = stock.get("docks", {})
             putaways = sum(e.get("putaways", 0) for e in shelves)
@@ -1180,9 +1211,8 @@ class WarehouseRenderer:
                               lambda v=int(v): self._pick(("vertex", v)))
                     )  # fmt: skip
             for v, units in docks.items():
-                rows.append(("heading", f"Dock {v}"))
-                for k, u in sorted(units.items(), key=lambda kv: -kv[1]):
-                    rows.append(_stat(k, u, _PURPLE, lambda v=int(v): self._pick(("vertex", v))))
+                rows.append(("heading", f"Dock {v}, units by SKU"))
+                rows += self._sku_rows(units, ranks, lambda v=int(v): self._pick(("vertex", v)))
             return rows
         if name == "congestion":
             rows.append(("heading", "Now"))
@@ -1290,21 +1320,17 @@ class WarehouseRenderer:
             rows.append(_stat("put-aways coming", entry["putaways"], _PURPLE))
             if entry["units"]:
                 rows.append(("heading", "Units by SKU"))
-                for k, u in sorted(entry["units"].items(), key=lambda kv: ranks.get(kv[0], 0)):
-                    rank = ranks.get(k, 0)
-                    rows.append(_stat(f"{k}, rank {rank + 1}", u, rank_colour(rank, len(ranks))))
+                rows += self._sku_rows(entry["units"], ranks)
             if entry.get("incoming"):
                 rows.append(("heading", "On its way in"))
-                for k, u in entry["incoming"].items():
-                    rows.append(_stat(k, u, _PURPLE))
+                rows += self._sku_rows(entry["incoming"], ranks)
         open_picks = (stock or {}).get("workstations", {}).get(str(v))
         if open_picks:
             rows.append(_stat("open picks", open_picks))
         waiting = (stock or {}).get("docks", {}).get(str(v), {})
         if waiting:
             rows.append(("heading", "Waiting here"))
-            for k, u in waiting.items():
-                rows.append(_stat(k, u, _PURPLE))
+            rows += self._sku_rows(waiting, ranks)
         agents = [
             (a, agent, "here" if agent["at"] == v else "walks here")
             for a, agent in step["agents"].items()
