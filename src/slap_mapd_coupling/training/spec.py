@@ -510,9 +510,11 @@ def check_storage_rule(spec: TrainingSpec, storage_mode: StorageMode) -> None:
     """Raises a ValueError naming what `spec` lacks to play `storage_mode`. In the template
     model F_fix needs nothing and the adaptive rules need the `storage_rule` section with nu.
     In the arrival model every rule needs the section, for Delta, and none takes nu. The
-    congestion rule needs beta in it as well."""
+    congestion rule needs beta in it as well. The random rule exists in the arrival model only."""
     rule = spec.storage_rule
     if spec.arrival is None:
+        if storage_mode == "random":
+            raise ValueError("storage mode 'random' needs the arrival model, and there is none.")
         if storage_mode == "fixed":
             return
         if rule is None or rule.reassignment_cap is None:

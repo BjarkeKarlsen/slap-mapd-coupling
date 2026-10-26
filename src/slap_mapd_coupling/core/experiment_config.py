@@ -16,7 +16,8 @@ from pydantic import (
 
 from slap_mapd_coupling.planners.registry import PlannerName
 
-StorageMode = Literal["fixed", "demand", "congestion"]  # F_fix / F_dem / F_cng
+# F_fix / F_dem / F_cng, and "random", a check under the arrival stock model only
+StorageMode = Literal["fixed", "demand", "congestion", "random"]
 # How stock behaves. "template": stock never runs out and an adaptive rule relocates it every
 # Delta steps. "arrival": an order takes a unit, stock arrives every Delta steps, and the storage
 # rule decides where the arriving stock goes (thesis wording pending).
@@ -129,6 +130,10 @@ class ExperimentConfig(BaseModel):
     def _storage_mode_parameters(self) -> "ExperimentConfig":
         if self.stock_model == "arrival":
             return self  # _arrival_stock_parameters checks the arrival model
+        if self.storage_mode == "random":
+            raise ValueError(
+                "storage_mode='random' is a put-away rule, so needs stock_model='arrival'."
+            )
         if self.storage_mode == "fixed":
             if self.storage_epoch_length is not None:
                 raise ValueError(
