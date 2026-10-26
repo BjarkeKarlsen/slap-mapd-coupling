@@ -5,9 +5,12 @@ max(floor, ceil((1 + epsilon) * its orders in the last period)) plus the orders 
 for it, the same amount under every rule. The rule decides which shelves it goes to, and
 nothing already on a shelf moves. "fixed" fills the home shelf first, "demand" puts the most
 demanded SKUs on the nearest shelves, and "congestion" ranks the shelves by the
-congestion-aware score.
+congestion-aware score. "random" draws each shelf uniformly among the shelves with room, a
+check on "demand".
 """
 
+import random
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -35,7 +38,7 @@ from slap_mapd_coupling.training.spec import (
 
 ROOT = Path(__file__).resolve().parents[2]
 DELTA = 100
-RULES = ("fixed", "demand", "congestion")
+RULES = ("fixed", "demand", "congestion", "random")
 
 
 def _line() -> WarehouseGraph:
@@ -79,10 +82,19 @@ def _state(counts, capacity=4.0, unit_capacity=1.0, skus=("a", "b")):
 
 
 def _put_away(
-    rule, x_prev, amounts, home=None, demand=None, traversal=None, waiting=None, beta=1.0
+    rule, x_prev, amounts, home=None, demand=None, traversal=None, waiting=None, beta=1.0, rng=None
 ):
+    options = {"rng": rng or random.Random(0)} if rule == "random" else {}
     return get_putaway_rule(rule)(
-        x_prev, _line(), amounts, home or {}, demand or {}, traversal or {}, waiting or {}, beta
+        x_prev,
+        _line(),
+        amounts,
+        home or {},
+        demand or {},
+        traversal or {},
+        waiting or {},
+        beta,
+        **options,
     )
 
 
@@ -175,6 +187,33 @@ def test_congestion_without_beta_raises():
         _put_away("congestion", _state({}), {"a": 1}, beta=None)
 
 
+def test_random_draws_each_shelf_uniformly_among_the_shelves_with_room():
+    # Shelf 1 is full, so a's single unit lands on 0, 4 or 5, each about a third of the time.
+    x_prev = _state({"b": {1: 4}})
+    rng = random.Random(7)
+    landed = Counter()
+    for _ in range(3000):
+        result = _put_away("random", x_prev, {"a": 1}, rng=rng)
+        (shelf,) = result.storage.counts["a"]
+        landed[shelf] += 1
+    assert set(landed) == {0, 4, 5}
+    for shelf in (0, 4, 5):
+        assert abs(landed[shelf] / 3000 - 1 / 3) < 0.04
+
+
+def test_random_ignores_demand_and_distance():
+    # The same stream gives the same shelves whatever the demand, and SKUs go in id order.
+    x_prev = _state({})
+    plain = _put_away("random", x_prev, {"a": 3, "b": 3}, rng=random.Random(3))
+    skewed = _put_away("random", x_prev, {"a": 3, "b": 3}, demand={"b": 1.0}, rng=random.Random(3))
+    assert plain.storage == skewed.storage
+
+
+def test_random_without_its_stream_raises():
+    with pytest.raises(ValueError, match="rng"):
+        get_putaway_rule("random")(_state({}), _line(), {"a": 1}, {}, {}, {}, {}, None)
+
+
 # Capacity, unplaced units and stock that stays.
 
 
@@ -229,8 +268,8 @@ def test_a_split_sku_is_held_at_more_than_one_vertex():
 # The registry.
 
 
-def test_the_registry_holds_the_three_rules_under_the_storage_mode_names():
-    assert registered_putaway_rules() == ("congestion", "demand", "fixed")
+def test_the_registry_holds_the_four_rules_under_the_storage_mode_names():
+    assert registered_putaway_rules() == ("congestion", "demand", "fixed", "random")
     assert get_putaway_rule("fixed") is arrival.putaway_fixed
     with pytest.raises(KeyError, match="nowhere"):
         get_putaway_rule("nowhere")
@@ -282,9 +321,12 @@ def _units_by_sku(storage):
 def test_the_amounts_and_stock_per_sku_are_the_same_under_every_rule():
     runs = [_run(_spec(), mode, 2 * DELTA + 10) for mode in RULES]
     assert len(runs[0].log.arrived_units_by_update) == 2
-    for env in runs[1:]:
+    # The stock not yet promised to a pick. Units promised but not picked up still sit on their
+    # shelf, and how many there are depends on how far the robots travel, so on the rule.
+    free = [_units_by_sku(env._unreserved(env.storage)) for env in runs]
+    for env, free_stock in zip(runs[1:], free[1:]):
         assert env.log.arrived_units_by_update == runs[0].log.arrived_units_by_update
-        assert _units_by_sku(env.storage) == _units_by_sku(runs[0].storage)
+        assert free_stock == free[0]
     assert runs[0].log.relocated_units_by_update == []
     assert runs[0].log.relocation_distance_by_update == []
 
@@ -311,8 +353,8 @@ def test_each_arrival_moves_nothing_and_logs_what_it_placed(mode):
     calls = []
     rule = env._putaway_rule
 
-    def recording(x_prev, *args):
-        result = rule(x_prev, *args)
+    def recording(x_prev, *args, **options):
+        result = rule(x_prev, *args, **options)
         calls.append((x_prev, result))
         return result
 
@@ -347,6 +389,25 @@ def test_a_full_arrival_episode_replays_bit_for_bit():
     assert first.log.backlog_by_t == second.log.backlog_by_t
     assert first.log.stock_wait_by_task == second.log.stock_wait_by_task
     assert first.log.split_skus_by_update == second.log.split_skus_by_update
+
+
+def test_a_random_episode_replays_bit_for_bit_and_its_draws_follow_the_seed():
+    first, second = (_run(_spec(), "random", 2 * DELTA + 10) for _ in range(2))
+    assert first.tasks == second.tasks
+    assert first.storage == second.storage
+    other = _run(_spec(), "random", 2 * DELTA + 10, seed=200_001)
+    assert other.storage != first.storage
+
+
+def test_random_storage_needs_the_arrival_model():
+    config = build_experiment_config(_spec(), 200_000, "fixed")
+    data = {**config.model_dump(), "storage_mode": "random"}
+    for name in ("stock_margin", "stock_floor", "stock_receiving", "units_per_line"):
+        data[name] = None
+    data.update(stock_model="template", stock_putaway="instant", lines_per_order=None)
+    data.update(cold_stock_top_k=None, reassignment_cap=1)
+    with pytest.raises(ValueError, match="arrival"):
+        ExperimentConfig.model_validate(data)
 
 
 def test_fixed_storage_needs_a_home_shelf_for_every_sku():

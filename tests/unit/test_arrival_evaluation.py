@@ -296,7 +296,10 @@ def test_an_arrival_config_differs_from_its_medium_namesake_in_the_stock_only(pa
     arrival = load_spec(path).model_dump()
     template = load_spec(ROOT / "configs" / "medium" / path.name).model_dump()
     assert arrival.pop("arrival") == {
+        "rule": "topup",
         "margin": 1.0,
+        "refill_units": None,
+        "service_level": None,
         "receiving": "delivery",
         "putaway": "instant",
         "lines_per_order": None,

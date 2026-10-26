@@ -42,20 +42,20 @@ experiment:
 # No instance section: the warehouse follows experiment.num_agents
 # (instances/generator.py::fleet_defaults). An `instance:` section would build that one instead.
 
-# 100 SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), with the most popular
-# SKUs at the storage vertices nearest the delivery vertices. Each SKU starts with its expected
-# orders over one arrival period, with the margin, and at least 8 units, the floor of every
-# arrival too. Each vertex holds up to 300. An order picks a SKU by its popularity and takes a
-# unit from the shelf holding it nearest its delivery vertex, or waits for the next arrival.
+# SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), as many as fill 0.4 of the
+# shelves at the start (start_fill), so every fleet starts equally full. The most popular
+# SKUs are at the storage vertices nearest the delivery vertices. Each SKU starts with one refill
+# plus the service-level quantile of its orders in one arrival period. vertex_capacity is left
+# out, so every vertex holds as much as the starting stock of the fullest one takes. An order
+# picks a SKU by its popularity and takes units from the shelf holding it nearest its delivery
+# vertex, or waits for the next arrival.
 # See StorageSettings, ArrivalSettings and DemandSettings.
 storage:
-  num_skus: 100
-  # One name per SKU, e.g. [tea, coffee, mugs, ...]. The first is the most popular at t = 0.
-  # null names them sku_000, sku_001 and so on.
+  start_fill: 0.4          # the number of SKUs is derived from it
+  # Names for the first SKUs, e.g. [tea, coffee, mugs, ...]. The first is the most popular at
+  # t = 0. The rest, or all with null, are named sku_000, sku_001 and so on by position.
   sku_names: null
   unit_capacities: [0.5, 1.0, 2.0]
-  vertex_capacity: 300.0
-  initial_units: 8
   initial_placement: demand_sized_blocks
 
 # SKU popularity is Zipf with the given skew, and the ranking rotates by 5 places every 200 steps.
@@ -70,10 +70,15 @@ storage_rule:
   epoch_length: 100
   congestion_weight: 1.0
 
-# The arrival stock model. Each SKU is filled up to max(8, ceil((1 + margin) * its orders in the
-# last period)). The stock arrives at the receiving vertices and robots carry it to its shelves.
+# The arrival stock model. Stock is replaced a refill of Q units at a time, once Q units of a SKU
+# have been ordered since its last refill, and each refill is one put-away to one shelf. The
+# starting stock covers a period's orders at the service level. Lines ask for 1 to 5 units
+# ([A46]). The stock arrives at the receiving vertices and robots carry it to its shelves.
 arrival:
-  margin: 1.0
+  rule: refill
+  refill_units: 30          # Q, about 10 picks per refill
+  service_level: 0.99
+  units_per_line: [1, 5]
   receiving: receiving
   putaway: robots
   # The cold-stock measure: a SKU outside the top 10 of the current ranking is cold, and the

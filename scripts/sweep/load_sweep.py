@@ -65,10 +65,13 @@ VARIABLE = (
     "demand.rotation_period",
     "demand.rotation_shift",
     "arrival.margin",
+    "arrival.refill_units",
+    "arrival.service_level",
     "arrival.cold_stock_top_k",
     "storage_rule.epoch_length",
     "storage_rule.congestion_weight",
     "storage.vertex_capacity",
+    "storage.start_fill",
 )
 # The summary columns: label, RunMetrics field, and how the seeds are summed up. Each has a use
 # (notes/measures_catalogue.md in thesis-progress). The two keep-up parts show which kind fails

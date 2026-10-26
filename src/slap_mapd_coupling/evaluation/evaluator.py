@@ -481,6 +481,8 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
             mean_split_skus=per_arrival(env.log.split_skus_by_update),
             unplaced_units=sum(env.log.unplaced_units_by_update),
             overflow_units=sum(env.log.overflow_units_by_update),
+            num_refills=sum(env.log.refills_by_update),
+            num_refilled_skus=len(env.log.refilled_skus),
             mean_cold_prime_share=(
                 sum(env.log.cold_prime_share_by_update) / len(env.log.cold_prime_share_by_update)
                 if env.log.cold_prime_share_by_update
