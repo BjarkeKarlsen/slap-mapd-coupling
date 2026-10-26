@@ -145,7 +145,15 @@ def test_traces_are_written_for_the_first_seeds_only(tmp_path):
     assert sweep.main(argv) == 0
     traces = sorted((tmp_path / "traces").glob("*.jsonl"))
     assert len(traces) == 1 and traces[0].name.startswith("fixed_rate0.1_seed")
-    assert len(traces[0].read_text().splitlines()) == 41  # the header and one line per step
+    # The header, one line per step, a stock line at the start and every 10 steps, the tasks.
+    types = [json.loads(line)["type"] for line in traces[0].read_text().splitlines()]
+    assert (types.count("header"), types.count("step"), types.count("stock")) == (
+        1,
+        40,
+        5,
+    )
+    assert types[-1] == "tasks"
+    assert json.loads(traces[0].read_text().splitlines()[0])["positions"]
 
 
 def test_the_shelf_capacity_can_be_varied(tmp_path):

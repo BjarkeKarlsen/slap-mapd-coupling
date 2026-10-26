@@ -179,7 +179,6 @@ def render_live(
     viz.pygame_renderer.WarehouseRenderer. Local import: pygame is an
     optional [viz] extra, not a hard dependency of running this example
     for its metrics/invariants (the default `main()` path)."""
-    import time
 
     from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
@@ -187,14 +186,14 @@ def render_live(
     env = WarehouseMAPDEnv(graph, skus, counts, capacities, config)
     env.reset()
     renderer = WarehouseRenderer(graph, positions)
+    renderer.speed = 1 / delay_seconds  # the renderer paces the run, and its slider changes it
     try:
-        running = renderer.render(env.fleet)
+        running = renderer.render_env(env)
         for _ in range(config.horizon):
             if not running:
                 break
             step_with_planner(env, planner)
-            running = renderer.render(env.fleet)
-            time.sleep(delay_seconds)
+            running = renderer.render_env(env)
     finally:
         renderer.close()
 

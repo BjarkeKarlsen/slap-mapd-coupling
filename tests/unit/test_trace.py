@@ -17,6 +17,8 @@ from slap_mapd_coupling.evaluation.trace import (
     DEFAULT_DEAD_AFTER,
     EpisodeTraceWriter,
     format_summary,
+    load_stock,
+    load_tasks,
     load_trace,
     main,
     summarise_trace,
@@ -99,7 +101,8 @@ def test_trace_has_a_header_then_one_line_per_step(tmp_path):
     _run_with_trace(config, tmp_path / "trace.jsonl", steps=6)
     header, steps = load_trace(tmp_path / "trace.jsonl")
     assert len(steps) == 6
-    assert (tmp_path / "trace.jsonl").read_text().count("\n") == 7
+    # The header, the stock at the start, six steps and the task line.
+    assert (tmp_path / "trace.jsonl").read_text().count("\n") == 9
     assert header["config"] == config.model_dump(mode="json")
     assert set(header["initial"]) == {"1", "2", "3", "4"}
     assert {v["id"] for v in header["vertices"]} >= set(header["initial"].values())
@@ -111,9 +114,73 @@ def test_trace_has_a_header_then_one_line_per_step(tmp_path):
         "moved",
         "overridden",
         "task",
+        "kind",
+        "sku",
+        "quantity",
+        "congestion",
         "phase",
         "goal",
     }
+
+
+def test_trace_ends_with_every_task_and_its_counts_match_the_last_step(tmp_path):
+    path = tmp_path / "trace.jsonl"
+    env = _run_with_trace(_config(seed=3), path, steps=20)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[-1]["type"] == "tasks"
+    tasks = load_tasks(path)
+    assert tasks is not None and len(tasks) == len(env.tasks)
+    _, steps = load_trace(path)
+    assert sum(task["finished"] is not None for task in tasks) == steps[-1]["completed"]
+    assert len(tasks) == steps[-1]["released"]
+    for task in tasks:
+        if task["finished"] is not None:
+            assert task["released"] <= task["assigned"] <= task["pickup_at"] <= task["finished"]
+
+
+def test_stock_lines_follow_the_stock_and_the_tasks_waiting_on_each_shelf(tmp_path):
+    path = tmp_path / "trace.jsonl"
+    with pytest.raises(ValueError):
+        EpisodeTraceWriter(tmp_path / "bad.jsonl", _generated_env(_config()), stock_every=0)
+    env = _generated_env(_config(seed=3, horizon=12))
+    env.reset()
+    with EpisodeTraceWriter(path, env, stock_every=4, positions={1: (0.0, 1.0)}) as writer:
+        for _ in range(12):
+            step_with_planner(env, _PLANNER)
+            writer.record(env)
+    header, _ = load_trace(path)
+    assert header["positions"] == {"1": [0.0, 1.0]}
+    assert set(header["capacities"]) == {str(v) for v in env.storage.capacities}
+    assert header["skus"] == {"tea": 1.0}
+    stock = load_stock(path)
+    assert [line["t"] for line in stock] == [0, 4, 8, 12]
+    last = stock[-1]
+    on_shelves = {int(v): entry["units"].get("tea", 0) for v, entry in last["shelves"].items()}
+    assert {v: n for v, n in on_shelves.items() if n} == {
+        v: n for v, n in env.storage.counts["tea"].items() if n
+    }
+    waiting = sum(entry["queued"] + entry["coming"] for entry in last["shelves"].values())
+    assert waiting == sum(
+        1 for task in env.tasks if task.kind == "pick" and task.pickup_time is None
+    )
+
+
+def test_a_format_1_file_is_still_read(tmp_path):
+    path = tmp_path / "old.jsonl"
+    step = {
+        "type": "step",
+        "t": 1,
+        "completed": 0,
+        "released": 0,
+        "backlog": 0,
+        "agents": {},
+    }
+    path.write_text(
+        json.dumps({"type": "header", "format": 1, "edges": []}) + "\n" + json.dumps(step) + "\n"
+    )
+    header, steps = load_trace(path)
+    assert header["format"] == 1 and steps == [step]
+    assert load_stock(path) == [] and load_tasks(path) is None
 
 
 def test_head_on_pair_is_recorded_as_two_blocked_intents(tmp_path):

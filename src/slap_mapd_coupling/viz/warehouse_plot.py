@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import itertools
 import string
-from typing import Iterator
 
 import matplotlib
 
@@ -28,6 +27,13 @@ from slap_mapd_coupling.core.storage_state import SkuId, StorageState
 from slap_mapd_coupling.viz import theme
 
 _MARKERS = {"circle": "o", "square": "s", "diamond": "D", "triangle": "^"}
+# The role names a reader meets in the thesis. A plain aisle vertex gets no legend entry.
+_ROLE_LABELS = {
+    "storage": "slot",
+    "delivery": "workstation",
+    "receiving": "dock",
+    "endpoint": "parking",
+}
 
 
 def _patch_for_shape(shape: str, xy: tuple[float, float], size: float, **kwargs):
@@ -86,7 +92,9 @@ def plot_graph(
     for vertex_id, vertex in graph.vertices.items():
         style, secondary_roles = theme.style_for_role(vertex.role)
         xy = positions[vertex_id]
-        marker_size = 0.34
+        # In van Knippenberg et al.'s style an aisle vertex is small and plain, so the role
+        # vertices, every one a leaf off the aisles, stand out.
+        marker_size = 0.34 if secondary_roles or style is not theme.ROLE_STYLES["plain"] else 0.18
         patch = _patch_for_shape(
             style.shape,
             xy,
@@ -110,8 +118,18 @@ def plot_graph(
             ax.add_patch(ring)
 
     handles = [
-        Line2D([], [], marker=_MARKERS[s.shape], ls="", mfc=s.fill, mec=s.edge, ms=11, label=name)
+        Line2D(
+            [],
+            [],
+            marker=_MARKERS[s.shape],
+            ls="",
+            mfc=s.fill,
+            mec=s.edge,
+            ms=11,
+            label=label,
+        )
         for name, s in theme.ROLE_STYLES.items()
+        if (label := _ROLE_LABELS.get(name)) is not None
     ]
     ax.legend(
         handles=handles,

@@ -426,6 +426,16 @@ class WarehouseMAPDEnv:
         return self._t
 
     @property
+    def ranking(self) -> list[SkuId]:
+        """The SKUs from most to least popular at the current t (`popularity_ranking`)."""
+        return popularity_ranking(
+            self._sku_ids,
+            self._t,
+            self.config.demand_rotation_period,
+            self._rotation_shift,
+        )
+
+    @property
     def waiting_orders(self) -> tuple[OrderLine, ...]:
         """The order lines of the arrival stock model still missing units of their SKU, in
         release order. Always empty under the template model."""
