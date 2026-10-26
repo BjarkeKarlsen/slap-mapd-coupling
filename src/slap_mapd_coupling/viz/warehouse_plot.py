@@ -8,6 +8,10 @@ earlier ones via the same `ax`.
 
 from __future__ import annotations
 
+import itertools
+import string
+from typing import Iterator
+
 import matplotlib
 
 matplotlib.use("Agg")  # headless-safe, matches thesis-progress/scripts/images/figure.py
@@ -15,7 +19,6 @@ matplotlib.use("Agg")  # headless-safe, matches thesis-progress/scripts/images/f
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
-import string
 
 from matplotlib.patches import Circle, RegularPolygon, Rectangle
 
@@ -183,10 +186,18 @@ def plot_storage_heatmap(
     return ax
 
 
+def _letter_names() -> Iterator[str]:
+    """A, B, ..., Z, then AA, AB, ..., as spreadsheet columns, so a warehouse with more than
+    26 storage vertices still names every one."""
+    for length in itertools.count(1):
+        for letters in itertools.product(string.ascii_uppercase, repeat=length):
+            yield "".join(letters)
+
+
 def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
     """Short display name for every vertex playing a storage, delivery,
     receiving or endpoint role (plain vertices get none), in vertex-id
-    order: storage vertices get A, B, C, ... (matches
+    order: storage vertices get A, B, C, ..., Z, AA, AB, ... (matches
     01b_storage_and_config.py's own A/B/C worked example); delivery,
     receiving and endpoint vertices get D1, D2, ... / R1, R2, ... /
     E1, E2, ... -- short handles for future overlays that need to refer
@@ -204,7 +215,7 @@ def assign_vertex_names(graph: WarehouseGraph) -> dict[VertexId, str]:
     `not graph.vertices[v].role.storage`.
     """
     names: dict[VertexId, str] = {}
-    storage_letters = iter(string.ascii_uppercase)
+    storage_letters = _letter_names()
     delivery_count = 0
     endpoint_count = 0
     receiving_count = 0

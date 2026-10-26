@@ -23,7 +23,11 @@ from slap_mapd_coupling.core.agents import (
     has_vertex_conflict,
 )
 from slap_mapd_coupling.core.graph import WarehouseGraph
-from slap_mapd_coupling.instances.generator import GeneratorParams, generate_instance
+from slap_mapd_coupling.instances.generator import (
+    GeneratorParams,
+    fleet_defaults,
+    generate_instance,
+)
 from slap_mapd_coupling.viz.pygame_renderer import WarehouseRenderer
 
 MAX_RETRIES = 20  # give up and let everyone wait this frame if no collision-free draw is found
@@ -50,26 +54,7 @@ def _random_step(graph: WarehouseGraph, fleet: FleetState, rng: random.Random) -
 def main() -> None:
     num_agents = 4
 
-    params = GeneratorParams(
-        max_num_aisles=7,
-        max_aisle_length=7,
-        max_num_cross_aisles=6,
-        # num_transit_vertices=56,
-        one_way_fraction=0.0,
-        default_edge_cost=1.0,
-        random_edge_costs=False,
-        edge_cost_range=(0.5, 2.0),
-        wait_cost=0.2,
-        num_storage_vertices=4,
-        num_delivery_vertices=4,
-        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
-        num_receiving_vertices=4,
-        num_endpoints=num_agents,
-        # Require at least eight selected role nodes to have degree >= 2.
-        # Use zero if leaf placements are also acceptable.
-        min_internal_role_vertices=2,
-        seed=42,
-    )
+    params = GeneratorParams(**fleet_defaults(num_agents), wait_cost=0.2)
     instance = generate_instance(params)
     graph = instance.graph
 

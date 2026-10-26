@@ -147,13 +147,15 @@ def test_initial_counts_that_do_not_fit_the_capacity_are_rejected(spec):
 
 @pytest.mark.parametrize("num_agents", [8, 16, 32, 64])
 def test_the_fleet_size_alone_gives_the_warehouse(num_agents):
-    """sec:impl:instances: |V| = 16 m, m parking, m/2 storage, m/2 delivery and receiving."""
+    """sec:impl:instances, graph v2: 16 m walkable vertices, m parking, m/2 workstations
+    (delivery) and m/2 docks (receiving), the slots following from the rack faces."""
     fleet = load_spec(ROOT / "configs" / f"fleet_{num_agents}" / "centralised.yaml")
     assert fleet.instance == {}
     params = instance_params(fleet)
+    assert params.layout == "v2"
     assert params.num_transit_vertices == 16 * num_agents
     assert params.num_endpoints == num_agents
-    assert params.num_storage_vertices == num_agents // 2
+    assert params.num_storage_vertices is None
     assert params.num_delivery_vertices == params.num_receiving_vertices == num_agents // 2
     assert params.seed == 42
     assert params.one_way_fraction == 0.0

@@ -1,49 +1,35 @@
-"""Build warehouse instances from seeds, test 1000 of them, and plot one.
+"""Build the graph v2 warehouse of a fleet from many seeds, test them, and plot one.
 
 Every seed must give a connected, well-formed instance (sec:impl:instances).
-A sampled topology that admits no well-formed role assignment is discarded
-and the next one is sampled, so the same seed always gives the same instance.
-The sweep checks every seed with the independent validators and reports the
-discard rate. It takes about a minute and a half. Then it plots the instance
-of one seed, here seed 664, whose first topology used to fail.
+Graph v2 hangs every endpoint off the walkable backbone as a leaf, so it is
+well-formed by construction and no seed needs a second topology. The sweep
+checks every seed with the independent validators and reports the topologies
+sampled, which should be one each. Then it plots the fleet's own instance,
+the seed of fleet_defaults.
 """
 
 import os
 from collections import Counter
 
 from slap_mapd_coupling.instances.generator import (
+    FLEET_INSTANCE_SEED,
     GeneratedInstance,
     GeneratorParams,
     InstanceGenerationError,
+    fleet_defaults,
     generate_instance,
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
 from slap_mapd_coupling.viz.warehouse_plot import assign_vertex_names, plot_graph, plot_node_names
 
-FLEET_SIZE = 2
-NUM_SEEDS = 1000
-SHOWN_SEED = 664
+# The smallest fleet of the thesis. Graph v2 needs at least 4 agents.
+FLEET_SIZE = 8
+NUM_SEEDS = 200
+SHOWN_SEED = FLEET_INSTANCE_SEED
 
 
 def make_params(seed: int) -> GeneratorParams:
-    return GeneratorParams(
-        max_num_aisles=7,
-        max_aisle_length=7,
-        max_num_cross_aisles=6,
-        one_way_fraction=0.0,
-        default_edge_cost=1.0,
-        random_edge_costs=False,
-        edge_cost_range=(0.5, 2.0),
-        wait_cost=0.2,
-        num_storage_vertices=4,
-        num_delivery_vertices=4,
-        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
-        num_receiving_vertices=4,
-        num_endpoints=FLEET_SIZE,
-        # At least two role vertices must have two distinct neighbours.
-        min_internal_role_vertices=2,
-        seed=seed,
-    )
+    return GeneratorParams(**{**fleet_defaults(FLEET_SIZE), "seed": seed}, wait_cost=0.2)
 
 
 def sweep_seeds() -> None:
@@ -87,9 +73,10 @@ def describe(instance: GeneratedInstance) -> None:
     print(f"\nInstance of seed {SHOWN_SEED} ({instance.topology_attempts} topologies sampled):")
     print(
         f"  aisle lengths = {instance.aisle_lengths}, "
-        f"cross-aisle rows = {instance.cross_aisle_rows}"
+        f"extra link rows = {instance.cross_aisle_rows}"
     )
-    print(f"  |V_mov| = {len(graph.vertices)}")
+    walkable = sum(not v.role.is_task_endpoint for v in graph.vertices.values())
+    print(f"  |V_mov| = {len(graph.vertices)} ({walkable} walkable, the rest leaves)")
     print(f"  |V_str| = {num_storage}")
     print(f"  |V_rcv| = {num_receiving}")
     print(f"  |V_del| = {num_delivery}")

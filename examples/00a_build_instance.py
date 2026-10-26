@@ -1,109 +1,60 @@
-"""Build a bigger, denser warehouse instance and plot it.
+"""Build the graph v2 warehouses of the larger fleets and plot one.
 
-00_build_instance.py's default (5 aisles x 4 cells, 3 cross-aisles, 8
-storage vertices) is deliberately small for a first look. This script asks
-the same generator for a much larger, denser instance -- more aisles,
-longer aisles, many more cross-aisles relative to storage/delivery count
--- to see what that actually looks like, and to empirically check issue
-#74's question: does density alone (within this generator's single-file
-aisle-stack topology) get closer to well-formedness (Ma et al. 2017), or
-does the topology itself need to change?
+00_build_instance.py looks at the smallest fleet. This script builds the
+warehouse of each fleet size up to 32 agents, prints its size and roles, and
+checks both conditions of app:wellformed. Graph v2 keeps 16 walkable vertices
+per agent at every fleet size, with the leaves (slots, workstations, docks,
+parking) on top, so the floor space per robot is the same and the slot count
+grows with the rack faces. The 64-agent warehouse builds the same way but
+takes about 20 seconds, so it is left out here.
 
-one_way_fraction is 0.0 here, not 00_build_instance.py's 0.05: at this
-larger scale, one-way edges introduce enough disconnection risk that
-acceptance becomes seed-dependent (empirically ~35-60% accept rate for
-one_way_fraction in [0.02, 0.04] against these params) -- 0.0 keeps this
-script deterministic and always reproducible, since density/size is the
-point here, not one-way-edge behaviour.
+The graph v1 warehouse of a fleet is still built by
+``fleet_defaults_v1``, for the graph v1 results.
 """
 
 import os
 
 from slap_mapd_coupling.instances.generator import (
     GeneratorParams,
-    generate_and_validate,
+    fleet_defaults,
     generate_instance,
 )
-from slap_mapd_coupling.instances.validation import check_well_formedness
-from slap_mapd_coupling.viz.warehouse_plot import assign_vertex_names, plot_graph, plot_node_names
+from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
+from slap_mapd_coupling.viz.warehouse_plot import plot_graph
+
+FLEETS = (8, 16, 32)
+SHOWN_FLEET = 16
 
 
 def main() -> None:
-    fleet_size = 4
+    shown = None
+    for fleet_size in FLEETS:
+        params = GeneratorParams(**fleet_defaults(fleet_size), wait_cost=0.2)
+        instance = generate_instance(params)
+        graph = instance.graph
+        roles = [v.role for v in graph.vertices.values()]
+        walkable = sum(not role.is_task_endpoint for role in roles)
+        print(
+            f"{fleet_size} agents: {params.num_aisles} aisles of {params.rack_rows} rack rows "
+            f"per block, {walkable} walkable and {len(graph.vertices) - walkable} leaves, "
+            f"{sum(r.storage for r in roles)} slots, {sum(r.delivery for r in roles)} "
+            f"workstations, {sum(r.receiving for r in roles)} docks, "
+            f"{sum(r.endpoint for r in roles)} parking, "
+            f"{sum(e.one_way for e in graph.edges)} one-way edges"
+        )
+        print(
+            f"  connected: {check_connectivity(graph).ok}, "
+            f"well-formed: {check_well_formedness(graph, fleet_size).ok}"
+        )
+        if fleet_size == SHOWN_FLEET:
+            shown = instance
 
-    params = GeneratorParams(
-        max_num_aisles=7,
-        max_aisle_length=7,
-        max_num_cross_aisles=6,
-        # num_transit_vertices=56,
-        one_way_fraction=0.0,
-        default_edge_cost=1.0,
-        random_edge_costs=False,
-        edge_cost_range=(0.5, 2.0),
-        wait_cost=0.2,
-        num_storage_vertices=4,
-        num_delivery_vertices=4,
-        # V_rcv on row 0, the inbound side, as many as the delivery vertices.
-        num_receiving_vertices=4,
-        num_endpoints=fleet_size,
-        # Require at least eight selected role nodes to have degree >= 2.
-        # Use zero if leaf placements are also acceptable.
-        min_internal_role_vertices=2,
-        seed=42,
-    )
-
-    print("GeneratorParams (bigger + denser than 00_build_instance.py):")
-    print(params.model_dump_json(indent=2))
-
-    graph, report = generate_and_validate(params, fleet_size=fleet_size, require_well_formed=False)
-    print("\nInstanceGenerationReport (connectivity only):")
-    print(f"  accepted: {report.accepted}")
-    print(f"  connectivity.ok: {report.connectivity.ok}")
-
-    num_movable = sum(1 for v in graph.vertices.values() if v.role.movable)
-    num_storage = sum(1 for v in graph.vertices.values() if v.role.storage)
-    num_receiving = sum(1 for v in graph.vertices.values() if v.role.receiving)
-    num_delivery = sum(1 for v in graph.vertices.values() if v.role.delivery)
-    num_endpoint = sum(1 for v in graph.vertices.values() if v.role.endpoint)
-
-    print("\nAccepted instance:")
-    print(f"  |V|     = {len(graph.vertices)}")
-    print(f"  |V_mov| = {num_movable}")
-    print(f"  |V_str| = {num_storage}")
-    print(f"  |V_rcv| = {num_receiving}")
-    print(f"  |V_del| = {num_delivery}")
-    print(f"  |V_ep|  = {num_endpoint}")
-    print(f"  |E|     = {len(graph.edges)}")
-
-    well_formedness = check_well_formedness(graph, fleet_size=fleet_size)
-    print("\nWell-formedness (Ma et al. 2017), reported but not required here:")
-    print(
-        f"  ok: {well_formedness.ok}  "
-        f"endpoints checked: {well_formedness.num_endpoints}  "
-        f"failure_rate: {well_formedness.failure_rate:.3f}"
-    )
-    conclusion = (
-        "well-formed here"
-        if well_formedness.ok
-        else f"still not well-formed (failure_rate={well_formedness.failure_rate:.3f})"
-    )
-    print(
-        f"  Result: {conclusion}. This is issue #74's empirical check of whether "
-        "density alone (more cross-aisles relative to storage vertices, within "
-        "this generator's single-file aisle-stack topology) gets closer to "
-        "well-formedness -- see 00_build_instance.py's own note (issue #5) for "
-        "the small-instance comparison."
-    )
-
-    instance = generate_instance(params)
-    names = assign_vertex_names(instance.graph)
-    ax = plot_graph(instance.graph, instance.positions)
-    plot_node_names(ax, instance.graph, instance.positions, names)
-    ax.set_title(f"Denser instance: |V|={len(graph.vertices)}, |E|={len(graph.edges)}")
-
+    assert shown is not None
+    ax = plot_graph(shown.graph, shown.positions)
+    ax.set_title(f"Graph v2, {SHOWN_FLEET} agents")
     out_dir = os.path.join(os.path.dirname(__file__), "output")
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "instance_dense.png")
+    out_path = os.path.join(out_dir, "instance_v2_fleet_16.png")
     ax.figure.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\nSaved {out_path}.")
 

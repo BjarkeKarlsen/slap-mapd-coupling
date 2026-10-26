@@ -1,6 +1,11 @@
 """Topology-first generator for irregular, well-formed warehouse graphs.
 
-Generation has four separate stages:
+Two layouts, chosen by ``GeneratorParams.layout``. "v2", the warehouse of every fleet
+(``fleet_defaults``), is described at ``_build_v2``: every endpoint is a leaf off the walkable
+backbone, so it is well-formed by construction. "v1", the layout before it, is described
+below and kept so older configs and the graph v1 results still build the same instance.
+
+Graph v1 generation has four separate stages:
 
 1. Build a random warehouse topology containing only plain movable vertices.
 2. Orient some transit segments as one-way while retaining strong connectivity.
@@ -25,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import math
 import random
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -61,20 +66,31 @@ Adjacency = dict[VertexId, list[VertexId]]
 class GeneratorParams(BaseModel):
     """Bounds and randomization settings for one warehouse instance.
 
-    ``max_num_aisles`` and ``max_aisle_length`` are upper bounds. The actual
+    Graph v1: ``max_num_aisles`` and ``max_aisle_length`` are upper bounds. The actual
     aisle count and the length of every aisle are sampled from ``seed``.
-
     ``num_transit_vertices`` is the total number of graph vertices because
     roles are assigned to existing topology vertices. Set it to ``None`` to
     sample the graph size as well.
+
+    Graph v2 (``_build_v2``): ``num_aisles`` aisles with ``rack_rows`` rows in each rack
+    block, and ``num_transit_vertices`` is the number of walkable vertices, the leaves coming
+    on top. The slots follow from the rack faces, so ``num_storage_vertices`` is not set.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_num_aisles: PositiveInt
-    max_aisle_length: PositiveInt
-    max_num_cross_aisles: NonNegativeInt
+    layout: Literal["v1", "v2"] = "v1"
+
+    max_num_aisles: PositiveInt | None = None
+    max_aisle_length: PositiveInt | None = None
+    max_num_cross_aisles: NonNegativeInt | None = None
     num_transit_vertices: PositiveInt | None = None
+
+    # Graph v2 only: the aisle count, the rows of each rack block, and the extra links between
+    # each pair of neighbouring aisles in each rack block.
+    num_aisles: PositiveInt | None = None
+    rack_rows: PositiveInt | None = None
+    links_per_aisle_pair: NonNegativeInt = 1
     require_irregular_shape: bool = True
 
     one_way_fraction: float = Field(ge=0.0, le=1.0)
@@ -84,7 +100,7 @@ class GeneratorParams(BaseModel):
     edge_cost_range: tuple[PositiveFloat, PositiveFloat] = (0.5, 2.0)
     wait_cost: NonNegativeFloat
 
-    num_storage_vertices: PositiveInt
+    num_storage_vertices: PositiveInt | None = None
     num_delivery_vertices: PositiveInt
     num_endpoints: PositiveInt
     # V_rcv, drawn from row 0, the inbound side (sec:impl:instances). Zero
@@ -106,9 +122,9 @@ class GeneratorParams(BaseModel):
 
     @property
     def num_role_vertices(self) -> int:
-        """Number of vertices treated as endpoints by well-formedness."""
+        """Number of vertices treated as endpoints by well-formedness (graph v1)."""
         return (
-            self.num_storage_vertices
+            (self.num_storage_vertices or 0)
             + self.num_delivery_vertices
             + self.num_endpoints
             + self.num_receiving_vertices
@@ -116,6 +132,7 @@ class GeneratorParams(BaseModel):
 
     @property
     def max_num_vertices(self) -> int:
+        assert self.max_num_aisles is not None and self.max_aisle_length is not None
         return self.max_num_aisles * (self.max_aisle_length + 1)
 
     @model_validator(mode="after")
@@ -124,6 +141,22 @@ class GeneratorParams(BaseModel):
         minimum_cost, maximum_cost = self.edge_cost_range
         if minimum_cost > maximum_cost:
             raise ValueError("edge_cost_range must be ordered as (minimum, maximum).")
+
+        if self.layout == "v2":
+            return self._v2_request_must_be_feasible()
+
+        for name in (
+            "max_num_aisles",
+            "max_aisle_length",
+            "max_num_cross_aisles",
+            "num_storage_vertices",
+        ):
+            if getattr(self, name) is None:
+                raise ValueError(f"layout='v1' requires {name}.")
+        for name in ("num_aisles", "rack_rows"):
+            if getattr(self, name) is not None:
+                raise ValueError(f"{name} only applies to layout='v2'.")
+        assert self.max_num_cross_aisles is not None and self.max_aisle_length is not None
 
         if self.max_num_cross_aisles > self.max_aisle_length:
             raise ValueError("max_num_cross_aisles cannot exceed max_aisle_length.")
@@ -160,20 +193,68 @@ class GeneratorParams(BaseModel):
 
         return self
 
+    def _v2_request_must_be_feasible(self) -> "GeneratorParams":
+        """Graph v2: the shape settings are there and the walkable count fits the shape."""
+        for name in ("num_aisles", "rack_rows", "num_transit_vertices"):
+            if getattr(self, name) is None:
+                raise ValueError(f"layout='v2' requires {name}.")
+        for name in (
+            "max_num_aisles",
+            "max_aisle_length",
+            "max_num_cross_aisles",
+            "num_storage_vertices",
+        ):
+            if getattr(self, name) is not None:
+                raise ValueError(f"{name} only applies to layout='v1'.")
+        if self.one_way_fraction != 0.0:
+            raise ValueError(
+                "layout='v2' makes the main pair one-way and every other edge two-way, "
+                "so one_way_fraction must be 0."
+            )
+        if self.min_internal_role_vertices or not self.role_backbone:
+            raise ValueError(
+                "min_internal_role_vertices and role_backbone only apply to layout='v1'."
+            )
+        assert self.num_aisles is not None and self.rack_rows is not None
+        assert self.num_transit_vertices is not None
+        if self.num_aisles < 3:
+            raise ValueError("layout='v2' needs at least 3 aisles, two outer and one inner.")
+        bounds = _v2_upper_inner_bounds(self.num_aisles, self.rack_rows, self.links_per_aisle_pair)
+        upper_sum = _v2_upper_inner_sum(
+            self.num_transit_vertices,
+            self.num_aisles,
+            self.rack_rows,
+            self.links_per_aisle_pair,
+        )
+        if not bounds[0] <= upper_sum <= bounds[1]:
+            raise ValueError(
+                f"{self.num_transit_vertices} walkable vertices do not fit {self.num_aisles} "
+                f"aisles of {self.rack_rows} rack rows per block: the inner aisles of the "
+                f"upper block would hold {upper_sum} vertices, outside {bounds}."
+            )
+        if self.links_per_aisle_pair > self.rack_rows - 2:
+            raise ValueError("links_per_aisle_pair cannot exceed rack_rows - 2.")
+        return self
+
 
 class GeneratedInstance(BaseModel):
     """A graph, its visualization positions, and its realized random shape."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    layout: Literal["v1", "v2"] = "v1"
     graph: WarehouseGraph
     positions: dict[VertexId, Position]
     # Aisle number of every vertex, left to right from 0. Cross-aisle vertices
     # carry the number of the aisle they sit on. Taken from the lattice column
     # when the vertex is created, so it does not depend on the display positions.
+    # Graph v2: a lane or main pair vertex takes the aisle of its column's band, the aisle
+    # column and the rack column either side of it, and a leaf the aisle of its vertex.
     aisle_index: dict[VertexId, int]
+    # Graph v2: the rack rows of each aisle over both blocks, and the rows of the extra links.
     aisle_lengths: tuple[PositiveInt, ...]
     cross_aisle_rows: tuple[PositiveInt, ...]
+    # Graph v2: the walkable vertices, the leaves not counted.
     num_transit_vertices: PositiveInt
     # Topologies sampled before this one was accepted. The discard rate over
     # a batch of seeds follows from it (sec:impl:instances).
@@ -193,6 +274,17 @@ class GeneratedInstance(BaseModel):
 
         if len(set(self.positions.values())) != len(self.positions):
             raise ValueError("Every graph vertex must have a unique display position.")
+
+        if self.layout == "v2":
+            walkable = sum(
+                not vertex.role.is_task_endpoint for vertex in self.graph.vertices.values()
+            )
+            if walkable != self.num_transit_vertices:
+                raise ValueError(
+                    f"{walkable} walkable vertices, but num_transit_vertices is "
+                    f"{self.num_transit_vertices}."
+                )
+            return self
 
         expected_vertices = sum(aisle_length + 1 for aisle_length in self.aisle_lengths)
         if expected_vertices != self.num_transit_vertices:
@@ -274,7 +366,35 @@ FLEET_INSTANCE_SEED = 42
 
 
 def fleet_defaults(num_agents: int) -> dict[str, Any]:
-    """The warehouse of a fleet of ``num_agents`` (sec:impl:instances, app:instances).
+    """The warehouse of a fleet of ``num_agents`` (sec:impl:instances, app:instances), graph v2.
+
+    16 m walkable vertices, the leaves on top, so the floor space per robot is the same at
+    every fleet size. m/2 workstations (delivery) and m/2 docks (receiving), two agents per
+    station, and m parking leaves. The slots follow from the rack faces. The aisle count and
+    the rack rows per block are those of ``_v2_shape``, about square, every edge cost 1 and
+    the seed ``FLEET_INSTANCE_SEED``. A config with an ``instance`` section builds that
+    warehouse instead.
+    """
+    num_aisles, rack_rows = _v2_shape(num_agents)
+    num_stations = max(1, num_agents // 2)
+    return {
+        "layout": "v2",
+        "num_aisles": num_aisles,
+        "rack_rows": rack_rows,
+        "links_per_aisle_pair": _V2_LINKS_PER_AISLE_PAIR,
+        "num_transit_vertices": VERTICES_PER_AGENT * num_agents,
+        "one_way_fraction": 0.0,
+        "default_edge_cost": 1.0,
+        "random_edge_costs": False,
+        "num_delivery_vertices": num_stations,
+        "num_receiving_vertices": num_stations,
+        "num_endpoints": num_agents,
+        "seed": FLEET_INSTANCE_SEED,
+    }
+
+
+def fleet_defaults_v1(num_agents: int) -> dict[str, Any]:
+    """The graph v1 warehouse of a fleet of ``num_agents``, kept to rebuild the graph v1 results.
 
     |V| = 16 m, m parking vertices, m/2 storage vertices and m/2 delivery and as many
     receiving vertices, so two agents per dock at every fleet size, every edge two-way
@@ -374,7 +494,8 @@ def generate_and_validate(
 
 
 def _build(params: GeneratorParams) -> GeneratedInstance:
-    """Generate a well-formed instance, discarding topologies that admit none.
+    """Generate a well-formed instance. Graph v2 is well-formed by construction
+    (``_build_v2``). Graph v1 discards topologies that admit none.
 
     Every instance must be well-formed, so a sampled topology that no role
     assignment can make well-formed (for example a near-tree with too few
@@ -385,6 +506,8 @@ def _build(params: GeneratorParams) -> GeneratedInstance:
     first time is unchanged. ``GeneratedInstance.topology_attempts`` records
     how many topologies were sampled, which gives the discard rate.
     """
+    if params.layout == "v2":
+        return _build_v2(params)
     last_reason = ""
     for attempt in range(_MAX_TOPOLOGY_ATTEMPTS):
         instance, last_reason = _try_build(params, attempt)
@@ -495,6 +618,9 @@ def _sample_shape(
     rng: random.Random,
 ) -> _RealizedShape:
     """Sample total size, individual aisle lengths, and cross-aisle rows."""
+    # Graph v1 only, whose validator requires these.
+    assert params.max_num_aisles is not None and params.max_aisle_length is not None
+    assert params.max_num_cross_aisles is not None
     if params.num_transit_vertices is None:
         target_vertices = rng.randint(
             params.num_role_vertices + 1,
@@ -1003,6 +1129,7 @@ def _assign_roles(
     selected = list(role_vertex_ids)
     rng.shuffle(selected)
 
+    assert params.num_storage_vertices is not None  # graph v1 only, which requires it
     storage_end = params.num_storage_vertices
     delivery_end = storage_end + params.num_delivery_vertices
 
@@ -1151,4 +1278,265 @@ def _sample_edge_cost(
     return rng.uniform(
         float(minimum_cost),
         float(maximum_cost),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Graph v2
+# ---------------------------------------------------------------------------
+
+# Columns from one aisle to the next: the aisle and the two rack columns between it and its
+# neighbour, back to back, so the faces of neighbouring aisles never share a display cell.
+_V2_AISLE_PITCH = 3
+# The extra links of ``fleet_defaults``, one per pair of neighbouring aisles in each block.
+_V2_LINKS_PER_AISLE_PAIR = 1
+# ``_v2_shape`` prefers shapes whose inner aisles fill this share of the upper block, so it
+# has some dead ends and no block mostly empty.
+_V2_UPPER_FILL = (0.5, 0.9)
+
+
+def _v2_width(num_aisles: int) -> int:
+    """Columns of the lanes and the main pair, from the first aisle to the last."""
+    return _V2_AISLE_PITCH * (num_aisles - 1) + 1
+
+
+def _v2_upper_inner_sum(
+    num_walkable: int, num_aisles: int, rack_rows: int, links_per_aisle_pair: int
+) -> int:
+    """The vertices left for the inner aisles of the upper block once the four rows across
+    (front lane, the main pair, back lane), the lower block, the two outer aisles of the upper
+    block and the extra links are counted."""
+    width = _v2_width(num_aisles)
+    links = 2 * (num_aisles - 1) * links_per_aisle_pair
+    return num_walkable - 4 * width - (num_aisles + 2) * rack_rows - 2 * links
+
+
+def _v2_upper_inner_bounds(
+    num_aisles: int, rack_rows: int, links_per_aisle_pair: int
+) -> tuple[int, int]:
+    """The fewest and most vertices the inner aisles of the upper block can hold. Each is long
+    enough for its extra links, which skip the row next to the main pair, and at least one
+    stops short of the back lane."""
+    shortest = links_per_aisle_pair + 1
+    num_inner = num_aisles - 2
+    return num_inner * shortest, num_inner * rack_rows - 1
+
+
+def _v2_shape(num_agents: int) -> tuple[int, int]:
+    """The aisle count and rack rows per block of the fleet's warehouse. Of the shapes that
+    hold 16 m walkable vertices, the most nearly square, the lanes as long as the warehouse
+    is deep, with the upper block filled by a share in ``_V2_UPPER_FILL`` where one exists.
+    Ties go to fewer aisles."""
+    num_walkable = VERTICES_PER_AGENT * num_agents
+    preferred: list[tuple[int, int, int]] = []
+    feasible: list[tuple[int, int, int]] = []
+    for num_aisles in range(3, num_walkable):
+        width = _v2_width(num_aisles)
+        if 4 * width > num_walkable:
+            break
+        for rack_rows in range(2, num_walkable):
+            if _V2_LINKS_PER_AISLE_PAIR > rack_rows - 2:
+                continue
+            upper_sum = _v2_upper_inner_sum(
+                num_walkable, num_aisles, rack_rows, _V2_LINKS_PER_AISLE_PAIR
+            )
+            low, high = _v2_upper_inner_bounds(num_aisles, rack_rows, _V2_LINKS_PER_AISLE_PAIR)
+            if upper_sum < low:
+                break
+            if upper_sum > high:
+                continue
+            depth = 2 * rack_rows + 4
+            candidate = (abs(width - depth), num_aisles, rack_rows)
+            feasible.append(candidate)
+            fill = upper_sum / ((num_aisles - 2) * rack_rows)
+            if _V2_UPPER_FILL[0] <= fill <= _V2_UPPER_FILL[1]:
+                preferred.append(candidate)
+    shapes = preferred or feasible
+    if not shapes:
+        raise InstanceGenerationError(
+            f"No graph v2 shape holds {num_walkable} walkable vertices for {num_agents} agents."
+        )
+    _, num_aisles, rack_rows = min(shapes)
+    return num_aisles, rack_rows
+
+
+def _build_v2(params: GeneratorParams) -> GeneratedInstance:
+    """Graph v2: van Knippenberg et al.'s (2021) principles on a rack warehouse (D1 to D6).
+
+    Columns are aisles, every third column, with the rack columns between them. Rows from the
+    front: the front lane, the lower rack block, the main pair, the upper rack block and the
+    back lane. The lanes and the main pair cross the whole width. Every aisle runs from the
+    front lane up through the main pair. The two outer aisles reach the back lane, and the
+    inner ones stop at lengths drawn from the seed, so some are dead ends. Extra links join
+    neighbouring aisles at rows drawn from the seed, the role van Knippenberg's diagonal edges
+    play, never on a row next to a lane or the main pair. Every edge is two-way except the
+    main pair, two one-way rows in opposite directions, joined at both ends by the outer
+    aisles so they form a loop.
+
+    Every endpoint is a leaf, a vertex with one edge each way to a walkable vertex. Slots are
+    the rack faces either side of every aisle vertex in the rack rows and, on the bottom row,
+    the front lane's rack side between aisles. Workstations (delivery) sit on the front wall,
+    spread evenly. Docks (receiving) start at the front left corner, up the side wall through
+    the lower block, then along the front wall. Parking starts at the back right corner, down
+    the right wall, then along the back wall, then the left wall from the back. A wall cell of
+    an outer aisle that no dock or parking takes is a slot. The main pair carries no leaf.
+
+    A path cannot pass through a vertex with one edge, so no path between two endpoints
+    crosses a third, and the graph is well-formed once the walkable part is strongly connected
+    and there are m parking leaves (Ma et al. 2017).
+    """
+    num_aisles = params.num_aisles
+    rack_rows = params.rack_rows
+    num_walkable = params.num_transit_vertices
+    assert num_aisles is not None and rack_rows is not None and num_walkable is not None
+    links_per_pair = params.links_per_aisle_pair
+    width = _v2_width(num_aisles)
+    main_low, main_high = rack_rows + 1, rack_rows + 2
+    back = 2 * rack_rows + 3
+
+    def aisle_column(aisle: int) -> int:
+        return _V2_AISLE_PITCH * aisle
+
+    upper_lengths = (
+        (rack_rows,)
+        + tuple(
+            _random_bounded_lengths(
+                target_sum=_v2_upper_inner_sum(num_walkable, num_aisles, rack_rows, links_per_pair),
+                count=num_aisles - 2,
+                minimum=links_per_pair + 1,
+                maximum=rack_rows,
+                rng=random.Random(f"{params.seed}:v2:upper"),
+            )
+        )
+        + (rack_rows,)
+    )
+
+    # The walkable cells, and the undirected segments and one-way edges between them.
+    walkable: list[GridCell] = []
+    segments: list[tuple[GridCell, GridCell]] = []
+    one_way: list[tuple[GridCell, GridCell]] = []
+    for row in (0, main_low, main_high, back):
+        walkable.extend((row, column) for column in range(width))
+    for column in range(width - 1):
+        segments.append(((0, column), (0, column + 1)))
+        segments.append(((back, column), (back, column + 1)))
+        one_way.append(((main_low, column), (main_low, column + 1)))
+        one_way.append(((main_high, column + 1), (main_high, column)))
+    aisle_top: list[int] = []
+    for aisle, upper in enumerate(upper_lengths):
+        column = aisle_column(aisle)
+        top = main_high + upper
+        aisle_top.append(top)
+        rows = [row for row in range(1, top + 1) if row not in (main_low, main_high)]
+        walkable.extend((row, column) for row in rows)
+        chain = [0] + list(range(1, top + 1)) + ([back] if upper == rack_rows else [])
+        segments.extend(((a, column), (b, column)) for a, b in zip(chain, chain[1:]))
+
+    link_rng = random.Random(f"{params.seed}:v2:links")
+    link_rows: set[int] = set()
+    link_cells: set[GridCell] = set()
+    for aisle in range(num_aisles - 1):
+        left, right = aisle_column(aisle), aisle_column(aisle + 1)
+        upper_top = min(aisle_top[aisle], aisle_top[aisle + 1])
+        # Links skip the rows that touch the front lane or the main pair, which already join
+        # the aisles there.
+        lower_rows = link_rng.sample(range(2, rack_rows), links_per_pair)
+        upper_rows = link_rng.sample(range(main_high + 2, upper_top + 1), links_per_pair)
+        for row in sorted(lower_rows + upper_rows):
+            cells = [(row, column) for column in range(left, right + 1)]
+            walkable.extend(cells[1:-1])
+            link_cells.update(cells[1:-1])
+            link_rows.add(row)
+            segments.extend(zip(cells, cells[1:]))
+
+    # The leaves: (cell, the walkable cell it hangs off, role).
+    leaves: list[tuple[GridCell, GridCell, VertexRole]] = []
+    slot = VertexRole(storage=True)
+    for aisle in range(num_aisles - 1):
+        for column in range(aisle_column(aisle) + 1, aisle_column(aisle + 1)):
+            leaves.append(((1, column), (0, column), slot))
+    for aisle in range(num_aisles):
+        column = aisle_column(aisle)
+        for row in range(2, aisle_top[aisle] + 1):
+            if row in (main_low, main_high):
+                continue
+            for side in (column - 1, column + 1):
+                if 0 < side < width - 1 and (row, side) not in link_cells:
+                    leaves.append(((row, side), (row, column), slot))
+
+    rack_rows_of_wall = [r for r in range(1, back) if r not in (main_low, main_high)]
+    left_wall = [((row, -1), (row, 0)) for row in [0] + rack_rows_of_wall + [back]]
+    right_wall = [((row, width), (row, width - 1)) for row in [0] + rack_rows_of_wall + [back]]
+    front_wall = [((-1, column), (0, column)) for column in range(width)]
+    back_wall = [((back + 1, column), (back, column)) for column in range(width)]
+
+    num_docks = params.num_receiving_vertices
+    lower_left = [cell for cell in left_wall if cell[0][0] <= rack_rows]
+    dock_cells = (lower_left + front_wall)[:num_docks]
+    taken = {cell for cell, _ in dock_cells}
+    free_front = [cell for cell in front_wall if cell[0] not in taken]
+    num_stations = params.num_delivery_vertices
+    if num_docks > len(lower_left) + len(front_wall) or num_stations > len(free_front):
+        raise InstanceGenerationError(
+            f"{num_docks} docks and {num_stations} workstations do not fit a front wall of "
+            f"{width} cells and a lower side wall of {len(lower_left)}."
+        )
+    station_cells = [
+        free_front[int((index + 0.5) * len(free_front) / num_stations)]
+        for index in range(num_stations)
+    ]
+    parking_order = right_wall[::-1][:-1] + back_wall[::-1] + left_wall[::-1]
+    parking_cells = [cell for cell in parking_order if cell[0] not in taken][: params.num_endpoints]
+    if len(parking_cells) < params.num_endpoints:
+        raise InstanceGenerationError(
+            f"{params.num_endpoints} parking leaves do not fit the {len(parking_order)} free "
+            "wall cells."
+        )
+    leaves += [(cell, at, VertexRole(receiving=True)) for cell, at in dock_cells]
+    leaves += [(cell, at, VertexRole(delivery=True)) for cell, at in station_cells]
+    leaves += [(cell, at, VertexRole(endpoint=True)) for cell, at in parking_cells]
+    used = {cell for cell, _, _ in leaves}
+    for cell, at in left_wall + right_wall:
+        if cell not in used and cell[0] in rack_rows_of_wall:
+            leaves.append((cell, at, slot))
+
+    # Vertex ids: the walkable cells row by row from the front, then the leaves likewise.
+    walkable_ids = {cell: index for index, cell in enumerate(sorted(walkable))}
+    if len(walkable_ids) != len(walkable) or len(walkable) != num_walkable:
+        raise AssertionError(
+            f"graph v2 built {len(walkable_ids)} walkable vertices, not {num_walkable}."
+        )
+    ids = dict(walkable_ids)
+    roles: dict[VertexId, VertexRole] = {v: VertexRole(movable=True) for v in walkable_ids.values()}
+    edges: set[DirectedEdge] = set()
+    for a, b in segments:
+        edges.update({(walkable_ids[a], walkable_ids[b]), (walkable_ids[b], walkable_ids[a])})
+    edges.update((walkable_ids[a], walkable_ids[b]) for a, b in one_way)
+    for cell, at, role in sorted(leaves, key=lambda leaf: leaf[0]):
+        if cell in ids:
+            raise AssertionError(f"graph v2 placed two vertices on {cell}.")
+        leaf = len(ids)
+        ids[cell] = leaf
+        roles[leaf] = role
+        edges.update({(leaf, walkable_ids[at]), (walkable_ids[at], leaf)})
+
+    def band(column: int) -> int:
+        return min(num_aisles - 1, max(0, (column + 1) // _V2_AISLE_PITCH))
+
+    graph = _create_graph(
+        vertices={v: Vertex(id=v, role=role) for v, role in roles.items()},
+        directed_edges=edges,
+        params=params,
+        cost_rng=random.Random(f"{params.seed}:v2:costs"),
+    )
+    return GeneratedInstance(
+        layout="v2",
+        graph=graph,
+        positions={
+            v: (column * _GRID_SPACING, row * _GRID_SPACING) for (row, column), v in ids.items()
+        },
+        aisle_index={v: band(column) for (_, column), v in ids.items()},
+        aisle_lengths=tuple(rack_rows + upper for upper in upper_lengths),
+        cross_aisle_rows=tuple(sorted(link_rows)),
+        num_transit_vertices=num_walkable,
     )

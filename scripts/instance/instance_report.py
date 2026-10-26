@@ -19,7 +19,6 @@ seed used by each fleet-size config.
         --seeds 50 --out DIR
 """
 
-
 from __future__ import annotations
 
 
@@ -36,12 +35,10 @@ from slap_mapd_coupling.instances.validation import check_connectivity, check_we
 from slap_mapd_coupling.storage.arrival import trip_distance
 from slap_mapd_coupling.training.spec import TrainingSpec, instance_params, load_spec
 
-
 ROWS = "instance_report.jsonl"
 SUMMARY = "summary.md"
 INSTANCES = "instances"
 USED_SEEDS = "used_seeds.json"
-
 
 
 def measure(instance: GeneratedInstance, num_agents: int) -> dict[str, Any]:
@@ -65,6 +62,8 @@ def measure(instance: GeneratedInstance, num_agents: int) -> dict[str, Any]:
     num_roles = len(storage) + len(delivery) + len(receiving) + len(parking)
     return {
         "num_vertices": num_vertices,
+        # Graph v2: the vertices a robot can walk through, the endpoints being leaves.
+        "num_walkable": sum(not role.is_task_endpoint for role in roles.values()),
         "num_segments": len(segments),
         "num_directed_edges": len(graph.edges),
         "num_one_way": sum(e.one_way for e in graph.edges),
@@ -87,11 +86,11 @@ def measure(instance: GeneratedInstance, num_agents: int) -> dict[str, Any]:
         "trip_mean": statistics.mean(trips) if trips else None,
         "trip_min": min(trips) if trips else None,
         "trip_max": max(trips) if trips else None,
+        "trip_ratio": max(trips) / min(trips) if trips else None,
         "connected": connectivity.ok,
         "well_formed": well_formedness.ok,
         "blocked_pairs": len(well_formedness.blocked_pairs),
     }
-
 
 
 def layout(instance: GeneratedInstance) -> dict[str, Any]:
@@ -111,10 +110,7 @@ def layout(instance: GeneratedInstance) -> dict[str, Any]:
     }
 
 
-
-def write_instance(
-    out: Path, num_agents: int, seed: int, instance_layout: dict[str, Any]
-) -> Path:
+def write_instance(out: Path, num_agents: int, seed: int, instance_layout: dict[str, Any]) -> Path:
     """Write one drawable warehouse layout as its own JSON file."""
     directory = out / INSTANCES / f"fleet_{num_agents}"
     directory.mkdir(parents=True, exist_ok=True)
@@ -122,7 +118,6 @@ def write_instance(
     path = directory / f"seed_{seed}.json"
     path.write_text(json.dumps(instance_layout))
     return path
-
 
 
 def report_rows(
@@ -156,10 +151,8 @@ def report_rows(
     return rows, layouts
 
 
-
 def _mean(rows: list[dict[str, Any]], key: str) -> float:
     return statistics.mean(row[key] for row in rows if row[key] is not None)
-
 
 
 def summary(rows: list[dict[str, Any]], instance_seeds: dict[int, int]) -> str:
@@ -170,10 +163,10 @@ def summary(rows: list[dict[str, Any]], instance_seeds: dict[int, int]) -> str:
         "Means over the seeds per fleet size. The discard rate is the share of sampled layouts",
         "that no role placement made well-formed. `used` is the instance of the config's seed.",
         "",
-        "| m | seeds | pass | discard | V | V per agent | segments | aisles | cross-aisles | "
-        "str | del | rcv | ep | role share | degree | roles on leaves | d^trip mean | "
-        "seconds |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| m | seeds | pass | discard | V | walkable | V per agent | segments | aisles | "
+        "cross-aisles | str | del | rcv | ep | role share | degree | roles on leaves | "
+        "d^trip min | d^trip mean | d^trip max | d^trip ratio | seconds |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
 
     for num_agents in sorted({row["num_agents"] for row in rows}):
@@ -183,34 +176,34 @@ def summary(rows: list[dict[str, Any]], instance_seeds: dict[int, int]) -> str:
         lines.append(
             f"| {num_agents} | {len(group)} | {passed}/{len(group)} | "
             f"{(attempts - len(group)) / attempts:.2f} | {_mean(group, 'num_vertices'):.0f} | "
+            f"{_mean(group, 'num_walkable'):.0f} | "
             f"{_mean(group, 'vertices_per_agent'):.1f} | {_mean(group, 'num_segments'):.0f} | "
             f"{_mean(group, 'num_aisles'):.1f} | {_mean(group, 'num_cross_aisles'):.1f} | "
             f"{_mean(group, 'num_storage'):.0f} | {_mean(group, 'num_delivery'):.0f} | "
             f"{_mean(group, 'num_receiving'):.0f} | {_mean(group, 'num_parking'):.0f} | "
             f"{_mean(group, 'role_share'):.3f} | {_mean(group, 'mean_degree'):.2f} | "
-            f"{_mean(group, 'roles_on_leaves'):.1f} | {_mean(group, 'trip_mean'):.1f} | "
+            f"{_mean(group, 'roles_on_leaves'):.1f} | {_mean(group, 'trip_min'):.1f} | "
+            f"{_mean(group, 'trip_mean'):.1f} | {_mean(group, 'trip_max'):.1f} | "
+            f"{_mean(group, 'trip_ratio'):.2f} | "
             f"{_mean(group, 'generation_seconds'):.1f} |"
         )
 
     lines += ["", "## The instance each config uses", ""]
 
     for num_agents, seed in sorted(instance_seeds.items()):
-        used = next(
-            row
-            for row in rows
-            if row["num_agents"] == num_agents and row["seed"] == seed
-        )
+        used = next(row for row in rows if row["num_agents"] == num_agents and row["seed"] == seed)
         lines.append(
-            f"- m={num_agents}, seed {seed}: |V|={used['num_vertices']}, "
+            f"- m={num_agents}, seed {seed}: |V|={used['num_vertices']} "
+            f"({used['num_walkable']} walkable), "
             f"{used['num_segments']} segments, {used['num_aisles']} aisles of length "
             f"{used['aisle_length_min']} to {used['aisle_length_max']}, "
             f"{used['num_cross_aisles']} cross-aisles, d^trip {used['trip_min']:.0f} to "
-            f"{used['trip_max']:.0f} (mean {used['trip_mean']:.1f}), "
+            f"{used['trip_max']:.0f} (mean {used['trip_mean']:.1f}, ratio "
+            f"{used['trip_ratio']:.2f}), "
             f"{used['topology_attempts']} layout(s) sampled, well-formed {used['well_formed']}."
         )
 
     return "\n".join(lines) + "\n"
-
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -219,7 +212,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--seeds", type=int, default=50, help="seeds 0 to SEEDS - 1")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -248,11 +240,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     used_seeds_path = args.out / INSTANCES / USED_SEEDS
     used_seeds_path.parent.mkdir(parents=True, exist_ok=True)
-    used_seeds_path.write_text(
-        json.dumps({str(m): seed for m, seed in instance_seeds.items()})
-    )
+    used_seeds_path.write_text(json.dumps({str(m): seed for m, seed in instance_seeds.items()}))
     print(f"Wrote {used_seeds_path}", flush=True)
-
 
 
 if __name__ == "__main__":

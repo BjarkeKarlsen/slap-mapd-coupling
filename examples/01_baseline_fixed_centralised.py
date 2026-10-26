@@ -29,6 +29,7 @@ from slap_mapd_coupling.evaluation.evaluator import run_episode
 from slap_mapd_coupling.instances.generator import (
     GeneratedInstance,
     GeneratorParams,
+    fleet_defaults,
     generate_and_validate,
     generate_instance,
 )
@@ -47,22 +48,7 @@ ILLUSTRATIVE_OBSERVATION_DEPTH = 2
 
 
 def _instance_params() -> GeneratorParams:
-    return GeneratorParams(
-        max_num_aisles=7,
-        max_aisle_length=7,
-        max_num_cross_aisles=6,
-        one_way_fraction=0.0,
-        default_edge_cost=1.0,
-        random_edge_costs=False,
-        edge_cost_range=(0.5, 2.0),
-        wait_cost=0.2,
-        num_storage_vertices=4,
-        num_delivery_vertices=4,
-        num_endpoints=FLEET_SIZE,
-        # At least two role vertices must have two distinct neighbours.
-        min_internal_role_vertices=2,
-        seed=42,
-    )
+    return GeneratorParams(**fleet_defaults(FLEET_SIZE), wait_cost=0.2)
 
 
 def build_instance() -> WarehouseGraph:
