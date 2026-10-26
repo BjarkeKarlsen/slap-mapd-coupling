@@ -113,7 +113,7 @@ def test_a_trace_replays_with_every_layer_on_and_off(tmp_path):
         assert renderer.zoom == 2.0 and renderer._pixels[storage[0]] != before
         renderer.reset_view()
         assert renderer._pixels[storage[0]] == before
-        for title in ("at", "doing", "goal", "still", "agent"):
+        for title in ("doing", "goal", "still", "agent"):
             renderer.sort, renderer.panel = title, "agents"
             renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(14))
         renderer.help = True

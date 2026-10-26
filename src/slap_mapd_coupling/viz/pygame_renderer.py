@@ -111,13 +111,12 @@ PANELS = {
     "selected": "Selected",
 }
 _PANEL_TITLES = {**PANELS, "done": "Last tasks done"}
-# The columns of the agent table: title, x from the card's left edge, and the sort key.
-_COLUMNS = (
-    ("agent", 0, lambda a, agent, still: int(a)),
-    ("at", 52, lambda a, agent, still: agent["at"]),
-    ("doing", 104, lambda a, agent, still: _doing(agent)),
-    ("goal", 250, lambda a, agent, still: -1 if agent.get("goal") is None else agent["goal"]),
-    ("still", 310, lambda a, agent, still: -still),
+# What the agent list can be sorted by: a name and the sort key.
+_SORTS = (
+    ("agent", lambda a, agent, still: int(a)),
+    ("doing", lambda a, agent, still: _doing(agent)),
+    ("goal", lambda a, agent, still: -1 if agent.get("goal") is None else agent["goal"]),
+    ("still", lambda a, agent, still: -still),
 )
 _HELP = (
     ("space", "pause or continue"),
@@ -166,6 +165,10 @@ def _pretty(name: Any) -> str:
     """A config name as a reader would write it: token_passing becomes Token passing."""
     text = str(name).replace("_", " ")
     return text[:1].upper() + text[1:]
+
+
+def _steps(n: int) -> str:
+    return f"{n} step" + ("" if n == 1 else "s")
 
 
 def _stat(label: str, value: Any, colour=None, action=None) -> tuple:
@@ -332,6 +335,7 @@ class WarehouseRenderer:
         self._press: tuple[int, int] | None = None
         self._panning = False
         self._note = ""
+        self._scroll: dict[str, int] = {}  # how far each sidebar panel is scrolled down
         self._live = Timeline()
         self._hits: list[tuple[Any, Callable[[], Any]]] = []
         self._frame: Mapping[str, Any] | None = None
@@ -486,6 +490,8 @@ class WarehouseRenderer:
             at = self._mouse()
             if self._map_rect().collidepoint(at):
                 self._zoom_at(1.25 if event.y > 0 else 0.8, at)
+            elif self._panel_w and at[0] >= self._size[0] - self._panel_w:
+                self._scroll[self.panel] = max(0, self._scroll.get(self.panel, 0) - 40 * event.y)
             return None
         if event.type == pygame.MOUSEBUTTONUP:
             self._drag = None
@@ -1011,29 +1017,43 @@ class WarehouseRenderer:
         ("heading", text): the name of a group of rows below it,
         ("stat", label, value, colour, action): a label on the left and its value on the
         right, the value in `colour` when one is given,
-        ("cells", texts, colour, action): one line of a table, the texts in fixed columns,
-        ("columns", titles): the column titles of a table, each a button that sorts by it,
         ("sku", rank, name, amount, action): a SKU in a box, its popularity rank first in a
         square of the rank's colour, then its name, then the amount in a box of its own,
         ("bar", label, share, value, colour): a label and its value, and under them a bar
         filled to `share`,
+        ("box", badge, badge_colour, round, label, detail, value, action): an item in a box,
+        a badge on the left (a circle when `round`, else a square) with its short text, the
+        label, a detail in grey after it, and the value in a box of its own on the right,
+        ("chips", label, options, current, choose): a label and a row of small buttons, the
+        current one filled, `choose(option)` called on a click,
         ("note", text, colour): a line of plain text.
-        `action`, when given, is what a click on the row does."""
+        `action`, when given, is what a click on the row does. The rows scroll with the
+        mouse wheel when they do not fit the card."""
         pygame = self._pygame
         screen = self._screen
         text = _hex(theme.PALETTE["text"])
         left, right = card.left + 14, card.right - 14
         y = card.top + 12
         heights = {
-            "title": 34, "heading": 28, "stat": 21, "cells": 21, "columns": 24, "note": 21,
+            "title": 34, "heading": 28, "stat": 21, "note": 21,
             "bar": 32,
             "sku": 29,
+            "box": 29,
+            "chips": 30,
         }  # fmt: skip
+        total = sum(heights[row[0]] for row in rows)
+        room = card.height - 24
+        scroll = min(self._scroll.get(self.panel, 0), max(0, total - room))
+        self._scroll[self.panel] = scroll
+        y -= scroll
+        screen.set_clip(card.inflate(-2, -2))
         for row in rows:
             kind = row[0]
             height = heights[kind]
-            if y + height > card.bottom - 6:
-                screen.blit(self._small.render("more below, not shown", True, _MUTED), (left, y))
+            if y + height <= card.top + 4:
+                y += height  # scrolled out of view at the top
+                continue
+            if y > card.bottom - 6:
                 break
             action = None
             if kind == "title":
@@ -1044,11 +1064,35 @@ class WarehouseRenderer:
             elif kind == "stat":
                 _, label, value, colour, action = row
                 screen.blit(self._font.render(_pretty(label), True, text), (left, y))
-                shown = self._value.render(str(value), True, colour or text)
+                # A zero is grey, so colour only shows where there is something to see.
+                zero = str(value).split(" ")[0] in ("0", "0.000", "0%")
+                shown = self._value.render(str(value), True, _MUTED if zero else colour or text)
                 screen.blit(shown, (right - shown.get_width(), y))
             elif kind == "sku":
                 _, rank, sku, amount, action = row
                 self._draw_sku(pygame.Rect(left, y, right - left, 25), rank, sku, amount)
+            elif kind == "box":
+                _, badge, badge_colour, round_, label, detail, value, action = row
+                self._draw_box(
+                    pygame.Rect(left, y, right - left, 25), str(badge), badge_colour, round_,
+                    label, detail, value,
+                )  # fmt: skip
+            elif kind == "chips":
+                _, label, options, current, choose = row
+                screen.blit(self._font.render(_pretty(label), True, text), (left, y + 5))
+                x = right
+                for option in reversed(options):
+                    shown = self._small.render(
+                        option, True, _WHITE if option == current else _SELECT
+                    )
+                    chip = pygame.Rect(0, 0, shown.get_width() + 14, 22)
+                    chip.topright = (x, y + 1)
+                    on = option == current
+                    pygame.draw.rect(screen, _SELECT if on else _WHITE, chip, border_radius=11)
+                    pygame.draw.rect(screen, _SELECT, chip, 1, border_radius=11)
+                    screen.blit(shown, shown.get_rect(center=chip.center))
+                    self._hit(chip, lambda option=option: choose(option))
+                    x = chip.left - 4
             elif kind == "bar":
                 _, label, share, value, colour = row
                 screen.blit(self._font.render(_pretty(label), True, text), (left, y))
@@ -1060,50 +1104,59 @@ class WarehouseRenderer:
                 filled.width = int(track.width * min(max(share, 0.0), 1.0))
                 if filled.width:
                     pygame.draw.rect(screen, colour, filled, border_radius=3)
-            elif kind == "cells":
-                _, cells, colour, action = row
-                for (_, x, _), cell in zip(_COLUMNS, cells):
-                    screen.blit(self._font.render(str(cell), True, colour), (left + x, y))
-            elif kind == "columns":
-                for i, (title, x, _) in enumerate(_COLUMNS):
-                    on = title == self.sort
-                    shown = self._heading.render(
-                        title.upper() + (" v" if on else ""), True, _SELECT if on else _MUTED
-                    )
-                    screen.blit(shown, (left + x, y + 4))
-                    width = (_COLUMNS[i + 1][1] if i + 1 < len(_COLUMNS) else 60) - x
-                    self._hit(
-                        pygame.Rect(left + x, y, width, height),
-                        lambda title=title: self._set_sort(title),
-                    )
             else:
                 screen.blit(self._font.render(_pretty(row[1]), True, row[2]), (left, y))
             if action is not None:
-                self._hit(pygame.Rect(card.left, y - 2, card.width, height), action)
+                visible = pygame.Rect(card.left, y - 2, card.width, height).clip(card)
+                if visible.height:
+                    self._hit(visible, action)
             y += height
+        screen.set_clip(None)
+        if total > room:
+            more = "scroll for more" if scroll < total - room else "top: scroll up"
+            hint = self._small.render(more, True, _MUTED)
+            screen.blit(hint, (right - hint.get_width(), card.bottom - 16))
 
-    def _draw_sku(self, box, rank: int, sku: str, amount: Any) -> None:
-        """One boxed SKU row: the rank in its colour, the name, the amount."""
+    def _draw_box(
+        self, box, badge: str, badge_colour, round_: bool, label: str, detail: str, value: Any
+    ) -> None:
+        """One boxed row: a badge on the left, the label and a grey detail, the value."""
         pygame = self._pygame
         screen = self._screen
         text = _hex(theme.PALETTE["text"])
         pygame.draw.rect(screen, _PAPER, box, border_radius=6)
         pygame.draw.rect(screen, _RULE, box, 1, border_radius=6)
-        colour = rank_colour(rank, self._sku_count)
-        square = pygame.Rect(box.left, box.top, 34, box.height)
-        pygame.draw.rect(screen, colour, square, border_radius=6)
-        # Dark text on the pale end of the scale, white on the dark end.
-        ink = text if sum(colour) > 560 else _WHITE
-        number = self._value.render(str(rank + 1), True, ink)
-        screen.blit(number, number.get_rect(center=square.center))
-        name = self._font.render(sku, True, text)
-        screen.blit(name, (square.right + 10, box.centery - name.get_height() // 2))
-        shown = self._value.render(str(amount), True, text)
+        if round_:
+            centre = (box.left + box.height // 2, box.centery)
+            pygame.draw.circle(screen, badge_colour, centre, box.height // 2 - 1)
+            badge_right = box.left + box.height
+        else:
+            square = pygame.Rect(box.left, box.top, 34, box.height)
+            pygame.draw.rect(screen, badge_colour, square, border_radius=6)
+            centre, badge_right = square.center, square.right
+        # Dark text on a pale badge, white on a dark one.
+        ink = text if sum(badge_colour) > 560 else _WHITE
+        shown_badge = self._value.render(badge, True, ink)
+        screen.blit(shown_badge, shown_badge.get_rect(center=centre))
+        name = self._font.render(label, True, text)
+        x = badge_right + 10
+        screen.blit(name, (x, box.centery - name.get_height() // 2))
+        if detail:
+            grey = self._small.render(detail, True, _MUTED)
+            screen.blit(grey, (x + name.get_width() + 8, box.centery - grey.get_height() // 2))
+        if value is None or value == "":
+            return
+        shown = self._value.render(str(value), True, text)
         pill = pygame.Rect(0, 0, max(shown.get_width() + 16, 40), box.height - 6)
         pill.midright = (box.right - 3, box.centery)
         pygame.draw.rect(screen, _WHITE, pill, border_radius=5)
         pygame.draw.rect(screen, _RULE, pill, 1, border_radius=5)
         screen.blit(shown, shown.get_rect(center=pill.center))
+
+    def _draw_sku(self, box, rank: int, sku: str, amount: Any) -> None:
+        """One boxed SKU row: the rank in its colour, the name, the amount."""
+        self._draw_box(box, str(rank + 1), rank_colour(rank, self._sku_count), False, sku, "",
+                       amount)  # fmt: skip
 
     def _sku_rows(self, units: Mapping[str, int], ranks: Mapping[str, int], action=None) -> list:
         """The boxed rows of a SKU list, most popular first."""
@@ -1113,8 +1166,8 @@ class WarehouseRenderer:
     def _set_sort(self, title: str) -> None:
         self.sort = title
 
-    def _toggle_idle(self) -> None:
-        self.hide_idle = not self.hide_idle
+    def _set_idle(self, option: str) -> None:
+        self.hide_idle = option == "hide"
 
     def _panel_rows(self, step, stock, header, ranks, debug) -> list:
         name = self.panel
@@ -1205,10 +1258,11 @@ class WarehouseRenderer:
             workstations = stock.get("workstations", {})
             if workstations:
                 rows.append(("heading", "Open picks per workstation"))
+                colour = _hex(theme.ROLE_STYLES["delivery"].edge)
                 for v, count in workstations.items():
                     rows.append(
-                        _stat(f"workstation {v}", count, None,
-                              lambda v=int(v): self._pick(("vertex", v)))
+                        ("box", "W", colour, False, f"workstation {v}", "", count,
+                         lambda v=int(v): self._pick(("vertex", v)))
                     )  # fmt: skip
             for v, units in docks.items():
                 rows.append(("heading", f"Dock {v}, units by SKU"))
@@ -1220,27 +1274,34 @@ class WarehouseRenderer:
             rows.append(_stat("agents blocked", len(debug["blocked"]), _RED))
             rows.append(_stat("agents overridden", debug["overridden"], _RED))
             longest = max(debug["still_for"].values(), default=0)
-            rows.append(_stat("longest still", f"{longest} steps", _RED))
-            rows.append(_stat("whole fleet still", f"{debug['fleet_still']} steps", _RED))
+            rows.append(_stat("longest still", _steps(longest), _RED))
+            rows.append(_stat("whole fleet still", _steps(debug["fleet_still"]), _RED))
             if debug["blocked_by"]:
                 rows.append(("heading", "Who waits on whom"))
                 for a, blocker in sorted(debug["blocked_by"].items()):
                     rows.append(
-                        _stat(f"agent {a}", f"waits on {blocker}", _RED,
-                              lambda a=a: self._pick(("agent", a)))
+                        ("box", a, _RED, True, f"waits on agent {blocker}",
+                         f"at {step['agents'][a]['at']}", "", lambda a=a: self._pick(("agent", a)))
                     )  # fmt: skip
             rows.append(("heading", f"Still steps, last {_WINDOW} steps"))
             for v, c in sorted(debug["heat"].items(), key=lambda kv: -kv[1])[:6]:
-                rows.append(_stat(f"vertex {v}", c, _RED, lambda v=v: self._pick(("vertex", v))))
+                role = _ROLE_LABELS.get(self._role(v) or "", "aisle")
+                rows.append(
+                    ("box", "V", _RED, False, f"vertex {v}", role, _steps(c),
+                     lambda v=v: self._pick(("vertex", v)))
+                )  # fmt: skip
             return rows
         if name == "agents":
             idle = sum(1 for agent in step["agents"].values() if agent.get("phase") is None)
             rows.append(
-                _stat("hide idle agents", f"{'on' if self.hide_idle else 'off'} ({idle} idle)",
-                      _SELECT, self._toggle_idle)
+                ("chips", f"idle agents ({idle})", ("show", "hide"),
+                 "hide" if self.hide_idle else "show", self._set_idle)
             )  # fmt: skip
-            rows.append(("columns", [title for title, _, _ in _COLUMNS]))
-            (key,) = [k for title, _, k in _COLUMNS if title == self.sort]
+            rows.append(
+                ("chips", "sort by", [title for title, _ in _SORTS], self.sort,
+                 self._set_sort)
+            )  # fmt: skip
+            (key,) = [k for title, k in _SORTS if title == self.sort]
             agents = [
                 (a, agent, debug["still_for"].get(a, 0))
                 for a, agent in step["agents"].items()
@@ -1248,20 +1309,23 @@ class WarehouseRenderer:
             ]
             for a, agent, still in sorted(agents, key=lambda item: key(*item)):
                 goal = agent.get("goal")
-                cells = (a, agent["at"], _doing(agent), "-" if goal is None else goal, still)
+                where = f"at {agent['at']}" + ("" if goal is None else f", to {goal}")
                 rows.append(
-                    ("cells", cells, _agent_colour(agent), lambda a=a: self._pick(("agent", a)))
-                )
+                    ("box", a, _agent_colour(agent), True, _doing(agent), where,
+                     f"still {still}" if still else "", lambda a=a: self._pick(("agent", a)))
+                )  # fmt: skip
             return rows
         recent = list(reversed(step.get("recent", [])))
         if not recent:
             return rows + [("note", "No task done yet.", _MUTED)]
         for t_done, kind, sku, quantity, source, target, agent_id in recent:
-            what = "put away" if kind == "putaway" else "picked"
-            rows.append(("heading", f"Step {t_done}, agent {agent_id}"))
+            putaway = kind == "putaway"
+            colour = _PURPLE if putaway else _hex(_PHASE_COLOURS["to_delivery"])
+            what = "put away" if putaway else "picked"
             rows.append(
-                _stat(f"{sku} x{quantity} {what}", f"{source} to {target}", None,
-                      lambda a=agent_id: self._pick(("agent", str(a))))
+                ("box", agent_id, colour, True, f"{sku} x{quantity} {what}",
+                 f"{source} to {target}", f"step {t_done}",
+                 lambda a=agent_id: self._pick(("agent", str(a))))
             )  # fmt: skip
         return rows
 
@@ -1293,7 +1357,7 @@ class WarehouseRenderer:
             if agent.get("sku") is not None:
                 rows.append(_stat("SKU", f"{agent['sku']} x{agent.get('quantity') or 1}"))
             rows.append(("heading", "Congestion"))
-            rows.append(_stat("still for", f"{debug['still_for'].get(key, 0)} steps"))
+            rows.append(_stat("still for", _steps(debug["still_for"].get(key, 0))))
             rows.append(_stat("congestion", "-" if level is None else f"{level:.2f}"))
             if key in debug["blocked_by"]:
                 blocker = debug["blocked_by"][key]
