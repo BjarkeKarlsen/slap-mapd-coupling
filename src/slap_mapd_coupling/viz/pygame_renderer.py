@@ -101,6 +101,25 @@ PANELS = {
 }
 
 
+# The panel title of each sidebar tab.
+_PANEL_TITLES = {
+    "episode": "Episode",
+    "stock": "Stock",
+    "docks": "Docks",
+    "congestion": "Congestion",
+    "agents": "Agents",
+    "done": "Last tasks done",
+    "selected": "Selected",
+}
+# The x of each column of the agent table, from the card's left edge.
+_COLUMNS = (0, 52, 104, 250, 310)
+
+
+def _stat(label: str, value: Any, colour=None, action=None) -> tuple:
+    """A panel row with a label on the left and its value on the right."""
+    return ("stat", label, value, colour, action)
+
+
 def _hex(colour: str) -> tuple[int, int, int]:
     h = colour.lstrip("#")
     return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
@@ -223,6 +242,12 @@ class WarehouseRenderer:
         self._small = pygame.font.Font(None, 16)
         self._title = pygame.font.Font(None, 22)
         self._title.set_bold(True)
+        self._title_large = pygame.font.Font(None, 28)
+        self._title_large.set_bold(True)
+        self._heading = pygame.font.Font(None, 15)
+        self._heading.set_bold(True)
+        self._value = pygame.font.Font(None, 20)
+        self._value.set_bold(True)
         self._label = pygame.font.Font(None, 18)
         self._label.set_bold(True)
         self._roles = {v["id"]: v for v in header["vertices"]}
@@ -765,72 +790,90 @@ class WarehouseRenderer:
         card = pygame.Rect(x0 + 10, y + 10, _PANEL - 20, self._size[1] - y - 30 - 150)
         pygame.draw.rect(screen, _WHITE, card, border_radius=8)
         pygame.draw.rect(screen, _RULE, card, 1, border_radius=8)
-        rows = self._panel_rows(step, stock, header, ranks, debug)
-        ry = card.top + 12
-        for row in rows:
-            if ry > card.bottom - 20:
-                screen.blit(self._small.render("...", True, _MUTED), (card.left + 12, ry))
-                break
-            label, colour = row[0], row[1]
-            screen.blit(self._font.render(label, True, colour), (card.left + 12, ry))
-            if len(row) > 2:
-                self._hit(pygame.Rect(card.left, ry - 2, card.width, 19), row[2])
-            ry += 19
+        self._draw_rows(self._panel_rows(step, stock, header, ranks, debug), card)
         self._draw_legend(x0 + 10, card.bottom + 10, _PANEL - 20)
 
-    def _panel_rows(self, step, stock, header, ranks, debug) -> list:
+    def _draw_rows(self, rows: list, card) -> None:
+        """Draw a panel's rows inside its card, every row from the same left edge.
+
+        A row is one of
+        ("title", text): the panel's name, large, with a rule under it,
+        ("heading", text): the name of a group of rows below it,
+        ("stat", label, value, colour, action): a label on the left and its value on the
+        right, the value in `colour` when one is given,
+        ("cells", texts, colour, action): one line of a table, the texts in fixed columns,
+        ("note", text, colour): a line of plain text.
+        `action`, when given, is what a click on the row does."""
+        pygame = self._pygame
+        screen = self._screen
         text = _hex(theme.PALETTE["text"])
+        left, right = card.left + 14, card.right - 14
+        y = card.top + 12
+        for row in rows:
+            kind = row[0]
+            height = {"title": 34, "heading": 28, "stat": 21, "cells": 21, "note": 21}[kind]
+            if y + height > card.bottom - 6:
+                screen.blit(self._small.render("more below, not shown", True, _MUTED), (left, y))
+                break
+            action = None
+            if kind == "title":
+                screen.blit(self._title_large.render(row[1], True, text), (left, y))
+                pygame.draw.line(screen, _RULE, (left, y + 27), (right, y + 27))
+            elif kind == "heading":
+                screen.blit(self._heading.render(row[1].upper(), True, _MUTED), (left, y + 10))
+            elif kind == "stat":
+                _, label, value, colour, action = row
+                screen.blit(self._font.render(label, True, text), (left, y))
+                shown = self._value.render(str(value), True, colour or text)
+                screen.blit(shown, (right - shown.get_width(), y))
+            elif kind == "cells":
+                _, cells, colour, action = row
+                for x, cell in zip(_COLUMNS, cells):
+                    screen.blit(self._font.render(str(cell), True, colour), (left + x, y))
+            else:
+                screen.blit(self._font.render(row[1], True, row[2]), (left, y))
+            if action is not None:
+                self._hit(pygame.Rect(card.left, y - 2, card.width, height), action)
+            y += height
+
+    def _panel_rows(self, step, stock, header, ranks, debug) -> list:
         name = self.panel
+        rows: list = [("title", _PANEL_TITLES[name])]
         if name == "selected":
-            return self._selected_rows(step, stock, header, ranks, debug) or [
-                ("Click an agent or a vertex on the map.", _MUTED)
-            ]
+            return rows + (
+                self._selected_rows(step, stock, header, ranks, debug)
+                or [("note", "Click an agent or a vertex on the map.", _MUTED)]
+            )
         if name == "episode":
             config = header.get("config", {})
             t = step.get("t")
-            rows = []
             who = config.get("planner") or config.get("controller")
             if who:
-                rows.append((f"{who}, {config.get('storage_mode')} storage", text))
-                rows.append(
-                    (
-                        f"{config.get('num_agents')} agents, seed {config.get('seed')}",
-                        text,
-                    )
-                )
-                rows.append(("", text))
+                rows.append(("heading", "Run"))
+                rows.append(_stat("routing", who))
+                rows.append(_stat("storage rule", config.get("storage_mode")))
+                rows.append(_stat("agents", config.get("num_agents")))
+                rows.append(_stat("seed", config.get("seed")))
             if t is not None:
+                rows.append(("heading", "Progress"))
                 horizon = config.get("horizon")
-                warmup = config.get("warmup") or 0
-                rows.append(
-                    (
-                        f"step {t}"
-                        + (f" of {horizon}" if horizon else "")
-                        + ("  (warm-up)" if t < warmup else ""),
-                        text,
-                    )
-                )
+                rows.append(_stat("step", f"{t} of {horizon}" if horizon else t))
+                if t < (config.get("warmup") or 0):
+                    rows.append(("note", "in the warm-up, not scored", _MUTED))
             if "orders_done" in step:
                 rows.append(
-                    (
-                        f"orders done {step['orders_done']} of {step['orders_released']}",
-                        text,
-                    )
+                    _stat("orders done", f"{step['orders_done']} of {step['orders_released']}")
                 )
             if "completed" in step:
-                rows.append((f"tasks done {step['completed']} of {step['released']}", text))
+                rows.append(_stat("tasks done", f"{step['completed']} of {step['released']}"))
                 rows.append(
-                    (
-                        f"tasks done per step {step['completed'] / max(t or 1, 1):.3f}",
-                        text,
-                    )
+                    _stat("tasks done per step", f"{step['completed'] / max(t or 1, 1):.3f}")
                 )
-                rows.append((f"backlog {step['backlog']}", text))
+                rows.append(_stat("backlog", step["backlog"]))
             return rows
-        if stock is None:
-            if name in ("stock", "docks"):
-                return [("No stock in this trace.", _MUTED)]
-        shelves = stock["shelves"].values() if stock else []
+        if stock is None and name in ("stock", "docks"):
+            return rows + [("note", "This trace has no stock.", _MUTED)]
+        shelves = list(stock["shelves"].values()) if stock else []
         if name == "stock":
             capacities = header.get("capacities", {})
             sizes = header.get("skus", {})
@@ -840,144 +883,132 @@ class WarehouseRenderer:
                 for k, units in e["units"].items():
                     totals[k] = totals.get(k, 0) + units
                     used += units * sizes.get(k, 1.0)
-            rows = [(f"slots {used / max(sum(capacities.values()), 1e-9):.0%} full", text)]
+            rows.append(("heading", "Slots"))
+            rows.append(_stat("full", f"{used / max(sum(capacities.values()), 1e-9):.0%}"))
             if "orders_short" in stock:
-                rows.append(
-                    (
-                        f"picks waiting for an agent {sum(e['queued'] for e in shelves)}",
-                        _hex("#c0392b"),
-                    )
-                )
-                rows.append(
-                    (
-                        f"picks with an agent coming {sum(e['coming'] for e in shelves)}",
-                        _hex("#e08a1e"),
-                    )
-                )
-                rows.append((f"order lines short of stock {stock['orders_short']}", text))
-            rows.append(("", text))
-            rows.append(("most popular SKUs, units on the slots", text))
-            for k in stock["ranking"][:10]:
+                queued = sum(e["queued"] for e in shelves)
+                coming = sum(e["coming"] for e in shelves)
+                rows.append(_stat("picks waiting for an agent", queued, _hex("#c0392b")))
+                rows.append(_stat("picks with an agent coming", coming, _hex("#e08a1e")))
+                rows.append(_stat("order lines short of stock", stock["orders_short"]))
+            rows.append(("heading", "Most popular SKUs, units on the slots"))
+            for k in stock["ranking"][:8]:
                 rank = ranks[k]
                 rows.append(
-                    (
-                        f"   {rank + 1}. {k}   {totals.get(k, 0)}",
-                        rank_colour(rank, len(ranks)),
-                    )
+                    _stat(f"{rank + 1}. {k}", totals.get(k, 0), rank_colour(rank, len(ranks)))
                 )
             return rows
         if name == "docks":
-            colour = _hex(theme.ROLE_STYLES["receiving"].edge)
-            arriving: dict[str, int] = {}
-            for units in stock.get("docks", {}).values():
-                for k, u in units.items():
-                    arriving[k] = arriving.get(k, 0) + u
+            dock_colour = _hex(theme.ROLE_STYLES["receiving"].edge)
+            docks = stock.get("docks", {})
             putaways = sum(e.get("putaways", 0) for e in shelves)
-            rows = [
-                (f"{sum(arriving.values())} units wait at the docks", colour),
-                (f"{putaways} put-aways not yet on their slot", colour),
-                ("", text),
-            ]
-            for v, units in stock.get("docks", {}).items():
-                rows.append((f"dock {v}", text, lambda v=int(v): self._pick(("vertex", v))))
+            rows.append(("heading", "Arrived stock"))
+            rows.append(
+                _stat("units waiting at the docks", sum(sum(u.values()) for u in docks.values()))
+            )
+            rows.append(_stat("put-aways not yet on a slot", putaways))
+            for v, units in docks.items():
+                rows.append(("heading", f"Dock {v}"))
                 for k, u in sorted(units.items(), key=lambda kv: -kv[1]):
-                    rows.append((f"   {k}   {u}", colour))
+                    rows.append(
+                        _stat(k, u, dock_colour, lambda v=int(v): self._pick(("vertex", v)))
+                    )
             return rows
         if name == "congestion":
-            rows = [
-                (f"agents still with a task {len(debug['still_with_task'])}", _RED),
-                (
-                    f"agents blocked {len(debug['blocked'])}, overridden {debug['overridden']}",
-                    _RED,
-                ),
-                (
-                    f"longest still {max(debug['still_for'].values(), default=0)} steps",
-                    _RED,
-                ),
-                (f"whole fleet still for {debug['fleet_still']} steps", _RED),
-                ("", text),
-            ]
-            for a, blocker in sorted(debug["blocked_by"].items()):
-                rows.append(
-                    (
-                        f"agent {a} waits on agent {blocker}",
-                        _RED,
-                        lambda a=a: self._pick(("agent", a)),
+            rows.append(("heading", "Now"))
+            rows.append(_stat("agents still with a task", len(debug["still_with_task"]), _RED))
+            rows.append(_stat("agents blocked", len(debug["blocked"]), _RED))
+            rows.append(_stat("agents overridden", debug["overridden"], _RED))
+            longest = max(debug["still_for"].values(), default=0)
+            rows.append(_stat("longest still", f"{longest} steps", _RED))
+            rows.append(_stat("whole fleet still", f"{debug['fleet_still']} steps", _RED))
+            if debug["blocked_by"]:
+                rows.append(("heading", "Who waits on whom"))
+                for a, blocker in sorted(debug["blocked_by"].items()):
+                    rows.append(
+                        _stat(
+                            f"agent {a}",
+                            f"waits on {blocker}",
+                            _RED,
+                            lambda a=a: self._pick(("agent", a)),
+                        )
                     )
-                )
-            rows.append(("vertices where agents stood still most", text))
-            for v, c in sorted(debug["heat"].items(), key=lambda kv: -kv[1])[:8]:
-                rows.append(
-                    (
-                        f"   vertex {v}   {c} steps",
-                        _RED,
-                        lambda v=v: self._pick(("vertex", v)),
-                    )
-                )
+            rows.append(("heading", f"Still steps, last {_WINDOW} steps"))
+            for v, c in sorted(debug["heat"].items(), key=lambda kv: -kv[1])[:6]:
+                rows.append(_stat(f"vertex {v}", c, _RED, lambda v=v: self._pick(("vertex", v))))
             return rows
         if name == "agents":
-            rows = [("agent   at    doing             goal  still", text)]
+            rows.append(("cells", ("agent", "at", "doing", "goal", "still"), _MUTED, None))
             for a, agent in step["agents"].items():
                 goal = agent.get("goal")
-                still = debug["still_for"].get(a, 0)
+                cells = (
+                    a,
+                    agent["at"],
+                    _doing(agent),
+                    "-" if goal is None else goal,
+                    debug["still_for"].get(a, 0),
+                )
                 rows.append(
-                    (
-                        f"{a:>4}  {agent['at']:>4}    {_doing(agent):<15}{'-' if goal is None else goal:>5}  {still:>4}",
-                        _agent_colour(agent),
-                        lambda a=a: self._pick(("agent", a)),
-                    )
+                    ("cells", cells, _agent_colour(agent), lambda a=a: self._pick(("agent", a)))
                 )
             return rows
-        rows = []
-        for t_done, kind, sku, quantity, source, target, agent_id in reversed(
-            step.get("recent", [])
-        ):
+        recent = list(reversed(step.get("recent", [])))
+        if not recent:
+            return rows + [("note", "No task done yet.", _MUTED)]
+        for t_done, kind, sku, quantity, source, target, agent_id in recent:
             what = "put away" if kind == "putaway" else "picked"
+            rows.append(("heading", f"Step {t_done}, agent {agent_id}"))
             rows.append(
-                (
-                    f"step {t_done}, agent {agent_id}",
-                    text,
+                _stat(
+                    f"{sku} x{quantity} {what}",
+                    f"{source} to {target}",
+                    None,
                     lambda a=agent_id: self._pick(("agent", str(a))),
                 )
             )
-            rows.append((f"   {sku} x{quantity} {what}, {source} to {target}", _MUTED))
-        return rows or [("No task done yet.", _MUTED)]
+        return rows
 
     def _selected_rows(self, step, stock, header, ranks, debug) -> list:
         if self.selected is None:
             return []
-        text = _hex(theme.PALETTE["text"])
         kind, key = self.selected
         if kind == "agent":
             agent = step["agents"].get(key)
             if agent is None:
                 return []
+            level = agent.get("congestion")
             rows = [
-                (f"agent {key}", _agent_colour(agent)),
-                (f"doing: {_doing(agent)}", text),
-                (f"at vertex {agent['at']}, next {agent.get('intent')}", text),
-                (f"task {agent.get('task')} ({agent.get('kind') or 'none'})", text),
-                (f"goal {agent.get('goal')}", text),
+                ("heading", f"Agent {key}"),
+                _stat("doing", _doing(agent), _agent_colour(agent)),
+                _stat("at vertex", agent["at"]),
+                _stat(
+                    "next vertex", agent.get("intent") if agent.get("intent") is not None else "-"
+                ),
+                _stat("goal", agent.get("goal") if agent.get("goal") is not None else "-"),
+                ("heading", "Task"),
+                _stat("task", agent.get("task") if agent.get("task") is not None else "none"),
+                _stat("kind", agent.get("kind") or "-"),
             ]
             if agent.get("sku") is not None:
-                rows.append((f"SKU {agent['sku']} x{agent.get('quantity') or 1}", text))
-            level = agent.get("congestion")
-            rows.append((f"still for {debug['still_for'].get(key, 0)} steps", text))
-            rows.append((f"congestion {'-' if level is None else f'{level:.2f}'}", text))
+                rows.append(_stat("SKU", f"{agent['sku']} x{agent.get('quantity') or 1}"))
+            rows.append(("heading", "Congestion"))
+            rows.append(_stat("still for", f"{debug['still_for'].get(key, 0)} steps"))
+            rows.append(_stat("congestion", "-" if level is None else f"{level:.2f}"))
             if key in debug["blocked_by"]:
                 blocker = debug["blocked_by"][key]
                 rows.append(
-                    (
-                        f"blocked by agent {blocker}",
+                    _stat(
+                        "blocked by",
+                        f"agent {blocker}",
                         _RED,
                         lambda: self._pick(("agent", blocker)),
                     )
                 )
             if agent.get("overridden"):
-                rows.append(("overridden by conflict resolution", _RED))
+                rows.append(("note", "overridden by conflict resolution", _RED))
             return rows
         v = key
-        rows = [(f"vertex {v}, {_ROLE_LABELS.get(self._role(v) or '', 'aisle')}", text)]
+        rows = [("heading", f"Vertex {v}, {_ROLE_LABELS.get(self._role(v) or '', 'aisle')}")]
         shelves = stock["shelves"] if stock else {}
         entry = shelves.get(str(v))
         cap = header.get("capacities", {}).get(str(v))
@@ -985,40 +1016,42 @@ class WarehouseRenderer:
             sizes = header.get("skus", {})
             held = entry["units"] if entry else {}
             used = sum(u * sizes.get(k, 1.0) for k, u in held.items())
-            rows.append((f"used {used:g} of {cap:g}", text))
+            rows.append(_stat("space used", f"{used:g} of {cap:g}"))
         if entry:
-            for k, u in sorted(entry["units"].items(), key=lambda kv: ranks.get(kv[0], 0)):
-                rank = ranks.get(k, 0)
-                rows.append((f"   {k} (rank {rank + 1})   {u}", rank_colour(rank, len(ranks))))
-            rows.append(
-                (
-                    f"picks waiting {entry['queued']}, agent coming {entry['coming']}",
-                    text,
-                )
-            )
-            rows.append((f"put-aways coming {entry['putaways']}", text))
-            for k, u in entry.get("incoming", {}).items():
-                rows.append((f"   on its way in: {k} {u}", _hex("#7a4fa3")))
-        for k, u in ((stock or {}).get("docks", {}).get(str(v), {})).items():
-            rows.append((f"   waiting here: {k} {u}", _hex("#7a4fa3")))
-        for a, agent in step["agents"].items():
-            if agent["at"] == v:
+            rows.append(_stat("picks waiting", entry["queued"], _hex("#c0392b")))
+            rows.append(_stat("agent coming", entry["coming"], _hex("#e08a1e")))
+            rows.append(_stat("put-aways coming", entry["putaways"], _hex("#7a4fa3")))
+            if entry["units"]:
+                rows.append(("heading", "Units by SKU"))
+                for k, u in sorted(entry["units"].items(), key=lambda kv: ranks.get(kv[0], 0)):
+                    rank = ranks.get(k, 0)
+                    rows.append(_stat(f"{k}, rank {rank + 1}", u, rank_colour(rank, len(ranks))))
+            if entry.get("incoming"):
+                rows.append(("heading", "On its way in"))
+                for k, u in entry["incoming"].items():
+                    rows.append(_stat(k, u, _hex("#7a4fa3")))
+        waiting = (stock or {}).get("docks", {}).get(str(v), {})
+        if waiting:
+            rows.append(("heading", "Waiting here"))
+            for k, u in waiting.items():
+                rows.append(_stat(k, u, _hex("#7a4fa3")))
+        agents = [
+            (a, agent, "here" if agent["at"] == v else "walks here")
+            for a, agent in step["agents"].items()
+            if agent["at"] == v or agent.get("goal") == v
+        ]
+        if agents:
+            rows.append(("heading", "Agents"))
+            for a, agent, where in agents:
                 rows.append(
-                    (
-                        f"agent {a} is here",
+                    _stat(
+                        f"agent {a}",
+                        where,
                         _agent_colour(agent),
                         lambda a=a: self._pick(("agent", a)),
                     )
                 )
-            if agent.get("goal") == v:
-                rows.append(
-                    (
-                        f"agent {a} walks here",
-                        _agent_colour(agent),
-                        lambda a=a: self._pick(("agent", a)),
-                    )
-                )
-        rows.append((f"{debug['heat'].get(v, 0)} still steps here lately", _RED))
+        rows.append(_stat(f"still steps here, last {_WINDOW}", debug["heat"].get(v, 0), _RED))
         return rows
 
     def _draw_legend(self, x: int, y: int, width: int) -> None:
