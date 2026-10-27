@@ -154,6 +154,11 @@ class ExperimentConfig(BaseModel):
     # and every ship task uniformly from V_rcv, "nearest" takes the dock nearest the slot.
     shipping: bool = False
     dock_choice: Literal["nearest", "random"] = "nearest"
+    # Step 12 (D22, [A69]): where F_fix's home shelves come from. "start", each SKU's shelf in
+    # the starting stock. "popularity", the class-based placement at t = 0, the SKU at rank r of
+    # the popularity ranking on the r-th storage vertex nearest the delivery vertices on
+    # average, so a random start does not make fixed storage random dedicated storage.
+    fixed_homes: Literal["start", "popularity"] = "start"
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":

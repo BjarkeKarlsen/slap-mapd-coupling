@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import bisect
 import random
+import statistics
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -374,7 +375,11 @@ class WarehouseMAPDEnv:
         self._home: dict[SkuId, VertexId] = {}
         if config.stock_model == "arrival":
             self._putaway_rule = get_putaway_rule(config.storage_mode)
-            self._home = _home_shelves(self._initial_counts)
+            self._home = (
+                _popularity_homes(graph, list(self._storage_capacities), self._sku_ids)
+                if config.fixed_homes == "popularity"
+                else _home_shelves(self._initial_counts)
+            )
             if config.storage_mode == "fixed" and set(self._home) != set(self._skus):
                 missing = sorted(set(self._skus) - set(self._home))
                 raise ValueError(
@@ -1313,6 +1318,23 @@ def _home_shelves(counts: Mapping[SkuId, Mapping[VertexId, int]]) -> dict[SkuId,
         if held:
             home[sku_id] = min(held)[1]
     return home
+
+
+def _popularity_homes(
+    graph: WarehouseGraph, storage_vertices: list[VertexId], sku_ids: list[SkuId]
+) -> dict[SkuId, VertexId]:
+    """F_fix's home shelves under fixed_homes "popularity" ([A69]): the class-based placement at
+    t = 0. The storage vertices are ordered by their mean distance to the delivery vertices, ties
+    by vertex id, and the SKUs in their order at t = 0, the popularity ranking before any
+    rotation, fill them in blocks of ceil(|K| / |V_str|), so with more shelves than SKUs each
+    SKU gets its own shelf, the most popular the nearest."""
+    delivery = [v for v, vertex in graph.vertices.items() if vertex.role.delivery]
+    nearest_first = sorted(
+        storage_vertices,
+        key=lambda v: (statistics.mean(graph.distance(v, g) for g in delivery), v),
+    )
+    block = -(-len(sku_ids) // len(nearest_first))  # the ceiling, in integers
+    return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(sku_ids)}
 
 
 def _prime_shelves(

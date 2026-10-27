@@ -918,6 +918,8 @@ def build_experiment_config(
         cold_stock_top_k=None if arrival is None else arrival.cold_stock_top_k,
         shipping=arrival is not None and arrival.shipping,
         dock_choice="nearest" if arrival is None else arrival.dock_choice,
+        # A random start gives F_fix class-based homes instead ([A69]).
+        fixed_homes="popularity" if spec.storage.initial_placement == "random_slots" else "start",
     )
 
 
