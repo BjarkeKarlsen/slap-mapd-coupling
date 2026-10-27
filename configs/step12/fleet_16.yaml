@@ -1,6 +1,6 @@
 # Step 12 of the model revision (D21 to D25), 16 agents, provisional. Made from
 # configs/fleet_16/decentralised.yaml: workstations on random rack faces, docks along the
-# left wall, 120 slots for 60 SKUs (about a quarter of the rack faces as SKUs), each SKU
+# left wall, 60 slots for 30 SKUs (about a quarter of the rack faces as SKUs), each SKU
 # starting alone on a random slot, shipping to a random dock. The SKU count and Q are set
 # from the sizing runs (part D of 12_flow_and_start.md).
 controller: decentralised
@@ -29,7 +29,7 @@ storage:
   - 1.0
   - 2.0
   initial_placement: random_slots
-  num_skus: 60
+  num_skus: 30
   seed: 0
 demand:
   skew: 1.0
@@ -78,8 +78,8 @@ checkpoint:
 warehouse_per_seed: true
 instance:
   layout: v2
-  num_aisles: 8
-  rack_rows: 10
+  num_aisles: 7
+  rack_rows: 4
   links_per_aisle_pair: 1
   num_transit_vertices: 256
   one_way_fraction: 0.0
@@ -90,5 +90,6 @@ instance:
   seed: 42
   station_placement: rack_faces
   lower_block: irregular
+  num_blocks: 4
   dock_placement: left_wall
-  num_storage_vertices: 120
+  num_storage_vertices: 60

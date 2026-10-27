@@ -102,6 +102,10 @@ class GeneratorParams(BaseModel):
     # down from the main pair with lengths drawn from the seed like the upper block's, so some
     # stop short of the front lane. The walkable count stays 16 m either way.
     lower_block: Literal["full", "irregular"] = "full"
+    # Graph v2 only: the number of rack blocks, each `rack_rows` deep, with a two-way cross lane
+    # between neighbouring blocks and the one-way main pair in the middle. None is the two
+    # blocks of the first graph v2. With a number set, every inner aisle segment is irregular.
+    num_blocks: PositiveInt | None = None
     # Graph v2 only: the docks at the front left corner, or spread evenly along the whole left
     # wall from the front to the back.
     dock_placement: Literal["corner", "left_wall"] = "corner"
@@ -173,9 +177,11 @@ class GeneratorParams(BaseModel):
             self.station_placement != "front_wall"
             or self.dock_placement != "corner"
             or self.lower_block != "full"
+            or self.num_blocks is not None
         ):
             raise ValueError(
-                "station_placement, dock_placement and lower_block only apply to layout='v2'."
+                "station_placement, dock_placement, lower_block and num_blocks only apply to "
+                "layout='v2'."
             )
         assert self.max_num_cross_aisles is not None and self.max_aisle_length is not None
 
@@ -235,6 +241,30 @@ class GeneratorParams(BaseModel):
         assert self.num_transit_vertices is not None
         if self.num_aisles < 3:
             raise ValueError("layout='v2' needs at least 3 aisles, two outer and one inner.")
+        if self.num_blocks is not None:
+            if self.num_blocks < 2:
+                raise ValueError("num_blocks must be at least 2, one each side of the main pair.")
+            if self.lower_block != "irregular":
+                raise ValueError("num_blocks makes every block irregular, so set lower_block too.")
+            inner = _v2_inner_sum(
+                self.num_transit_vertices,
+                self.num_aisles,
+                self.rack_rows,
+                self.links_per_aisle_pair,
+                self.num_blocks,
+            )
+            low, high = _v2_inner_bounds(
+                self.num_aisles, self.rack_rows, self.links_per_aisle_pair, self.num_blocks
+            )
+            if not low <= inner <= high:
+                raise ValueError(
+                    f"{self.num_transit_vertices} walkable vertices do not fit {self.num_aisles} "
+                    f"aisles in {self.num_blocks} blocks of {self.rack_rows} rack rows: the inner "
+                    f"aisle segments would hold {inner} vertices, outside {(low, high)}."
+                )
+            if self.links_per_aisle_pair > self.rack_rows - 2:
+                raise ValueError("links_per_aisle_pair cannot exceed rack_rows - 2.")
+            return self
         bounds = _v2_upper_inner_bounds(self.num_aisles, self.rack_rows, self.links_per_aisle_pair)
         upper_sum = _v2_upper_inner_sum(
             self.num_transit_vertices,
@@ -1338,6 +1368,70 @@ def _v2_upper_inner_bounds(
     return num_inner * shortest, num_inner * rack_rows - 1
 
 
+def _v2_inner_sum(
+    num_walkable: int, num_aisles: int, rack_rows: int, links_per_aisle_pair: int, num_blocks: int
+) -> int:
+    """The vertices left for the inner aisle segments of every block once the lane rows (the
+    front lane, the cross lanes, the main pair and the back lane), the outer aisles and the
+    links are counted."""
+    width = _v2_width(num_aisles)
+    links = num_blocks * (num_aisles - 1) * links_per_aisle_pair
+    return (
+        num_walkable
+        - (num_blocks + 2) * width
+        - 2 * num_blocks * rack_rows
+        - 2 * links
+    )
+
+
+def _v2_inner_bounds(
+    num_aisles: int, rack_rows: int, links_per_aisle_pair: int, num_blocks: int
+) -> tuple[int, int]:
+    """The fewest and most vertices the inner aisle segments can hold. Each is long enough for
+    its links, and at least one stops short of the lane it points to."""
+    count = num_blocks * (num_aisles - 2)
+    return count * (links_per_aisle_pair + 1), count * rack_rows - 1
+
+
+def v2_stacked_shape(num_agents: int, rack_rows: int) -> tuple[int, int]:
+    """The aisle count and the number of blocks of `rack_rows` rows of the fleet's warehouse
+    with stacked blocks. Of the shapes that hold 16 m walkable vertices, the most nearly square,
+    with the inner segments filled by a share in ``_V2_UPPER_FILL`` where one exists. Ties go to
+    fewer aisles."""
+    num_walkable = VERTICES_PER_AGENT * num_agents
+    preferred: list[tuple[int, int, int]] = []
+    feasible: list[tuple[int, int, int]] = []
+    for num_aisles in range(3, num_walkable):
+        width = _v2_width(num_aisles)
+        if 4 * width > num_walkable:
+            break
+        for num_blocks in range(2, num_walkable):
+            inner = _v2_inner_sum(
+                num_walkable, num_aisles, rack_rows, _V2_LINKS_PER_AISLE_PAIR, num_blocks
+            )
+            low, high = _v2_inner_bounds(
+                num_aisles, rack_rows, _V2_LINKS_PER_AISLE_PAIR, num_blocks
+            )
+            if inner < low:
+                break
+            if inner > high:
+                continue
+            depth = num_blocks * rack_rows + num_blocks + 2
+            candidate = (abs(width - depth), num_aisles, num_blocks)
+            feasible.append(candidate)
+            fill = inner / (num_blocks * (num_aisles - 2) * rack_rows)
+            if _V2_UPPER_FILL[0] <= fill <= _V2_UPPER_FILL[1]:
+                preferred.append(candidate)
+    shapes = preferred or feasible
+    if not shapes:
+        raise InstanceGenerationError(
+            f"No stacked graph v2 shape holds {num_walkable} walkable vertices for "
+            f"{num_agents} agents in blocks of {rack_rows} rack rows."
+        )
+    _, num_aisles, num_blocks = min(shapes)
+    return num_aisles, num_blocks
+
+
 def _v2_shape(num_agents: int) -> tuple[int, int]:
     """The aisle count and rack rows per block of the fleet's warehouse. Of the shapes that
     hold 16 m walkable vertices, the most nearly square, the lanes as long as the warehouse
@@ -1451,76 +1545,124 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     assert num_aisles is not None and rack_rows is not None and num_walkable is not None
     links_per_pair = params.links_per_aisle_pair
     width = _v2_width(num_aisles)
-    main_low, main_high = rack_rows + 1, rack_rows + 2
-    back = 2 * rack_rows + 3
+    num_blocks = params.num_blocks or 2
+    below = num_blocks // 2  # the blocks below the main pair
+
+    # The rows from the front: the front lane, then each block of rack rows, with the main pair
+    # after the last block below it, a two-way cross lane between any other two blocks, and the
+    # back lane after the last block. Each block is (its lowest row, its highest row).
+    blocks: list[tuple[int, int]] = []
+    cross_lanes: list[int] = []
+    row = 1
+    main_low = main_high = back = 0
+    for block in range(num_blocks):
+        blocks.append((row, row + rack_rows - 1))
+        row += rack_rows
+        if block == below - 1:
+            main_low, main_high = row, row + 1
+            row += 2
+        elif block < num_blocks - 1:
+            cross_lanes.append(row)
+            row += 1
+        else:
+            back = row
 
     def aisle_column(aisle: int) -> int:
         return _V2_AISLE_PITCH * aisle
 
-    upper_sum = _v2_upper_inner_sum(num_walkable, num_aisles, rack_rows, links_per_pair)
-    if params.lower_block == "full":
-        upper_inner = _random_bounded_lengths(
-            target_sum=upper_sum,
-            count=num_aisles - 2,
-            minimum=links_per_pair + 1,
-            maximum=rack_rows,
-            rng=random.Random(f"{params.seed}:v2:upper"),
-        )
-        lower_inner = [rack_rows] * (num_aisles - 2)
+    # lengths[block][aisle], the rows of each aisle segment, the outer aisles always full.
+    if params.num_blocks is None:
+        upper_sum = _v2_upper_inner_sum(num_walkable, num_aisles, rack_rows, links_per_pair)
+        if params.lower_block == "full":
+            upper_inner = _random_bounded_lengths(
+                target_sum=upper_sum,
+                count=num_aisles - 2,
+                minimum=links_per_pair + 1,
+                maximum=rack_rows,
+                rng=random.Random(f"{params.seed}:v2:upper"),
+            )
+            lower_inner = [rack_rows] * (num_aisles - 2)
+        else:
+            # The inner aisles of both blocks share what the full lower block held, so the
+            # walkable count is the same, and the lengths are drawn for both blocks at once.
+            both = _random_bounded_lengths(
+                target_sum=upper_sum + (num_aisles - 2) * rack_rows,
+                count=2 * (num_aisles - 2),
+                minimum=links_per_pair + 1,
+                maximum=rack_rows,
+                rng=random.Random(f"{params.seed}:v2:aisles"),
+            )
+            lower_inner, upper_inner = both[: num_aisles - 2], both[num_aisles - 2 :]
+        inner_by_block = [lower_inner, upper_inner]
     else:
-        # The inner aisles of both blocks share what the full lower block held, so the walkable
-        # count is the same, and the lengths are drawn for both blocks at once.
-        both = _random_bounded_lengths(
-            target_sum=upper_sum + (num_aisles - 2) * rack_rows,
-            count=2 * (num_aisles - 2),
+        drawn = _random_bounded_lengths(
+            target_sum=_v2_inner_sum(
+                num_walkable, num_aisles, rack_rows, links_per_pair, num_blocks
+            ),
+            count=num_blocks * (num_aisles - 2),
             minimum=links_per_pair + 1,
             maximum=rack_rows,
             rng=random.Random(f"{params.seed}:v2:aisles"),
         )
-        lower_inner, upper_inner = both[: num_aisles - 2], both[num_aisles - 2 :]
-    upper_lengths = (rack_rows, *upper_inner, rack_rows)
-    lower_lengths = (rack_rows, *lower_inner, rack_rows)
+        inner_by_block = [
+            drawn[block * (num_aisles - 2) : (block + 1) * (num_aisles - 2)]
+            for block in range(num_blocks)
+        ]
+    lengths = [(rack_rows, *inner, rack_rows) for inner in inner_by_block]
+
+    def segment(block: int, aisle: int) -> tuple[int, int]:
+        """The lowest and highest row of an aisle segment. A segment hangs from the lane on the
+        side of the main pair and reaches the far lane only at full length."""
+        low, high = blocks[block]
+        length = lengths[block][aisle]
+        return (high - length + 1, high) if block < below else (low, low + length - 1)
+
+    def near_and_far(block: int) -> tuple[int, int]:
+        """The lane rows on the side of the main pair and on the other side of a block."""
+        low, high = blocks[block]
+        return (high + 1, low - 1) if block < below else (low - 1, high + 1)
 
     # The walkable cells, and the undirected segments and one-way edges between them.
     walkable: list[GridCell] = []
     segments: list[tuple[GridCell, GridCell]] = []
     one_way: list[tuple[GridCell, GridCell]] = []
-    for row in (0, main_low, main_high, back):
-        walkable.extend((row, column) for column in range(width))
+    for lane in (0, main_low, main_high, *cross_lanes, back):
+        walkable.extend((lane, column) for column in range(width))
     for column in range(width - 1):
-        segments.append(((0, column), (0, column + 1)))
-        segments.append(((back, column), (back, column + 1)))
+        for lane in (0, *cross_lanes, back):
+            segments.append(((lane, column), (lane, column + 1)))
         one_way.append(((main_low, column), (main_low, column + 1)))
         one_way.append(((main_high, column + 1), (main_high, column)))
-    aisle_top: list[int] = []
-    aisle_bottom: list[int] = []
-    for aisle, (lower, upper) in enumerate(zip(lower_lengths, upper_lengths)):
+    for aisle in range(num_aisles):
         column = aisle_column(aisle)
-        top = main_high + upper
-        bottom = main_low - lower  # 1 when the aisle reaches the front lane
-        aisle_top.append(top)
-        aisle_bottom.append(bottom)
-        rows = [row for row in range(bottom, top + 1) if row not in (main_low, main_high)]
-        walkable.extend((row, column) for row in rows)
-        chain = (
-            ([0] if lower == rack_rows else [])
-            + list(range(bottom, top + 1))
-            + ([back] if upper == rack_rows else [])
-        )
-        segments.extend(((a, column), (b, column)) for a, b in zip(chain, chain[1:]))
+        # Every aisle crosses the main pair.
+        segments.append(((main_low, column), (main_high, column)))
+        for block in range(num_blocks):
+            first, last = segment(block, aisle)
+            near, far = near_and_far(block)
+            walkable.extend((r, column) for r in range(first, last + 1))
+            chain = list(range(first, last + 1))
+            chain = sorted(chain + [near] + ([far] if lengths[block][aisle] == rack_rows else []))
+            segments.extend(((a, column), (b, column)) for a, b in zip(chain, chain[1:]))
 
     link_rng = random.Random(f"{params.seed}:v2:links")
     link_rows: set[int] = set()
     link_cells: set[GridCell] = set()
     for aisle in range(num_aisles - 1):
         left, right = aisle_column(aisle), aisle_column(aisle + 1)
-        upper_top = min(aisle_top[aisle], aisle_top[aisle + 1])
-        lower_bottom = max(aisle_bottom[aisle], aisle_bottom[aisle + 1], 2)
-        # Links skip the rows that touch the front lane or the main pair, which already join
-        # the aisles there, and only join rows both aisles reach.
-        lower_rows = link_rng.sample(range(lower_bottom, rack_rows), links_per_pair)
-        upper_rows = link_rng.sample(range(main_high + 2, upper_top + 1), links_per_pair)
-        for row in sorted(lower_rows + upper_rows):
+        rows: list[int] = []
+        for block in range(num_blocks):
+            low, high = blocks[block]
+            pair = (segment(block, aisle), segment(block, aisle + 1))
+            # Links skip the rows that touch the lane by the main pair, and below the main pair
+            # also the far lane, which join the aisles already, and only join rows both
+            # aisle segments reach.
+            if block < below:
+                choices = range(max(pair[0][0], pair[1][0], low + 1), high)
+            else:
+                choices = range(low + 1, min(pair[0][1], pair[1][1]) + 1)
+            rows += link_rng.sample(choices, links_per_pair)
+        for row in sorted(rows):
             cells = [(row, column) for column in range(left, right + 1)]
             walkable.extend(cells[1:-1])
             link_cells.update(cells[1:-1])
@@ -1535,21 +1677,22 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
             leaves.append(((1, column), (0, column), slot))
     for aisle in range(num_aisles):
         column = aisle_column(aisle)
-        for row in range(max(2, aisle_bottom[aisle]), aisle_top[aisle] + 1):
-            if row in (main_low, main_high):
-                continue
-            for side in (column - 1, column + 1):
-                if 0 < side < width - 1 and (row, side) not in link_cells:
-                    leaves.append(((row, side), (row, column), slot))
+        for block in range(num_blocks):
+            first, last = segment(block, aisle)
+            for row in range(max(2, first), last + 1):
+                for side in (column - 1, column + 1):
+                    if 0 < side < width - 1 and (row, side) not in link_cells:
+                        leaves.append(((row, side), (row, column), slot))
 
-    rack_rows_of_wall = [r for r in range(1, back) if r not in (main_low, main_high)]
+    lane_rows = {main_low, main_high, *cross_lanes}
+    rack_rows_of_wall = [r for r in range(1, back) if r not in lane_rows]
     left_wall = [((row, -1), (row, 0)) for row in [0] + rack_rows_of_wall + [back]]
     right_wall = [((row, width), (row, width - 1)) for row in [0] + rack_rows_of_wall + [back]]
     front_wall = [((-1, column), (0, column)) for column in range(width)]
     back_wall = [((back + 1, column), (back, column)) for column in range(width)]
 
     num_docks = params.num_receiving_vertices
-    lower_left = [cell for cell in left_wall if cell[0][0] <= rack_rows]
+    lower_left = [cell for cell in left_wall if cell[0][0] < main_low]
     if params.dock_placement == "left_wall":
         if num_docks > len(left_wall):
             raise InstanceGenerationError(
@@ -1565,7 +1708,8 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     free_front = [cell for cell in front_wall if cell[0] not in taken]
     num_stations = params.num_delivery_vertices
     on_wall = params.station_placement == "front_wall"
-    if num_docks > len(lower_left) + len(front_wall) or (
+    corner = params.dock_placement == "corner"
+    if (corner and num_docks > len(lower_left) + len(front_wall)) or (
         on_wall and num_stations > len(free_front)
     ):
         raise InstanceGenerationError(
@@ -1632,7 +1776,9 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
             v: (column * _GRID_SPACING, row * _GRID_SPACING) for (row, column), v in ids.items()
         },
         aisle_index={v: band(column) for (_, column), v in ids.items()},
-        aisle_lengths=tuple(lower + upper for lower, upper in zip(lower_lengths, upper_lengths)),
+        aisle_lengths=tuple(
+            sum(lengths[block][aisle] for block in range(num_blocks)) for aisle in range(num_aisles)
+        ),
         cross_aisle_rows=tuple(sorted(link_rows)),
         num_transit_vertices=num_walkable,
     )

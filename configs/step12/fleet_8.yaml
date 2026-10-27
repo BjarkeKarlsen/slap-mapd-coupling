@@ -90,5 +90,6 @@ instance:
   seed: 42
   station_placement: rack_faces
   lower_block: irregular
+  num_blocks: 2
   dock_placement: left_wall
   num_storage_vertices: 40

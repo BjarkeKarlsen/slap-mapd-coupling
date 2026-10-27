@@ -18,6 +18,7 @@ from slap_mapd_coupling.instances.generator import (
     InstanceGenerationError,
     fleet_defaults,
     fleet_defaults_v1,
+    v2_stacked_shape,
     generate_instance,
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
@@ -354,6 +355,70 @@ def test_an_irregular_lower_block_has_aisles_that_stop_short_of_the_front_lane()
     assert {_column(full, v) for v in walkable if _row(full, v) == low - 1} <= {
         _column(full, v) for v in walkable if _row(full, v) == 1
     }
+
+
+@cache
+def _stacked(num_agents: int, seed: int = 42) -> GeneratedInstance:
+    num_aisles, num_blocks = v2_stacked_shape(num_agents, 4)
+    settings = {
+        **fleet_defaults(num_agents),
+        "num_aisles": num_aisles,
+        "rack_rows": 4,
+        "num_blocks": num_blocks,
+        "lower_block": "irregular",
+        "station_placement": "rack_faces",
+        "dock_placement": "left_wall",
+        "seed": seed,
+    }
+    return generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+
+
+@pytest.mark.parametrize("num_agents", FLEETS)
+def test_stacked_blocks_keep_the_walkable_count_and_stay_well_formed(num_agents):
+    for seed in range(3 if num_agents == 64 else 10):
+        instance = _stacked(num_agents, seed)
+        assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+        assert _strongly_connected(instance, _walkable(instance))
+        assert check_connectivity(instance.graph).ok
+        assert check_well_formedness(instance.graph, num_agents).ok
+        neighbours = _neighbours(instance)
+        for v, vertex in instance.graph.vertices.items():
+            if vertex.role.is_task_endpoint:
+                assert len(neighbours[v]) == 1
+
+
+@pytest.mark.parametrize("num_agents", (16, 32))
+def test_stacked_blocks_are_four_rows_deep_with_lanes_between_and_the_pair_in_the_middle(
+    num_agents,
+):
+    instance = _stacked(num_agents)
+    _, num_blocks = v2_stacked_shape(num_agents, 4)
+    walkable = _walkable(instance)
+    width = max(_column(instance, v) for v in walkable) + 1
+    rows = sorted({_row(instance, v) for v in walkable})
+    full = [r for r in rows if sum(1 for v in walkable if _row(instance, v) == r) == width]
+    lanes = [r for r in full if r not in instance.cross_aisle_rows]  # a row of links can span too
+    # The front lane, a cross lane between blocks, the two rows of the main pair, the back lane.
+    assert len(lanes) == num_blocks + 2
+    pair = sorted({_row(instance, v) for v in _main_pair(instance)})
+    assert pair[1] == pair[0] + 1
+    below = [r for r in lanes if r < pair[0]]
+    assert len(below) == num_blocks // 2  # the front lane and the cross lanes below the pair
+    gaps = [b - a - 1 for a, b in zip(lanes, lanes[1:]) if (a, b) != tuple(pair)]
+    assert set(gaps) == {4}
+    # No leaf on a lane but the front and back lanes, whose wall cells hold leaves.
+    neighbours = _neighbours(instance)
+    for v, vertex in instance.graph.vertices.items():
+        if vertex.role.is_task_endpoint:
+            (at,) = neighbours[v]
+            assert _row(instance, at) not in set(lanes[1:-1])
+
+
+def test_stacked_blocks_have_short_aisle_segments_in_every_half():
+    instance = _stacked(32)
+    lengths = instance.aisle_lengths
+    _, num_blocks = v2_stacked_shape(32, 4)
+    assert min(lengths[1:-1]) < num_blocks * 4 == lengths[0] == lengths[-1]
 
 
 def test_more_slots_than_faces_is_rejected():
