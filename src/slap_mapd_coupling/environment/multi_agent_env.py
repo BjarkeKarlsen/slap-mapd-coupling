@@ -117,6 +117,7 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     resolve_conflicts,
 )
 from slap_mapd_coupling.storage.arrival import (
+    DrawnDocks,
     PutAwayRule,
     arrival_amounts,
     get_putaway_rule,
@@ -714,7 +715,12 @@ class WarehouseMAPDEnv:
         # Only the options a run sets are passed, so a rule written before them still works.
         options: dict[str, Any] = {}
         if self._receiving_vertices is not None:
-            options["receiving"] = self._receiving_vertices
+            # With random docks the rules weigh every dock alike ([A70]).
+            options["receiving"] = (
+                DrawnDocks(self._receiving_vertices)
+                if self.config.dock_choice == "random"
+                else self._receiving_vertices
+            )
         if robots:
             options["trip"] = True
         if self.config.storage_mode == "random":

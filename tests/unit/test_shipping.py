@@ -120,3 +120,18 @@ def test_an_order_with_shipping_is_done_when_it_leaves_at_the_dock():
 def test_shipping_needs_the_docks_and_robot_put_away():
     with pytest.raises(ValueError, match="shipping and dock_choice need"):
         build_experiment_config(_spec(shipping=True, putaway="instant"), SEED, "fixed")
+
+
+def test_with_random_docks_the_put_away_leg_is_the_mean_over_the_docks():
+    from slap_mapd_coupling.storage.arrival import DrawnDocks, receiving_distance, trip_distance
+
+    graph = _run().graph
+    docks = sorted(_docks(_run()))
+    slot = next(v for v, x in graph.vertices.items() if x.role.storage)
+    distances = [graph.distance(g, slot) for g in docks]
+    assert receiving_distance(graph, slot, docks) == min(distances)
+    assert receiving_distance(graph, slot, DrawnDocks(docks)) == sum(distances) / len(distances)
+    stations = [v for v, x in graph.vertices.items() if x.role.delivery]
+    assert trip_distance(graph, slot, DrawnDocks(docks), stations) >= trip_distance(
+        graph, slot, docks, stations
+    )

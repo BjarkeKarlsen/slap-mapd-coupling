@@ -50,7 +50,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageM
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.evaluation.evaluator import row_keeps_up, run_episode
 from slap_mapd_coupling.evaluation.trace import DEFAULT_STOCK_EVERY
-from slap_mapd_coupling.storage.arrival import trip_distance
+from slap_mapd_coupling.storage.arrival import DrawnDocks, trip_distance
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.spec import (
     TrainingSpec,
@@ -338,6 +338,8 @@ def receiving_vertices(spec: TrainingSpec, graph: WarehouseGraph) -> list[Vertex
 
 def _trips(spec: TrainingSpec, graph: WarehouseGraph) -> str:
     receiving = receiving_vertices(spec, graph)
+    if spec.arrival is not None and spec.arrival.dock_choice == "random":
+        receiving = DrawnDocks(receiving)  # every dock alike ([A70])
     delivery = sorted(v for v, vertex in graph.vertices.items() if vertex.role.delivery)
     trips = {
         v: trip_distance(graph, v, receiving, delivery)
