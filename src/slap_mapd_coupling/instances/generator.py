@@ -1476,7 +1476,8 @@ def _v2_stations_and_slots(
     """The rack faces of graph v2 turned into workstations, slots and parking. Under
     ``station_placement`` "rack_faces" the workstations are rack faces drawn from the seed
     (D24). With ``num_storage_vertices`` that many of the faces left are slots, spread evenly
-    over them in row order, and the rest become parking (D25)."""
+    over them in row order, then ``num_endpoints`` of the faces left after that are parking,
+    spread evenly the same way, and the rest are not built (D25)."""
     faces = sorted((cell, at) for cell, at, role in leaves if role.storage)
     others = [leaf for leaf in leaves if not leaf[2].storage]
     stations: list[tuple[GridCell, GridCell]] = []
@@ -1499,7 +1500,15 @@ def _v2_stations_and_slots(
             )
         chosen = {int((index + 0.5) * len(faces) / num_slots) for index in range(num_slots)}
         slots = [face for index, face in enumerate(faces) if index in chosen]
-        parking = [face for index, face in enumerate(faces) if index not in chosen]
+        rest = [face for index, face in enumerate(faces) if index not in chosen]
+        num_parking = params.num_endpoints
+        if num_parking > len(rest):
+            raise InstanceGenerationError(
+                f"{num_parking} parking vertices do not fit the {len(rest)} rack faces left "
+                "after the slots."
+            )
+        spread = {int((index + 0.5) * len(rest) / num_parking) for index in range(num_parking)}
+        parking = [face for index, face in enumerate(rest) if index in spread]
     return (
         others
         + [(cell, at, VertexRole(delivery=True)) for cell, at in stations]
@@ -1726,7 +1735,10 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     )
     parking_order = right_wall[::-1][:-1] + back_wall[::-1] + left_wall[::-1]
     parking_cells = [cell for cell in parking_order if cell[0] not in taken][: params.num_endpoints]
-    if len(parking_cells) < params.num_endpoints:
+    if params.num_storage_vertices is not None:
+        # The parking vertices are rack faces then, chosen in _v2_stations_and_slots ([A71]).
+        parking_cells = []
+    elif len(parking_cells) < params.num_endpoints:
         raise InstanceGenerationError(
             f"{params.num_endpoints} parking leaves do not fit the {len(parking_order)} free "
             "wall cells."
