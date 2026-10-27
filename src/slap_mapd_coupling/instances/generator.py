@@ -74,7 +74,10 @@ class GeneratorParams(BaseModel):
 
     Graph v2 (``_build_v2``): ``num_aisles`` aisles with ``rack_rows`` rows in each rack
     block, and ``num_transit_vertices`` is the number of walkable vertices, the leaves coming
-    on top. The slots follow from the rack faces, so ``num_storage_vertices`` is not set.
+    on top. ``station_placement`` puts the workstations on the front wall or on rack faces drawn
+    from the seed (D24). Without ``num_storage_vertices`` every rack face left is a slot. With
+    it, that many slots are spread evenly over the rack faces left, and the rest are parking
+    (D25).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -92,6 +95,12 @@ class GeneratorParams(BaseModel):
     rack_rows: PositiveInt | None = None
     links_per_aisle_pair: NonNegativeInt = 1
     require_irregular_shape: bool = True
+    # Graph v2 only: the workstations spread along the front wall, or on rack faces drawn from
+    # the seed anywhere in the warehouse (D24).
+    station_placement: Literal["front_wall", "rack_faces"] = "front_wall"
+    # Graph v2 only: the docks at the front left corner, or spread evenly along the whole left
+    # wall from the front to the back.
+    dock_placement: Literal["corner", "left_wall"] = "corner"
 
     one_way_fraction: float = Field(ge=0.0, le=1.0)
 
@@ -156,6 +165,8 @@ class GeneratorParams(BaseModel):
         for name in ("num_aisles", "rack_rows"):
             if getattr(self, name) is not None:
                 raise ValueError(f"{name} only applies to layout='v2'.")
+        if self.station_placement != "front_wall" or self.dock_placement != "corner":
+            raise ValueError("station_placement and dock_placement only apply to layout='v2'.")
         assert self.max_num_cross_aisles is not None and self.max_aisle_length is not None
 
         if self.max_num_cross_aisles > self.max_aisle_length:
@@ -198,12 +209,7 @@ class GeneratorParams(BaseModel):
         for name in ("num_aisles", "rack_rows", "num_transit_vertices"):
             if getattr(self, name) is None:
                 raise ValueError(f"layout='v2' requires {name}.")
-        for name in (
-            "max_num_aisles",
-            "max_aisle_length",
-            "max_num_cross_aisles",
-            "num_storage_vertices",
-        ):
+        for name in ("max_num_aisles", "max_aisle_length", "max_num_cross_aisles"):
             if getattr(self, name) is not None:
                 raise ValueError(f"{name} only applies to layout='v1'.")
         if self.one_way_fraction != 0.0:
@@ -1360,6 +1366,44 @@ def _v2_shape(num_agents: int) -> tuple[int, int]:
     return num_aisles, rack_rows
 
 
+def _v2_stations_and_slots(
+    leaves: list[tuple[GridCell, GridCell, VertexRole]], params: GeneratorParams
+) -> list[tuple[GridCell, GridCell, VertexRole]]:
+    """The rack faces of graph v2 turned into workstations, slots and parking. Under
+    ``station_placement`` "rack_faces" the workstations are rack faces drawn from the seed
+    (D24). With ``num_storage_vertices`` that many of the faces left are slots, spread evenly
+    over them in row order, and the rest become parking (D25)."""
+    faces = sorted((cell, at) for cell, at, role in leaves if role.storage)
+    others = [leaf for leaf in leaves if not leaf[2].storage]
+    stations: list[tuple[GridCell, GridCell]] = []
+    if params.station_placement == "rack_faces":
+        num_stations = params.num_delivery_vertices
+        if num_stations > len(faces):
+            raise InstanceGenerationError(
+                f"{num_stations} workstations do not fit {len(faces)} rack faces."
+            )
+        stations = random.Random(f"{params.seed}:v2:stations").sample(faces, num_stations)
+        taken = set(stations)
+        faces = [face for face in faces if face not in taken]
+    num_slots = params.num_storage_vertices
+    if num_slots is None:
+        slots, parking = faces, []
+    else:
+        if num_slots > len(faces):
+            raise InstanceGenerationError(
+                f"{num_slots} slots do not fit the {len(faces)} rack faces left."
+            )
+        chosen = {int((index + 0.5) * len(faces) / num_slots) for index in range(num_slots)}
+        slots = [face for index, face in enumerate(faces) if index in chosen]
+        parking = [face for index, face in enumerate(faces) if index not in chosen]
+    return (
+        others
+        + [(cell, at, VertexRole(delivery=True)) for cell, at in stations]
+        + [(cell, at, VertexRole(storage=True)) for cell, at in slots]
+        + [(cell, at, VertexRole(endpoint=True)) for cell, at in parking]
+    )
+
+
 def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     """Graph v2: van Knippenberg et al.'s (2021) principles on a rack warehouse (D1 to D6).
 
@@ -1376,10 +1420,13 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     Every endpoint is a leaf, a vertex with one edge each way to a walkable vertex. Slots are
     the rack faces either side of every aisle vertex in the rack rows and, on the bottom row,
     the front lane's rack side between aisles. Workstations (delivery) sit on the front wall,
-    spread evenly. Docks (receiving) start at the front left corner, up the side wall through
-    the lower block, then along the front wall. Parking starts at the back right corner, down
+    spread evenly, or on rack faces drawn from the seed (D24). Docks (receiving) start at the front left corner, up the side wall through
+    the lower block, then along the front wall, or spread evenly along the whole left wall.
+    Parking starts at the back right corner, down
     the right wall, then along the back wall, then the left wall from the back. A wall cell of
-    an outer aisle that no dock or parking takes is a slot. The main pair carries no leaf.
+    an outer aisle that no dock or parking takes is a slot. With ``num_storage_vertices`` only
+    that many of the rack faces left after the workstations are slots, spread evenly in row
+    order, and the others are parking too (D25). The main pair carries no leaf.
 
     A path cannot pass through a vertex with one edge, so no path between two endpoints
     crosses a third, and the graph is well-formed once the walkable part is strongly connected
@@ -1472,19 +1519,36 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
 
     num_docks = params.num_receiving_vertices
     lower_left = [cell for cell in left_wall if cell[0][0] <= rack_rows]
-    dock_cells = (lower_left + front_wall)[:num_docks]
+    if params.dock_placement == "left_wall":
+        if num_docks > len(left_wall):
+            raise InstanceGenerationError(
+                f"{num_docks} docks do not fit a left wall of {len(left_wall)} cells."
+            )
+        dock_cells = [
+            left_wall[int((index + 0.5) * len(left_wall) / num_docks)]
+            for index in range(num_docks)
+        ]
+    else:
+        dock_cells = (lower_left + front_wall)[:num_docks]
     taken = {cell for cell, _ in dock_cells}
     free_front = [cell for cell in front_wall if cell[0] not in taken]
     num_stations = params.num_delivery_vertices
-    if num_docks > len(lower_left) + len(front_wall) or num_stations > len(free_front):
+    on_wall = params.station_placement == "front_wall"
+    if num_docks > len(lower_left) + len(front_wall) or (
+        on_wall and num_stations > len(free_front)
+    ):
         raise InstanceGenerationError(
             f"{num_docks} docks and {num_stations} workstations do not fit a front wall of "
             f"{width} cells and a lower side wall of {len(lower_left)}."
         )
-    station_cells = [
-        free_front[int((index + 0.5) * len(free_front) / num_stations)]
-        for index in range(num_stations)
-    ]
+    station_cells = (
+        [
+            free_front[int((index + 0.5) * len(free_front) / num_stations)]
+            for index in range(num_stations)
+        ]
+        if on_wall
+        else []
+    )
     parking_order = right_wall[::-1][:-1] + back_wall[::-1] + left_wall[::-1]
     parking_cells = [cell for cell in parking_order if cell[0] not in taken][: params.num_endpoints]
     if len(parking_cells) < params.num_endpoints:
@@ -1499,6 +1563,7 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     for cell, at in left_wall + right_wall:
         if cell not in used and cell[0] in rack_rows_of_wall:
             leaves.append((cell, at, slot))
+    leaves = _v2_stations_and_slots(leaves, params)
 
     # Vertex ids: the walkable cells row by row from the front, then the leaves likewise.
     walkable_ids = {cell: index for index, cell in enumerate(sorted(walkable))}

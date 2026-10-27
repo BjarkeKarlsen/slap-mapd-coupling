@@ -80,19 +80,33 @@ def play(
     checkpoint: Path,
     seed: int,
     storage_mode: StorageMode | None = None,
+    trace_path: Path | None = None,
 ) -> RunMetrics:
     """One sampled episode of `checkpoint` on the episode seed `seed`, under `storage_mode` or,
-    when that is None, the storage rule the run trained with."""
+    when that is None, the storage rule the run trained with. With a warehouse per seed the
+    episode plays the warehouse of `seed` (D27). With `trace_path` it writes a per-step trace
+    there, with the drawing positions of the warehouse it played."""
+    instance, skus, counts, capacities, zones = (
+        study.instance, study.skus, study.counts, study.capacities, study.arm.zones
+    )  # fmt: skip
+    if study.pool is not None:
+        built = study.pool.warehouse(seed)
+        instance, skus, counts, capacities, zones = (
+            built.instance, built.skus, built.counts, built.capacities, built.zones
+        )  # fmt: skip
     return run_episode(
-        study.instance.graph,
-        study.skus,
-        study.counts,
-        study.capacities,
+        instance.graph,
+        skus,
+        counts,
+        capacities,
         build_experiment_config(spec, seed, storage_mode),
+        trace_path,
+        positions=instance.positions,
         policy=ModulePolicy(load_module(checkpoint)),
         encoding_config=study.arm.encoding,
-        zones=study.arm.zones,
+        zones=zones,
         pooling=study.arm.pooling,
+        pool=study.pool,
     )
 
 
@@ -115,6 +129,7 @@ def evaluate_run(
     out_dir: Path,
     storage_modes: Sequence[StorageMode] | None = None,
     arrival_rate: float | None = None,
+    trace_seeds: int = 0,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds and plays it and
     the last checkpoint on the test seeds under each of `storage_modes`, by default only the
@@ -125,7 +140,10 @@ def evaluate_run(
     `arrival_rate` plays the test seeds at another load than the run trained at, for example a
     load where the fleet keeps up, so service time counts. The checkpoint is still chosen at
     the training load, so the same checkpoint is measured at every load. The test episodes
-    start from the stock of that load (`build_test_study`)."""
+    start from the stock of that load (`build_test_study`).
+
+    The first `trace_seeds` test seeds of each checkpoint and rule also write a per-step trace
+    to `out_dir/traces/`, for the viewer (viz/pygame_renderer.py)."""
     spec = load_run_spec(run_dir)
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
@@ -159,8 +177,12 @@ def evaluate_run(
     played: dict[tuple[str, str], list[RunMetrics]] = {}
     for role, checkpoint in (("chosen", chosen), ("last", last)):
         for mode in modes:
-            for seed in seeds.test:
-                metrics = play(test_study, test_spec, checkpoint, seed, mode)
+            for n, seed in enumerate(seeds.test):
+                trace = None
+                if n < trace_seeds:
+                    trace = out_dir / "traces" / f"{role}_{mode}_seed{seed}.jsonl"
+                    trace.parent.mkdir(parents=True, exist_ok=True)
+                metrics = play(test_study, test_spec, checkpoint, seed, mode, trace)
                 played.setdefault((role, mode), []).append(metrics)
                 row = {
                     "role": role,

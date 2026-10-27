@@ -316,7 +316,14 @@ def resume(output):
     "The checkpoint is still chosen at the training load. A starting stock sized by the load "
     "(demand_sized_blocks) is sized at this load for the test seeds.",
 )
-def evaluate(run_dir, output, storage_modes, arrival_rate):
+@click.option(
+    "--trace-seeds",
+    type=int,
+    default=0,
+    help="Write a per-step trace of the first N test seeds of each checkpoint and rule to "
+    "OUTPUT/traces/, for the viewer (python -m slap_mapd_coupling.viz.pygame_renderer).",
+)
+def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with, the one with the most completed tasks
     is chosen, and it and the last checkpoint play the test seeds under every storage rule
@@ -329,7 +336,7 @@ def evaluate(run_dir, output, storage_modes, arrival_rate):
     default_name = "evaluation" if arrival_rate is None else f"evaluation_rate{arrival_rate:g}"
     out = Path(output) if output is not None else run / default_name
     try:
-        result = evaluate_run(run, out, list(storage_modes) or None, arrival_rate)
+        result = evaluate_run(run, out, list(storage_modes) or None, arrival_rate, trace_seeds)
     except ValueError as error:
         raise click.UsageError(str(error)) from error
     for role, checkpoint in (("chosen", result.chosen), ("last", result.last)):
@@ -345,6 +352,41 @@ def evaluate(run_dir, output, storage_modes, arrival_rate):
                 f"on {len(rows)} seeds"
             )
     click.echo(f"Rows written to {out}")
+
+
+@cli.command("prepare-warehouses")
+@click.option(
+    "--config",
+    type=click.Path(exists=True, dir_okay=False),
+    required=True,
+    help="Training config (YAML) with warehouse_per_seed (D27).",
+)
+@click.option(
+    "--workers", type=int, default=1, help="Processes that build warehouses at once."
+)
+def prepare_warehouses(config, workers):
+    """Build and store the window tables of every seed of the config's split, the training,
+    validation and test warehouses, before training or evaluation starts. Seeds already stored
+    are skipped. The store is the config's warehouse_store, ~/thesis_runs/warehouses, or
+    SLAP_WAREHOUSE_STORE when it is set."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.config import split_seeds
+    from slap_mapd_coupling.training.spec import build_study, load_spec
+    from slap_mapd_coupling.training.warehouses import WarehousePool
+
+    spec = load_spec(Path(config))
+    if not spec.warehouse_per_seed:
+        raise click.UsageError(f"{config} has no warehouse_per_seed, so it has no warehouses.")
+    study = build_study(spec, prepare=False)
+    seeds = split_seeds(study.seed_split)
+    pool: WarehousePool = study.pool
+    every = [*seeds.train, *seeds.validation, *seeds.test]
+    manifest = pool.prepare(every, workers=workers)
+    click.echo(
+        f"{len(every)} warehouses in {pool.root}, cap {manifest['max_local_nodes']}, "
+        f"d_max {manifest['d_max']}."
+    )
 
 
 @cli.command()

@@ -15,6 +15,7 @@ from slap_mapd_coupling.instances.generator import (
     VERTICES_PER_AGENT,
     GeneratedInstance,
     GeneratorParams,
+    InstanceGenerationError,
     fleet_defaults,
     fleet_defaults_v1,
     generate_instance,
@@ -236,6 +237,93 @@ def test_every_seed_is_strongly_connected_and_passes_both_checks(num_agents):
         assert _strongly_connected(instance, _walkable(instance))
         assert check_connectivity(instance.graph).ok
         assert check_well_formedness(instance.graph, num_agents).ok
+
+
+# Step 12: workstations on rack faces (D24) and a set number of slots (D25).
+
+
+@cache
+def _step12_instance(num_agents: int, num_slots: int | None, seed: int = 42) -> GeneratedInstance:
+    settings = {
+        **fleet_defaults(num_agents),
+        "station_placement": "rack_faces",
+        "num_storage_vertices": num_slots,
+        "seed": seed,
+    }
+    return generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+
+
+def _roles_by_cell(instance: GeneratedInstance) -> dict[tuple[float, float], str]:
+    names = ("storage", "delivery", "receiving", "endpoint")
+    return {
+        instance.positions[v]: next((n for n in names if getattr(x.role, n)), "walkable")
+        for v, x in instance.graph.vertices.items()
+    }
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_workstations_on_rack_faces_take_faces_that_were_slots(num_agents):
+    before = _roles_by_cell(_instance(num_agents))
+    after = _roles_by_cell(_step12_instance(num_agents, None))
+    stations = [cell for cell, role in after.items() if role == "delivery"]
+    assert len(stations) == num_agents // 2
+    assert all(before[cell] == "storage" for cell in stations)
+    # The front wall cells the workstations held are gone, everything else is as before.
+    for cell, role in before.items():
+        if role == "delivery":
+            assert cell not in after
+        elif cell not in stations:
+            assert after[cell] == role
+
+
+def test_the_workstations_move_with_the_seed():
+    stations = [
+        {c for c, r in _roles_by_cell(_step12_instance(8, None, seed)).items() if r == "delivery"}
+        for seed in (0, 1)
+    ]
+    assert stations[0] != stations[1]
+    assert _step12_instance(8, None, 0) == _step12_instance(8, None, 0)
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_a_set_number_of_slots_leaves_the_other_faces_as_parking(num_agents):
+    all_faces = _step12_instance(num_agents, None)
+    faces = sum(x.role.storage for x in all_faces.graph.vertices.values())
+    instance = _step12_instance(num_agents, 20)
+    roles = [x.role for x in instance.graph.vertices.values()]
+    assert sum(role.storage for role in roles) == 20
+    assert sum(role.endpoint for role in roles) == num_agents + faces - 20
+    assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+    neighbours = _neighbours(instance)
+    for v, vertex in instance.graph.vertices.items():
+        if vertex.role.is_task_endpoint:
+            assert len(neighbours[v]) == 1
+    assert check_connectivity(instance.graph).ok
+    assert check_well_formedness(instance.graph, num_agents).ok
+
+
+def test_the_slots_are_spread_over_the_rows():
+    instance = _step12_instance(8, 20)
+    rows = {_row(instance, v) for v, x in instance.graph.vertices.items() if x.role.storage}
+    assert len(rows) >= 5
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_docks_along_the_left_wall_reach_from_the_front_to_the_back(num_agents):
+    settings = {**fleet_defaults(num_agents), "dock_placement": "left_wall"}
+    instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+    docks = [v for v, x in instance.graph.vertices.items() if x.role.receiving]
+    assert len(docks) == num_agents // 2
+    assert all(_column(instance, v) == -1 for v in docks)
+    rows = sorted(_row(instance, v) for v in docks)
+    main_low = min(_row(instance, v) for v in _main_pair(instance))
+    assert rows[0] < main_low < rows[-1]
+    assert check_well_formedness(instance.graph, num_agents).ok
+
+
+def test_more_slots_than_faces_is_rejected():
+    with pytest.raises(InstanceGenerationError, match="slots do not fit"):
+        _step12_instance(8, 10_000)
 
 
 def test_the_same_seed_gives_the_same_instance_and_another_seed_another():

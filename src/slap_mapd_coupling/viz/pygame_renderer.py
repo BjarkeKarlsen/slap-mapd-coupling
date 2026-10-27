@@ -89,6 +89,7 @@ _PHASE_COLOURS = {
     "to_pickup": "#e08a1e",
     "to_delivery": "#c0392b",
     "putaway": "#7a4fa3",
+    "ship": "#1f8a70",
 }
 # Popularity rank, most popular first: dark red through orange to pale blue.
 _RANK_STOPS = ("#b2182b", "#f4a582", "#92c5de", "#d1e5f0")
@@ -149,13 +150,16 @@ def rank_colour(rank: int, count: int) -> tuple[int, int, int]:
 
 
 def _agent_colour(agent: Mapping[str, Any]) -> tuple[int, int, int]:
-    key = "putaway" if agent.get("kind") == "putaway" else agent.get("phase")
+    kind = agent.get("kind")
+    key = kind if kind in ("putaway", "ship") else agent.get("phase")
     return _hex(_PHASE_COLOURS[key])
 
 
 def _doing(agent: Mapping[str, Any]) -> str:
     if agent.get("kind") == "putaway":
         return "to slot" if agent.get("phase") == "to_delivery" else "to dock"
+    if agent.get("kind") == "ship":
+        return "to dock" if agent.get("phase") == "to_delivery" else "to workstation"
     return {"to_pickup": "to pickup", "to_delivery": "to workstation"}.get(
         agent.get("phase"), "idle"
     )
@@ -1264,6 +1268,13 @@ class WarehouseRenderer:
                     ("bar", "put-aways done", done / max(released, 1), f"{done} of {released}",
                      _PURPLE)
                 )  # fmt: skip
+                if step.get("ships_released"):
+                    rows.append(("heading", "Shipments, workstation to dock"))
+                    done, released = step["ships_done"], step["ships_released"]
+                    rows.append(
+                        ("bar", "shipments done", done / max(released, 1),
+                         f"{done} of {released}", _hex(_PHASE_COLOURS["ship"]))
+                    )  # fmt: skip
             if "completed" in step:
                 rows.append(("heading", "All tasks"))
                 rows.append(_stat("tasks done", f"{step['completed']} of {step['released']}"))
@@ -1366,9 +1377,10 @@ class WarehouseRenderer:
         if not recent:
             return rows + [("note", "No task done yet.", _MUTED)]
         for t_done, kind, sku, quantity, source, target, agent_id in recent:
-            putaway = kind == "putaway"
-            colour = _PURPLE if putaway else _hex(_PHASE_COLOURS["to_delivery"])
-            what = "put away" if putaway else "picked"
+            colour = {"putaway": _PURPLE, "ship": _hex(_PHASE_COLOURS["ship"])}.get(
+                kind, _hex(_PHASE_COLOURS["to_delivery"])
+            )
+            what = {"putaway": "put away", "ship": "shipped"}.get(kind, "picked")
             rows.append(
                 ("box", agent_id, colour, True, f"{sku} x{quantity} {what}",
                  f"{source} to {target}", f"step {t_done}",
@@ -1493,6 +1505,7 @@ class WarehouseRenderer:
             dot(x + 120, y, _hex(_PHASE_COLOURS["to_pickup"]), "to pickup")
             dot(x + 240, y, _hex(_PHASE_COLOURS["to_delivery"]), "to workstation")
             dot(x, y + 20, _hex(_PHASE_COLOURS["putaway"]), "put-away")
+            dot(x, y + 40, _hex(_PHASE_COLOURS["ship"]), "shipment")
             screen.blit(
                 self._small.render("dashed line: where the agent walks", True, text),
                 (x + 120, y + 22),

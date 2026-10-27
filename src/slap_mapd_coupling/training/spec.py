@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import math
+import random
 import statistics
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -56,12 +57,13 @@ from slap_mapd_coupling.instances.generator import (
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
 from slap_mapd_coupling.models.base_model import PolicyValueHeadConfig
 from slap_mapd_coupling.models.gnn_encoder import GNNEncoderConfig
-from slap_mapd_coupling.training.arm import Arm, build_arm
+from slap_mapd_coupling.training.arm import POOLING, Arm, build_arm
 from slap_mapd_coupling.training.config import (
     PPOHyperparameters,
     SeedSplitConfig,
     TrainingRegime,
     build_ppo_config,
+    split_seeds,
 )
 from slap_mapd_coupling.training.trainer import CheckpointSettings
 
@@ -95,6 +97,10 @@ class StorageSettings(BaseModel):
       ordered in one period at its t = 0 popularity, the quantile taken from a simulation of the
       order process (`period_demand_quantiles`), and takes no `initial_units`. It needs
       the `arrival` section and the `storage_rule` section for Delta.
+    - "random_slots": the start of D22. The units of "demand_sized_blocks", each SKU on its own
+      storage vertex drawn at random from `seed`, so with more storage vertices than SKUs some
+      start empty and the start carries no demand information. Needs at least as many storage
+      vertices as SKUs.
 
     Under the refill rule `vertex_capacity` may be left out, and is then derived: the most room
     the starting stock of the SKUs of one storage vertex takes, sum of S_k * b_k, rounded up.
@@ -118,7 +124,16 @@ class StorageSettings(BaseModel):
     # The units every SKU starts with, and under the top-up rule its floor. The refill rule
     # sizes the starting stock by the service level and takes none.
     initial_units: PositiveInt | None = None
-    initial_placement: Literal["by_number", "demand_blocks", "demand_sized_blocks"] = "by_number"
+    initial_placement: Literal[
+        "by_number", "demand_blocks", "demand_sized_blocks", "random_slots"
+    ] = "by_number"
+    # The draw of "random_slots".
+    seed: int = 0
+
+    @property
+    def sized(self) -> bool:
+        """The starting units are sized by the order process, as "demand_sized_blocks" sizes them."""
+        return self.initial_placement in ("demand_sized_blocks", "random_slots")
 
     @model_validator(mode="after")
     def _one_name_per_sku(self) -> "StorageSettings":
@@ -208,7 +223,10 @@ class ArrivalSettings(BaseModel):
 
     None of them has a default, because all are study parameters. `receiving: receiving` needs
     `num_receiving_vertices` above 0 in the `instance` section. `putaway: robots` makes the
-    robots carry the stock to its shelves (sec:pf:storage).
+    robots carry the stock to its shelves (sec:pf:storage). `shipping` carries every order
+    from its workstation to a dock once its last pick is in, and `dock_choice: random` draws the
+    dock of every put-away and ship task at random (step 12, D21). Both need `receiving:
+    receiving` and `putaway: robots`.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -219,6 +237,8 @@ class ArrivalSettings(BaseModel):
     service_level: float | None = Field(default=None, gt=0.0, lt=1.0)
     receiving: ReceivingVertices
     putaway: StockPutaway = "instant"
+    shipping: bool = False
+    dock_choice: Literal["nearest", "random"] = "nearest"
     # Order lines (tab:evalparams). None is one line of one unit per order.
     lines_per_order: LinesPerOrder | None = None
     units_per_line: tuple[PositiveInt, PositiveInt] | None = None
@@ -274,6 +294,8 @@ class ExperimentSettings(BaseModel):
     move_cost: NonNegativeFloat
     congestion_reward_weight: NonNegativeFloat
     congestion_sensitive: bool = False
+    # D26: an idle robot in the way gets the nearest free parking leaf as its target.
+    idle_parking: bool = False
     seed: int = 0
 
 
@@ -316,6 +338,11 @@ class TrainingSpec(BaseModel):
     # The GeneratorParams without wait_cost and num_endpoints, which follow the experiment.
     # Empty, or left out, builds the warehouse of the fleet size, `fleet_defaults(num_agents)`.
     instance: dict[str, Any] = {}
+    # D27: every episode seed draws its own warehouse and start stock, the generator seed and
+    # storage.seed set to the episode seed (training/warehouses.py). The window tables are
+    # stored under warehouse_store, ~/thesis_runs/warehouses when it is None.
+    warehouse_per_seed: bool = False
+    warehouse_store: str | None = None
     storage: StorageSettings
     # The order distribution. None is the uniform draw of the shipped configs.
     demand: DemandSettings | None = None
@@ -363,16 +390,17 @@ class TrainingSpec(BaseModel):
                     "arrival.receiving 'receiving' needs num_receiving_vertices above 0 in the "
                     "instance section."
                 )
-        elif self.storage.initial_placement == "demand_sized_blocks":
+        elif self.storage.sized:
             raise ValueError(
-                "initial_placement 'demand_sized_blocks' needs the arrival section for its margin."
+                f"initial_placement '{self.storage.initial_placement}' needs the arrival section "
+                "for its margin."
             )
         refill = self.arrival is not None and self.arrival.rule == "refill"
         if refill:
-            if self.storage.initial_placement != "demand_sized_blocks":
+            if not self.storage.sized:
                 raise ValueError(
                     "arrival.rule 'refill' sizes the starting stock by the service level, so it "
-                    "needs initial_placement 'demand_sized_blocks'."
+                    "needs initial_placement 'demand_sized_blocks' or 'random_slots'."
                 )
             if self.storage.initial_units is not None:
                 raise ValueError(
@@ -405,7 +433,9 @@ class TrainingSpec(BaseModel):
 
 
 class Study(NamedTuple):
-    """Everything `build_ppo_config` and an evaluation need, built from a TrainingSpec."""
+    """Everything `build_ppo_config` and an evaluation need, built from a TrainingSpec. With a
+    warehouse per seed, `pool` holds them per seed, `arm.encoding` is the pool's cap and the
+    instance, the stock and the zones are those of the first training seed."""
 
     instance: GeneratedInstance
     skus: dict[SkuId, SkuType]
@@ -416,6 +446,37 @@ class Study(NamedTuple):
     gnn_encoder: GNNEncoderConfig
     head: PolicyValueHeadConfig
     seed_split: SeedSplitConfig
+    pool: Any = None  # training/warehouses.py::WarehousePool, with a warehouse per seed
+
+
+def seed_spec(spec: TrainingSpec, seed: int) -> TrainingSpec:
+    """`spec` with the warehouse and the start stock of episode seed `seed` (D27)."""
+    instance = dict(spec.instance_settings())
+    instance.pop("num_endpoints", None)
+    instance["seed"] = seed
+    storage = spec.storage.model_copy(update={"seed": seed})
+    return spec.model_copy(update={"instance": instance, "storage": storage})
+
+
+def build_seed_warehouse(spec: TrainingSpec, seed: int) -> Any:
+    """The warehouse of episode seed `seed`: its instance, start stock and zones, with the
+    padding cap of its own windows (training/warehouses.py)."""
+    from slap_mapd_coupling.training.warehouses import Warehouse
+
+    seeded = seed_spec(spec, seed)
+    instance = build_instance(seeded)
+    skus, capacities, counts = build_storage(
+        seeded.storage, instance.graph, seeded.demand, stock_sizing(seeded)
+    )
+    max_messages = spec.arm.max_messages or max(spec.experiment.num_agents - 1, 1)
+    arm = build_arm(
+        instance,
+        spec.controller,
+        spec.experiment.observation_depth,
+        num_zones=spec.arm.num_zones,
+        max_messages=max_messages,
+    )
+    return Warehouse(seed, instance, skus, capacities, counts, arm.zones, arm.encoding)
 
 
 def load_spec(path: Path) -> TrainingSpec:
@@ -571,13 +632,23 @@ def _stock_for(
     units = dict.fromkeys(skus, storage.initial_units or 0)
     if storage.initial_placement in ("demand_blocks", "demand_sized_blocks"):
         home = _demand_blocks(list(skus), graph, storage_vertices, demand)
+    elif storage.initial_placement == "random_slots":
+        if len(skus) > len(storage_vertices):
+            raise ValueError(
+                f"initial_placement 'random_slots' puts {len(skus)} SKUs on their own storage "
+                f"vertex, but there are {len(storage_vertices)}."
+            )
+        drawn = random.Random(f"{storage.seed}:start").sample(storage_vertices, len(skus))
+        home = dict(zip(skus, drawn))
     else:
         home = {
             sku_id: storage_vertices[i % len(storage_vertices)] for i, sku_id in enumerate(skus)
         }
-    if storage.initial_placement == "demand_sized_blocks":
+    if storage.sized:
         if sizing is None:
-            raise ValueError("initial_placement 'demand_sized_blocks' needs the stock sizing.")
+            raise ValueError(
+                f"initial_placement '{storage.initial_placement}' needs the stock sizing."
+            )
         if sizing.refill_units is None:
             assert storage.initial_units is not None  # TrainingSpec checks the top-up rule's
             units = _sized_units(list(skus), storage.initial_units, demand, sizing)
@@ -738,7 +809,7 @@ def refill_starting_stock(
 
 def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
     """What the starting stock of `spec` is sized by, or None when it is not sized."""
-    if spec.storage.initial_placement != "demand_sized_blocks":
+    if not spec.storage.sized:
         return None
     # _arrival_settings guarantees both sections for this placement.
     assert spec.arrival is not None and spec.storage_rule is not None
@@ -808,6 +879,7 @@ def build_experiment_config(
         storage_mode=storage_mode,
         controller=spec.controller,
         congestion_sensitive=experiment.congestion_sensitive,
+        idle_parking=experiment.idle_parking,
         communication=spec.communication,
         num_agents=experiment.num_agents,
         arrival_rate=spec.arrival_rate,
@@ -844,10 +916,16 @@ def build_experiment_config(
         lines_per_order=None if arrival is None else arrival.lines_per_order,
         units_per_line=None if arrival is None else arrival.units_per_line,
         cold_stock_top_k=None if arrival is None else arrival.cold_stock_top_k,
+        shipping=arrival is not None and arrival.shipping,
+        dock_choice="nearest" if arrival is None else arrival.dock_choice,
     )
 
 
-def build_study(spec: TrainingSpec) -> Study:
+def build_study(spec: TrainingSpec, prepare: bool = True) -> Study:
+    """The study of `spec`. With a warehouse per seed, `prepare` stores the window tables of
+    every seed of the split first, which a learned arm needs and a planner run does not."""
+    if spec.warehouse_per_seed:
+        return _build_pool_study(spec, prepare)
     instance = build_instance(spec)
     # x_0 depends on the instance, the storage settings and the demand only, so every storage
     # rule, in training and at evaluation, starts from the same stock (sec:impl:instances).
@@ -886,6 +964,50 @@ def build_study(spec: TrainingSpec) -> Study:
     )
 
 
+def _build_pool_study(spec: TrainingSpec, prepare: bool) -> Study:
+    """build_study with a warehouse per seed (D27). With `prepare` every seed of the split is
+    prepared first, so the cap every warehouse is padded to is known before training or
+    evaluation starts. Without it the cap is the first training seed's."""
+    from slap_mapd_coupling.training.warehouses import WarehousePool
+
+    store = None if spec.warehouse_store is None else Path(spec.warehouse_store).expanduser()
+    pool = WarehousePool(spec, store)
+    config = build_experiment_config(spec)
+    split = SeedSplitConfig(
+        training_seed=config.seed,
+        train_seed_count=spec.train_seed_count,
+        validation_seed_count=spec.validation_seed_count,
+        test_seed_count=spec.test_seed_count,
+    )
+    seeds = split_seeds(split)
+    if prepare:
+        pool.prepare([*seeds.train, *seeds.validation, *seeds.test])
+    first = pool.warehouse(seeds.train[0])
+    arm = Arm(
+        controller=spec.controller,
+        pooling=POOLING[spec.controller],
+        zones=first.zones,
+        encoding=pool.encoding() if prepare else first.encoding,
+    )
+    return Study(
+        instance=first.instance,
+        skus=first.skus,
+        capacities=first.capacities,
+        counts=first.counts,
+        config=config,
+        arm=arm,
+        gnn_encoder=GNNEncoderConfig(
+            num_rounds=spec.model.num_rounds,
+            hidden_width=spec.model.hidden_width,
+            communication=config.communication,
+            pooling=arm.pooling,
+        ),
+        head=PolicyValueHeadConfig(hidden_width=spec.model.head_hidden_width),
+        seed_split=split,
+        pool=pool,
+    )
+
+
 def build_study_ppo_config(
     spec: TrainingSpec,
     study: Study,
@@ -908,6 +1030,7 @@ def build_study_ppo_config(
         spec.ppo,
         study.seed_split,
         zones=study.arm.zones,
+        pool=study.pool,
         num_env_runners=num_env_runners,
         use_gpu=use_gpu,
         batch_on_cpu=batch_on_cpu,

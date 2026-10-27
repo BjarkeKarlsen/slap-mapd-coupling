@@ -523,6 +523,7 @@ def encode_all_observations(
     acting: Optional[Sequence[AgentId]] = None,
     chosen: Optional[Mapping[AgentId, Mapping[AgentId, VertexId]]] = None,
     padded: bool = True,
+    parking: Optional[Mapping[AgentId, VertexId]] = None,
 ) -> dict[AgentId, EncodedObservation]:
     """The EncodedObservation of every acting robot at timestep t, keyed by
     agent id in ascending order. `d_max` is max_out_degree(graph). `windows`
@@ -535,6 +536,9 @@ def encode_all_observations(
     from them and the claim mask added to its action mask. None means no
     claims, as for the decentralised router. Communication needs every robot
     to act.
+
+    `parking` maps an idle robot to its parking leaf (D26), the target its eta
+    feature is measured to. None, or a robot missing from it, means none.
 
     With `pooling` on, every sample carries pool_mask. `pool_vertices` maps
     every robot to the vertices of its window it pools over, its zone for
@@ -588,6 +592,7 @@ def encode_all_observations(
             experiment_config,
             window=None if windows is None else windows[agent_id],
             claimed=() if chosen is None or agent_id not in chosen else chosen[agent_id].values(),
+            parking=None if parking is None else parking.get(agent_id),
         )
         for agent_id in agent_ids
     }

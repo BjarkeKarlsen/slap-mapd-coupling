@@ -189,6 +189,7 @@ def build_ppo_config(
     seed_split: SeedSplitConfig,
     *,
     zones: Optional[Zones] = None,
+    pool: Optional[Any] = None,
     policy_id: str = DEFAULT_POLICY_ID,
     num_env_runners: int = 0,
     use_gpu: bool = False,
@@ -214,6 +215,11 @@ def build_ppo_config(
     (training/learner.py), and `value_chunk_rows`, the rows per encoder pass of
     the value pass (environment/action_masking.py, 512 when None). Neither
     changes a result.
+
+    With `pool` (training/warehouses.py) every episode plays the warehouse of its seed. The
+    graph, storage and zones given are then those of the first training seed, the adapter
+    switches warehouse at each reset, and the module reads the pool's stored tables instead of
+    tables in its model config.
     """
     if experiment_config.discount is None:
         raise ValueError(
@@ -236,14 +242,16 @@ def build_ppo_config(
         ) from error
     assert experiment_config.controller is not None  # check_arm rejects a planner
     check_communication_caps(encoding_config, experiment_config.communication)
-    window_tables = arm_window_tables(
-        graph,
-        experiment_config.controller,
-        experiment_config.observation_depth,
-        encoding_config,
-        zones,
-        pooling,
-    )
+    window_tables = None
+    if pool is None:
+        window_tables = arm_window_tables(
+            graph,
+            experiment_config.controller,
+            experiment_config.observation_depth,
+            encoding_config,
+            zones,
+            pooling,
+        )
 
     train_seeds = split_seeds(seed_split).train
 
@@ -270,6 +278,7 @@ def build_ppo_config(
             train_seeds,
             pooling=pooling,
             zones=zones,
+            pool=pool,
             # RLlib passes an EnvContext. A plain dict (no runner) starts at 0.
             first_seed_index=first_seed_index(
                 getattr(env_context, "worker_index", 0),
@@ -287,10 +296,14 @@ def build_ppo_config(
     model_config: dict[str, Any] = {
         "gnn_encoder_config": gnn_encoder_config.model_dump(),
         "policy_value_head_config": policy_value_head_config.model_dump(),
-        # The adapter stores compact samples (models/window_tables.py), and the module
-        # rebuilds the padded arrays from these tables.
-        "window_tables": window_tables.as_arrays(),
     }
+    # The adapter stores compact samples (models/window_tables.py), and the module rebuilds the
+    # padded arrays from these tables, or with a pool from the pool's stored tables.
+    if pool is None:
+        assert window_tables is not None
+        model_config["window_tables"] = window_tables.as_arrays()
+    else:
+        model_config["window_store"] = pool.as_config()
     if value_chunk_rows is not None:
         if value_chunk_rows < 1:
             raise ValueError(f"value_chunk_rows must be positive, got {value_chunk_rows}.")
