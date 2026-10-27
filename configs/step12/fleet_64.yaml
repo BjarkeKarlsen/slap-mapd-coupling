@@ -89,5 +89,6 @@ instance:
   num_receiving_vertices: 32
   seed: 42
   station_placement: rack_faces
+  lower_block: irregular
   dock_placement: left_wall
   num_storage_vertices: 640

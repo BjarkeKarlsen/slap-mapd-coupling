@@ -98,6 +98,10 @@ class GeneratorParams(BaseModel):
     # Graph v2 only: the workstations spread along the front wall, or on rack faces drawn from
     # the seed anywhere in the warehouse (D24).
     station_placement: Literal["front_wall", "rack_faces"] = "front_wall"
+    # Graph v2 only: the inner aisles of the lower rack block all reach the front lane, or hang
+    # down from the main pair with lengths drawn from the seed like the upper block's, so some
+    # stop short of the front lane. The walkable count stays 16 m either way.
+    lower_block: Literal["full", "irregular"] = "full"
     # Graph v2 only: the docks at the front left corner, or spread evenly along the whole left
     # wall from the front to the back.
     dock_placement: Literal["corner", "left_wall"] = "corner"
@@ -165,8 +169,14 @@ class GeneratorParams(BaseModel):
         for name in ("num_aisles", "rack_rows"):
             if getattr(self, name) is not None:
                 raise ValueError(f"{name} only applies to layout='v2'.")
-        if self.station_placement != "front_wall" or self.dock_placement != "corner":
-            raise ValueError("station_placement and dock_placement only apply to layout='v2'.")
+        if (
+            self.station_placement != "front_wall"
+            or self.dock_placement != "corner"
+            or self.lower_block != "full"
+        ):
+            raise ValueError(
+                "station_placement, dock_placement and lower_block only apply to layout='v2'."
+            )
         assert self.max_num_cross_aisles is not None and self.max_aisle_length is not None
 
         if self.max_num_cross_aisles > self.max_aisle_length:
@@ -1411,7 +1421,10 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     front: the front lane, the lower rack block, the main pair, the upper rack block and the
     back lane. The lanes and the main pair cross the whole width. Every aisle runs from the
     front lane up through the main pair. The two outer aisles reach the back lane, and the
-    inner ones stop at lengths drawn from the seed, so some are dead ends. Extra links join
+    inner ones stop at lengths drawn from the seed, so some are dead ends. With ``lower_block``
+    "irregular" the inner aisles of the lower block also hang from the main pair at lengths
+    drawn from the seed, both blocks sharing the same walkable count, so some stop short of
+    the front lane too. Extra links join
     neighbouring aisles at rows drawn from the seed, the role van Knippenberg's diagonal edges
     play, never on a row next to a lane or the main pair. Every edge is two-way except the
     main pair, two one-way rows in opposite directions, joined at both ends by the outer
@@ -1444,19 +1457,29 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     def aisle_column(aisle: int) -> int:
         return _V2_AISLE_PITCH * aisle
 
-    upper_lengths = (
-        (rack_rows,)
-        + tuple(
-            _random_bounded_lengths(
-                target_sum=_v2_upper_inner_sum(num_walkable, num_aisles, rack_rows, links_per_pair),
-                count=num_aisles - 2,
-                minimum=links_per_pair + 1,
-                maximum=rack_rows,
-                rng=random.Random(f"{params.seed}:v2:upper"),
-            )
+    upper_sum = _v2_upper_inner_sum(num_walkable, num_aisles, rack_rows, links_per_pair)
+    if params.lower_block == "full":
+        upper_inner = _random_bounded_lengths(
+            target_sum=upper_sum,
+            count=num_aisles - 2,
+            minimum=links_per_pair + 1,
+            maximum=rack_rows,
+            rng=random.Random(f"{params.seed}:v2:upper"),
         )
-        + (rack_rows,)
-    )
+        lower_inner = [rack_rows] * (num_aisles - 2)
+    else:
+        # The inner aisles of both blocks share what the full lower block held, so the walkable
+        # count is the same, and the lengths are drawn for both blocks at once.
+        both = _random_bounded_lengths(
+            target_sum=upper_sum + (num_aisles - 2) * rack_rows,
+            count=2 * (num_aisles - 2),
+            minimum=links_per_pair + 1,
+            maximum=rack_rows,
+            rng=random.Random(f"{params.seed}:v2:aisles"),
+        )
+        lower_inner, upper_inner = both[: num_aisles - 2], both[num_aisles - 2 :]
+    upper_lengths = (rack_rows, *upper_inner, rack_rows)
+    lower_lengths = (rack_rows, *lower_inner, rack_rows)
 
     # The walkable cells, and the undirected segments and one-way edges between them.
     walkable: list[GridCell] = []
@@ -1470,13 +1493,20 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
         one_way.append(((main_low, column), (main_low, column + 1)))
         one_way.append(((main_high, column + 1), (main_high, column)))
     aisle_top: list[int] = []
-    for aisle, upper in enumerate(upper_lengths):
+    aisle_bottom: list[int] = []
+    for aisle, (lower, upper) in enumerate(zip(lower_lengths, upper_lengths)):
         column = aisle_column(aisle)
         top = main_high + upper
+        bottom = main_low - lower  # 1 when the aisle reaches the front lane
         aisle_top.append(top)
-        rows = [row for row in range(1, top + 1) if row not in (main_low, main_high)]
+        aisle_bottom.append(bottom)
+        rows = [row for row in range(bottom, top + 1) if row not in (main_low, main_high)]
         walkable.extend((row, column) for row in rows)
-        chain = [0] + list(range(1, top + 1)) + ([back] if upper == rack_rows else [])
+        chain = (
+            ([0] if lower == rack_rows else [])
+            + list(range(bottom, top + 1))
+            + ([back] if upper == rack_rows else [])
+        )
         segments.extend(((a, column), (b, column)) for a, b in zip(chain, chain[1:]))
 
     link_rng = random.Random(f"{params.seed}:v2:links")
@@ -1485,9 +1515,10 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     for aisle in range(num_aisles - 1):
         left, right = aisle_column(aisle), aisle_column(aisle + 1)
         upper_top = min(aisle_top[aisle], aisle_top[aisle + 1])
+        lower_bottom = max(aisle_bottom[aisle], aisle_bottom[aisle + 1], 2)
         # Links skip the rows that touch the front lane or the main pair, which already join
-        # the aisles there.
-        lower_rows = link_rng.sample(range(2, rack_rows), links_per_pair)
+        # the aisles there, and only join rows both aisles reach.
+        lower_rows = link_rng.sample(range(lower_bottom, rack_rows), links_per_pair)
         upper_rows = link_rng.sample(range(main_high + 2, upper_top + 1), links_per_pair)
         for row in sorted(lower_rows + upper_rows):
             cells = [(row, column) for column in range(left, right + 1)]
@@ -1504,7 +1535,7 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
             leaves.append(((1, column), (0, column), slot))
     for aisle in range(num_aisles):
         column = aisle_column(aisle)
-        for row in range(2, aisle_top[aisle] + 1):
+        for row in range(max(2, aisle_bottom[aisle]), aisle_top[aisle] + 1):
             if row in (main_low, main_high):
                 continue
             for side in (column - 1, column + 1):
@@ -1601,7 +1632,7 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
             v: (column * _GRID_SPACING, row * _GRID_SPACING) for (row, column), v in ids.items()
         },
         aisle_index={v: band(column) for (_, column), v in ids.items()},
-        aisle_lengths=tuple(rack_rows + upper for upper in upper_lengths),
+        aisle_lengths=tuple(lower + upper for lower, upper in zip(lower_lengths, upper_lengths)),
         cross_aisle_rows=tuple(sorted(link_rows)),
         num_transit_vertices=num_walkable,
     )

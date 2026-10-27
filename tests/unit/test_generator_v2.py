@@ -321,6 +321,41 @@ def test_docks_along_the_left_wall_reach_from_the_front_to_the_back(num_agents):
     assert check_well_formedness(instance.graph, num_agents).ok
 
 
+@pytest.mark.parametrize("num_agents", (8, 16, 32))
+def test_an_irregular_lower_block_keeps_the_walkable_count_and_stays_well_formed(num_agents):
+    for seed in range(10):
+        settings = {**fleet_defaults(num_agents), "lower_block": "irregular", "seed": seed}
+        instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+        assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+        assert _strongly_connected(instance, _walkable(instance))
+        assert check_well_formedness(instance.graph, num_agents).ok
+        neighbours = _neighbours(instance)
+        for v, vertex in instance.graph.vertices.items():
+            if vertex.role.is_task_endpoint:
+                assert len(neighbours[v]) == 1
+
+
+def test_an_irregular_lower_block_has_aisles_that_stop_short_of_the_front_lane():
+    main_low = None
+    short = 0
+    for seed in range(10):
+        settings = {**fleet_defaults(16), "lower_block": "irregular", "seed": seed}
+        instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+        main_low = min(_row(instance, v) for v in _main_pair(instance))
+        walkable = _walkable(instance)
+        columns = {_column(instance, v) for v in walkable if _row(instance, v) == main_low - 1}
+        reaching = {_column(instance, v) for v in walkable if _row(instance, v) == 1}
+        short += len(columns - reaching)
+    assert short > 0
+    # The full lower block keeps every aisle down to the front lane, as before.
+    full = _instance(16)
+    low = min(_row(full, v) for v in _main_pair(full))
+    walkable = _walkable(full)
+    assert {_column(full, v) for v in walkable if _row(full, v) == low - 1} <= {
+        _column(full, v) for v in walkable if _row(full, v) == 1
+    }
+
+
 def test_more_slots_than_faces_is_rejected():
     with pytest.raises(InstanceGenerationError, match="slots do not fit"):
         _step12_instance(8, 10_000)
