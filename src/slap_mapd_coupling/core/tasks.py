@@ -37,15 +37,17 @@ class Task(BaseModel):
 
     task_id: TaskId
     release_time: NonNegativeInt  # t_j^released
-    # A pick goes from V_str to V_del, a put-away from V_rcv to V_str (the task definition).
+    # A pick goes from V_str to V_del, a put-away from V_rcv to V_str (the task definition),
+    # and a ship task from V_del to V_rcv (step 12, D21).
     pickup_vertex: VertexId  # s_j
     delivery_vertex: VertexId  # g_j
-    sku: SkuId  # k_j
+    # k_j. A ship task carries a whole order, and names the SKU of the order's first line.
+    sku: SkuId
     quantity: PositiveInt = 1  # q_j, the units the task carries
     # The order and the line of the order the task serves, arrival model only.
     order_id: NonNegativeInt | None = None
     line_index: NonNegativeInt | None = None
-    kind: Literal["pick", "putaway"] = "pick"
+    kind: Literal["pick", "putaway", "ship"] = "pick"
     assigned_agent: AgentId | None = None  # sigma(j)
     assignment_time: NonNegativeInt | None = None  # t_j^assigned
     pickup_time: NonNegativeInt | None = None  # t_j^pickup

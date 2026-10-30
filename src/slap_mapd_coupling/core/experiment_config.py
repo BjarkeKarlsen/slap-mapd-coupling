@@ -70,6 +70,11 @@ class ExperimentConfig(BaseModel):
     controller: ControllerArchitecture | None = None
     planner: PlannerName | None = None
     congestion_sensitive: bool
+    # Step 12 (D26): a robot with no task that is in the way, standing on the pickup or delivery
+    # vertex of an unfinished task or on a vertex another robot was stopped from moving onto,
+    # gets the nearest free parking leaf as its target until it arrives or gets a task. Off,
+    # an idle robot's target is its own vertex (issue #102). Token Passing parks by its own rule.
+    idle_parking: bool = False
     communication: bool  # only meaningful if controller == "decentralised"
     num_agents: PositiveInt  # m
     arrival_rate: PositiveFloat  # lambda_task
@@ -143,6 +148,17 @@ class ExperimentConfig(BaseModel):
     # the storage vertices nearest the delivery vertices on average, as many as the starting
     # placement fills with the top cold_stock_top_k SKUs. None leaves the measure off.
     cold_stock_top_k: PositiveInt | None = None
+    # Step 12 (D21), arrival model with robot put-away only. With shipping, an order whose last
+    # pick reaches its workstation becomes one ship task from the workstation to a dock, and the
+    # order is done when it leaves there. dock_choice "random" draws the dock of every put-away
+    # and every ship task uniformly from V_rcv, "nearest" takes the dock nearest the slot.
+    shipping: bool = False
+    dock_choice: Literal["nearest", "random"] = "nearest"
+    # Step 12 (D22, [A69]): where F_fix's home shelves come from. "start", each SKU's shelf in
+    # the starting stock. "popularity", the class-based placement at t = 0, the SKU at rank r of
+    # the popularity ranking on the r-th storage vertex nearest the delivery vertices on
+    # average, so a random start does not make fixed storage random dedicated storage.
+    fixed_homes: Literal["start", "popularity"] = "start"
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -186,7 +202,16 @@ class ExperimentConfig(BaseModel):
             for name in (*topup, *refill, "stock_receiving"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")
+            if self.shipping or self.dock_choice != "nearest":
+                raise ValueError("shipping and dock_choice only apply to stock_model='arrival'.")
             return self
+        if (self.shipping or self.dock_choice != "nearest") and (
+            self.stock_receiving != "receiving" or self.stock_putaway != "robots"
+        ):
+            raise ValueError(
+                "shipping and dock_choice need the docks, stock_receiving='receiving', and "
+                "robot put-away, stock_putaway='robots'."
+            )
         needed, unused = (topup, refill) if self.stock_rule == "topup" else (refill, topup)
         for name in (*needed, "stock_receiving", "storage_epoch_length"):
             if getattr(self, name) is None:

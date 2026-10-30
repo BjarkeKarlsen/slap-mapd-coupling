@@ -21,6 +21,9 @@ the summary and `OUT/capacity.json` are given per value. One OUT holds one setti
     python scripts/sweep/load_sweep.py --config configs/fleet_8/decentralised.yaml \\
         --rates 0.12 --seeds 50 --vary demand.skew --values 0.5 1.0 1.5 --out DIR
 
+`--workers N` plays the seeds of a rate in N processes at once, so a sweep uses every core. The
+rows are the same, in the order the episodes end.
+
 `OUT/summary.md` is written again after every sweep. It starts with the trip distance
 d^trip(v) of every storage vertex, then gives per rule and rate the means over seeds of the
 measures the author reads the main load and the stall length off. The capacity of a rule is
@@ -36,8 +39,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import statistics
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -45,7 +50,7 @@ from slap_mapd_coupling.core.experiment_config import ExperimentConfig, StorageM
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.evaluation.evaluator import row_keeps_up, run_episode
 from slap_mapd_coupling.evaluation.trace import DEFAULT_STOCK_EVERY
-from slap_mapd_coupling.storage.arrival import trip_distance
+from slap_mapd_coupling.storage.arrival import DrawnDocks, trip_distance
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.spec import (
     TrainingSpec,
@@ -90,6 +95,40 @@ _COLUMNS = (
 )
 
 
+# The study of each spec a worker process has built, so its seeds share one build.
+_STUDIES: dict[str, Any] = {}
+
+
+def _play(
+    rated_json: str,
+    seed: int,
+    mode: StorageMode,
+    trace: Path | None,
+    timing: Path,
+    stock_every: int,
+) -> dict[str, Any]:
+    """One Token Passing episode of the spec `rated_json` on `seed` under `mode`, as a row."""
+    rated = TrainingSpec.model_validate_json(rated_json)
+    if rated_json not in _STUDIES:
+        _STUDIES.clear()
+        _STUDIES[rated_json] = build_study(rated, prepare=False)
+    study = _STUDIES[rated_json]
+    # With a warehouse per seed (D27) each seed plays its own.
+    played = study if study.pool is None else study.pool.warehouse(seed)
+    metrics = run_episode(
+        played.instance.graph,
+        played.skus,
+        played.counts,
+        played.capacities,
+        _planner_config(rated, seed, mode),
+        trace_path=trace,
+        timing_path=timing,
+        positions=played.instance.positions,
+        stock_every=stock_every,
+    )
+    return metrics.model_dump(mode="json")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--config", type=Path, required=True, help="a training spec (YAML)")
@@ -118,6 +157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=DEFAULT_STOCK_EVERY,
         help="steps between two stock lines of a trace",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1, help="processes that play the seeds of a rate at once"
     )
     parser.add_argument(
         "--stop-when-overloaded",
@@ -150,40 +192,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             # out rather than ending the sweep, so the rows and the capacity are still written.
             rated = override_spec(valued, arrival_rate=rate)
             try:
-                study = build_study(rated)
+                # Token Passing needs no window tables, so a pool is not prepared.
+                study = build_study(rated, prepare=False)
             except ValueError as error:
                 print(f"rate {rate} and above skipped, the study cannot be built: {error}")
                 break
             seeds = split_seeds(study.seed_split).train[: args.seeds]
+            jobs = []
             for mode in args.modes:
                 for n, seed in enumerate(seeds):
                     if (value, mode, rate, seed) in done:
                         continue
-                    config = _planner_config(rated, seed, mode)
                     trace = None
                     if n < args.trace_seeds:
                         at = "" if value is None else f"{args.vary}_{value:g}_"
                         trace = args.out / "traces" / f"{at}{mode}_rate{rate:g}_seed{seed}.jsonl"
-                    metrics = run_episode(
-                        study.instance.graph,
-                        study.skus,
-                        study.counts,
-                        study.capacities,
-                        config,
-                        trace_path=trace,
-                        timing_path=args.out / "timing.jsonl",
-                        positions=study.instance.positions,
-                        stock_every=args.stock_every,
-                    )
-                    row = metrics.model_dump(mode="json")
-                    if value is not None:
-                        row.update(varied=args.vary, value=value)
-                    with rows_path.open("a", encoding="utf-8") as sink:
-                        sink.write(json.dumps(row) + "\n")
-                    rows.append(row)
-                    done.add((value, mode, rate, seed))
-                    at = "" if value is None else f"{args.vary} {value:g} "
-                    print(f"{at}{mode} rate {rate} seed {seed}: throughput {metrics.throughput:.3f}")
+                    jobs.append((rated.model_dump_json(), seed, mode, trace))
+
+            def record(row: dict[str, Any], seed: int, mode: StorageMode) -> None:
+                if value is not None:
+                    row.update(varied=args.vary, value=value)
+                with rows_path.open("a", encoding="utf-8") as sink:
+                    sink.write(json.dumps(row) + "\n")
+                rows.append(row)
+                done.add((value, mode, rate, seed))
+                at = "" if value is None else f"{args.vary} {value:g} "
+                print(f"{at}{mode} rate {rate} seed {seed}: throughput {row['throughput']:.3f}")
+
+            timing = args.out / "timing.jsonl"
+            if args.workers <= 1:
+                for rated_json, seed, mode, trace in jobs:
+                    record(_play(rated_json, seed, mode, trace, timing, args.stock_every), seed, mode)
+            elif jobs:
+                # Spawned, not forked, so no worker inherits the parent's threads.
+                context = multiprocessing.get_context("spawn")
+                with ProcessPoolExecutor(min(args.workers, len(jobs)), mp_context=context) as pool:
+                    futures = {
+                        pool.submit(_play, rated_json, seed, mode, trace, timing, args.stock_every): (
+                            seed,
+                            mode,
+                        )
+                        for rated_json, seed, mode, trace in jobs
+                    }
+                    for future in as_completed(futures):
+                        record(future.result(), *futures[future])
             # With --stop-when-overloaded, a rate at which no seed of any rule keeps up ends the
             # sweep, since a higher rate cannot change a capacity. The rates above capacity
             # that some seed still passes are kept, for the load and demand appendix.
@@ -197,7 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"no seed keeps up at rate {rate}, the higher rates are skipped")
                 break
 
-    study = build_study(spec)
+    study = build_study(spec, prepare=False)
     by_value: dict[Any, list[dict[str, Any]]] = {}
     for row in rows:
         by_value.setdefault(row.get("value"), []).append(row)
@@ -286,6 +338,8 @@ def receiving_vertices(spec: TrainingSpec, graph: WarehouseGraph) -> list[Vertex
 
 def _trips(spec: TrainingSpec, graph: WarehouseGraph) -> str:
     receiving = receiving_vertices(spec, graph)
+    if spec.arrival is not None and spec.arrival.dock_choice == "random":
+        receiving = DrawnDocks(receiving)  # every dock alike ([A70])
     delivery = sorted(v for v, vertex in graph.vertices.items() if vertex.role.delivery)
     trips = {
         v: trip_distance(graph, v, receiving, delivery)

@@ -111,6 +111,10 @@ class WarehouseGraph(BaseModel):
     _dist: dict[tuple[VertexId, VertexId], float] = PrivateAttr(default_factory=dict)
     # within(v, depth), filled on first use. The graph never changes, so neither does the set.
     _within: dict[tuple[VertexId, float], tuple[VertexId, ...]] = PrivateAttr(default_factory=dict)
+    # shortest_path_edges(v, w), filled on first use, for the same reason.
+    _paths: dict[
+        tuple[VertexId, VertexId], tuple[tuple[VertexId, VertexId], ...]
+    ] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
     def _edges_reference_known_movable_vertices(self) -> "WarehouseGraph":
@@ -221,6 +225,50 @@ class WarehouseGraph(BaseModel):
                 if vertex.role.movable and self.distance(v, w) <= depth
             )
             self._within[key] = found
+        return found
+
+    def shortest_path_edges(
+        self, source: VertexId, target: VertexId
+    ) -> tuple[tuple[VertexId, VertexId], ...]:
+        """The edges of one shortest path from source to target, by Dijkstra with predecessor
+        tracking, ties broken by neighbour order. Worked out once per (source, target) and kept,
+        since the congestion-aware storage and put-away rules ask for the same paths on every
+        update (storage/congestion.py, storage/arrival.py).
+
+        Raises KeyError if target is unreachable from source, as distance does.
+        """
+        key = (source, target)
+        found = self._paths.get(key)
+        if found is not None:
+            return found
+        if source == target:
+            self._paths[key] = ()
+            return ()
+        dist: dict[VertexId, float] = {source: 0.0}
+        predecessor: dict[VertexId, VertexId] = {}
+        frontier: list[tuple[float, VertexId]] = [(0.0, source)]
+        while frontier:
+            d, v = heapq.heappop(frontier)
+            if d > dist.get(v, float("inf")):
+                continue
+            if v == target:
+                break
+            for edge in self._out.get(v, ()):
+                nd = d + edge.cost
+                if nd < dist.get(edge.target, float("inf")):
+                    dist[edge.target] = nd
+                    predecessor[edge.target] = v
+                    heapq.heappush(frontier, (nd, edge.target))
+
+        if target not in dist:
+            raise KeyError(f"{target} is unreachable from {source}.")
+
+        vertices = [target]
+        while vertices[-1] != source:
+            vertices.append(predecessor[vertices[-1]])
+        vertices.reverse()
+        found = tuple(zip(vertices, vertices[1:]))
+        self._paths[key] = found
         return found
 
     def distance(self, v: VertexId, w: VertexId) -> float:

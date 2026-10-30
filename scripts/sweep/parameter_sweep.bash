@@ -9,13 +9,17 @@
 # FLEET is a fleet size of configs/fleet_<FLEET>/decentralised.yaml (default 8 16 32 64). Each
 # fleet runs at the arrival rate RATE when it is set, else at the main load its rate sweep found
 # (results/arrival_rates/load_fleet<FLEET>/capacity.json). A fleet with neither is skipped. A
-# sweep started again skips the rows it already has.
+# sweep started again skips the rows it already has. CONFIGS is the config of a fleet with {} for
+# its size (default configs/fleet_{}/decentralised.yaml) and SWEEP_ARGS more load_sweep.py options
+# for every sweep, as in overnight.bash.
 set -uo pipefail
 cd "$(dirname "$0")/../.."  # the repo root, where scripts/ and configs/ are
 
 PYTHON=~/.venvs/rl/bin/python
 RESULTS=${RESULTS:-~/Documents/thesis/thesis-progress/results}
 SEEDS=${SEEDS:-50}
+CONFIGS=${CONFIGS:-configs/fleet_\{\}/decentralised.yaml}
+SWEEP_ARGS=${SWEEP_ARGS:-}
 
 # section.key | storage modes | values. The main result is the gain of demand over fixed storage,
 # so a demand or stock setting runs under both. Delta is also the arrival period, so it runs under
@@ -28,7 +32,8 @@ SWEEPS=(
     "storage_rule.congestion_weight|congestion|0.0 0.5 1.0 2.0 3.0 4.0"
     "demand.skew|fixed demand|0.5 1.0 1.5"
     "demand.rotation_period|fixed demand|100 200 400"
-    "demand.rotation_shift|fixed demand|2 5 10"
+    # The configs rotate by a share of the SKUs (D20), so the shift is swept as that share.
+    "demand.rotation_share|fixed demand|0.025 0.05 0.1"
     # "arrival.cold_stock_top_k|fixed|5 10 20 30"
 )
 
@@ -41,7 +46,7 @@ print("" if load is None else load)' "$RESULTS/arrival_rates/load_fleet$1/capaci
 [ "$#" -eq 0 ] && set -- 8 16 32 64
 failed=0
 for fleet in "$@"; do
-    config=configs/fleet_$fleet/decentralised.yaml
+    config=${CONFIGS//\{\}/$fleet}
     rate=${RATE:-$(main_load "$fleet")}
     if [ -z "$rate" ]; then
         echo "fleet $fleet skipped, no main load in its capacity.json and no RATE" >&2
@@ -56,10 +61,10 @@ for fleet in "$@"; do
         mkdir -p "$dir"
         cp "$config" "$dir/config.yaml"  # the config the values were varied from
         echo "  start $setting ($modes): $values"
-        # shellcheck disable=SC2086  # modes and values are word lists
+        # shellcheck disable=SC2086  # modes, values and SWEEP_ARGS are word lists
         "$PYTHON" scripts/sweep/load_sweep.py --config "$config" --rates "$rate" \
             --seeds "$SEEDS" --storage-modes $modes --vary "$setting" --values $values \
-            --out "$dir" > "$dir/sweep.log" 2>&1 &
+            $SWEEP_ARGS --out "$dir" > "$dir/sweep.log" 2>&1 &
     done
     for job in $(jobs -p); do
         wait "$job" || failed=1

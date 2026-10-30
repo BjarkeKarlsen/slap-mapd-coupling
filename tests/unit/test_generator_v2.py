@@ -15,8 +15,10 @@ from slap_mapd_coupling.instances.generator import (
     VERTICES_PER_AGENT,
     GeneratedInstance,
     GeneratorParams,
+    InstanceGenerationError,
     fleet_defaults,
     fleet_defaults_v1,
+    v2_stacked_shape,
     generate_instance,
 )
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
@@ -236,6 +238,192 @@ def test_every_seed_is_strongly_connected_and_passes_both_checks(num_agents):
         assert _strongly_connected(instance, _walkable(instance))
         assert check_connectivity(instance.graph).ok
         assert check_well_formedness(instance.graph, num_agents).ok
+
+
+# Step 12: workstations on rack faces (D24) and a set number of slots (D25).
+
+
+@cache
+def _step12_instance(num_agents: int, num_slots: int | None, seed: int = 42) -> GeneratedInstance:
+    settings = {
+        **fleet_defaults(num_agents),
+        "station_placement": "rack_faces",
+        "num_storage_vertices": num_slots,
+        "seed": seed,
+    }
+    return generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+
+
+def _roles_by_cell(instance: GeneratedInstance) -> dict[tuple[float, float], str]:
+    names = ("storage", "delivery", "receiving", "endpoint")
+    return {
+        instance.positions[v]: next((n for n in names if getattr(x.role, n)), "walkable")
+        for v, x in instance.graph.vertices.items()
+    }
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_workstations_on_rack_faces_take_faces_that_were_slots(num_agents):
+    before = _roles_by_cell(_instance(num_agents))
+    after = _roles_by_cell(_step12_instance(num_agents, None))
+    stations = [cell for cell, role in after.items() if role == "delivery"]
+    assert len(stations) == num_agents // 2
+    assert all(before[cell] == "storage" for cell in stations)
+    # The front wall cells the workstations held are gone, everything else is as before.
+    for cell, role in before.items():
+        if role == "delivery":
+            assert cell not in after
+        elif cell not in stations:
+            assert after[cell] == role
+
+
+def test_the_workstations_move_with_the_seed():
+    stations = [
+        {c for c, r in _roles_by_cell(_step12_instance(8, None, seed)).items() if r == "delivery"}
+        for seed in (0, 1)
+    ]
+    assert stations[0] != stations[1]
+    assert _step12_instance(8, None, 0) == _step12_instance(8, None, 0)
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_a_set_number_of_slots_leaves_the_other_faces_as_parking(num_agents):
+    all_faces = _step12_instance(num_agents, None)
+    faces = sum(x.role.storage for x in all_faces.graph.vertices.values())
+    instance = _step12_instance(num_agents, 20)
+    roles = [x.role for x in instance.graph.vertices.values()]
+    assert sum(role.storage for role in roles) == 20
+    assert sum(role.endpoint for role in roles) == num_agents + faces - 20
+    assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+    neighbours = _neighbours(instance)
+    for v, vertex in instance.graph.vertices.items():
+        if vertex.role.is_task_endpoint:
+            assert len(neighbours[v]) == 1
+    assert check_connectivity(instance.graph).ok
+    assert check_well_formedness(instance.graph, num_agents).ok
+
+
+def test_the_slots_are_spread_over_the_rows():
+    instance = _step12_instance(8, 20)
+    rows = {_row(instance, v) for v, x in instance.graph.vertices.items() if x.role.storage}
+    assert len(rows) >= 5
+
+
+@pytest.mark.parametrize("num_agents", (8, 16))
+def test_docks_along_the_left_wall_reach_from_the_front_to_the_back(num_agents):
+    settings = {**fleet_defaults(num_agents), "dock_placement": "left_wall"}
+    instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+    docks = [v for v, x in instance.graph.vertices.items() if x.role.receiving]
+    assert len(docks) == num_agents // 2
+    assert all(_column(instance, v) == -1 for v in docks)
+    rows = sorted(_row(instance, v) for v in docks)
+    main_low = min(_row(instance, v) for v in _main_pair(instance))
+    assert rows[0] < main_low < rows[-1]
+    assert check_well_formedness(instance.graph, num_agents).ok
+
+
+@pytest.mark.parametrize("num_agents", (8, 16, 32))
+def test_an_irregular_lower_block_keeps_the_walkable_count_and_stays_well_formed(num_agents):
+    for seed in range(10):
+        settings = {**fleet_defaults(num_agents), "lower_block": "irregular", "seed": seed}
+        instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+        assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+        assert _strongly_connected(instance, _walkable(instance))
+        assert check_well_formedness(instance.graph, num_agents).ok
+        neighbours = _neighbours(instance)
+        for v, vertex in instance.graph.vertices.items():
+            if vertex.role.is_task_endpoint:
+                assert len(neighbours[v]) == 1
+
+
+def test_an_irregular_lower_block_has_aisles_that_stop_short_of_the_front_lane():
+    main_low = None
+    short = 0
+    for seed in range(10):
+        settings = {**fleet_defaults(16), "lower_block": "irregular", "seed": seed}
+        instance = generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+        main_low = min(_row(instance, v) for v in _main_pair(instance))
+        walkable = _walkable(instance)
+        columns = {_column(instance, v) for v in walkable if _row(instance, v) == main_low - 1}
+        reaching = {_column(instance, v) for v in walkable if _row(instance, v) == 1}
+        short += len(columns - reaching)
+    assert short > 0
+    # The full lower block keeps every aisle down to the front lane, as before.
+    full = _instance(16)
+    low = min(_row(full, v) for v in _main_pair(full))
+    walkable = _walkable(full)
+    assert {_column(full, v) for v in walkable if _row(full, v) == low - 1} <= {
+        _column(full, v) for v in walkable if _row(full, v) == 1
+    }
+
+
+@cache
+def _stacked(num_agents: int, seed: int = 42) -> GeneratedInstance:
+    num_aisles, num_blocks = v2_stacked_shape(num_agents, 4)
+    settings = {
+        **fleet_defaults(num_agents),
+        "num_aisles": num_aisles,
+        "rack_rows": 4,
+        "num_blocks": num_blocks,
+        "lower_block": "irregular",
+        "station_placement": "rack_faces",
+        "dock_placement": "left_wall",
+        "seed": seed,
+    }
+    return generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+
+
+@pytest.mark.parametrize("num_agents", FLEETS)
+def test_stacked_blocks_keep_the_walkable_count_and_stay_well_formed(num_agents):
+    for seed in range(3 if num_agents == 64 else 10):
+        instance = _stacked(num_agents, seed)
+        assert len(_walkable(instance)) == VERTICES_PER_AGENT * num_agents
+        assert _strongly_connected(instance, _walkable(instance))
+        assert check_connectivity(instance.graph).ok
+        assert check_well_formedness(instance.graph, num_agents).ok
+        neighbours = _neighbours(instance)
+        for v, vertex in instance.graph.vertices.items():
+            if vertex.role.is_task_endpoint:
+                assert len(neighbours[v]) == 1
+
+
+@pytest.mark.parametrize("num_agents", (16, 32))
+def test_stacked_blocks_are_four_rows_deep_with_lanes_between_and_the_pair_in_the_middle(
+    num_agents,
+):
+    instance = _stacked(num_agents)
+    _, num_blocks = v2_stacked_shape(num_agents, 4)
+    walkable = _walkable(instance)
+    width = max(_column(instance, v) for v in walkable) + 1
+    rows = sorted({_row(instance, v) for v in walkable})
+    full = [r for r in rows if sum(1 for v in walkable if _row(instance, v) == r) == width]
+    lanes = [r for r in full if r not in instance.cross_aisle_rows]  # a row of links can span too
+    # The front lane, a cross lane between blocks, the two rows of the main pair, the back lane.
+    assert len(lanes) == num_blocks + 2
+    pair = sorted({_row(instance, v) for v in _main_pair(instance)})
+    assert pair[1] == pair[0] + 1
+    below = [r for r in lanes if r < pair[0]]
+    assert len(below) == num_blocks // 2  # the front lane and the cross lanes below the pair
+    gaps = [b - a - 1 for a, b in zip(lanes, lanes[1:]) if (a, b) != tuple(pair)]
+    assert set(gaps) == {4}
+    # No leaf on a lane but the front and back lanes, whose wall cells hold leaves.
+    neighbours = _neighbours(instance)
+    for v, vertex in instance.graph.vertices.items():
+        if vertex.role.is_task_endpoint:
+            (at,) = neighbours[v]
+            assert _row(instance, at) not in set(lanes[1:-1])
+
+
+def test_stacked_blocks_have_short_aisle_segments_in_every_half():
+    instance = _stacked(32)
+    lengths = instance.aisle_lengths
+    _, num_blocks = v2_stacked_shape(32, 4)
+    assert min(lengths[1:-1]) < num_blocks * 4 == lengths[0] == lengths[-1]
+
+
+def test_more_slots_than_faces_is_rejected():
+    with pytest.raises(InstanceGenerationError, match="slots do not fit"):
+        _step12_instance(8, 10_000)
 
 
 def test_the_same_seed_gives_the_same_instance_and_another_seed_another():

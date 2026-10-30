@@ -47,6 +47,7 @@ def run_episode(
     pooling: Pooling | None = None,
     positions: Mapping[VertexId, tuple[float, float]] | None = None,
     stock_every: int = DEFAULT_STOCK_EVERY,
+    pool: Any = None,
 ) -> RunMetrics:
     """Run one full episode (config.horizon timesteps) and reduce it to
     one RunMetrics row.
@@ -71,6 +72,9 @@ def run_episode(
     the trace header for drawing it, and a stock line is written every
     `stock_every` steps.
 
+    With `pool` (training/warehouses.py) a learned arm reads the stored tables of the episode
+    seed's warehouse, which the graph, the stock and `positions` given must then be.
+
     With `timing_path` one JSON line is appended there with the wall-clock seconds and calls of
     every part of the step (`episode_timing`). Engineering only, it changes no result.
     """
@@ -89,6 +93,7 @@ def run_episode(
             encoding_config,
             zones,
             pooling,
+            pool,
         )
 
     if trace_path is None:
@@ -163,6 +168,7 @@ def _controller_run(
     encoding_config: LocalSubgraphEncodingConfig | None,
     zones: Sequence[frozenset[VertexId]] | None,
     pooling: Pooling | None,
+    pool: Any = None,
 ) -> tuple[WarehouseMAPDEnv, Callable[[], None]]:
     """The simulator core of a learned arm, reset for the episode, and a function
     that advances it one timestep through the adapter and the policy. A timestep is
@@ -184,6 +190,7 @@ def _controller_run(
         (config.seed,),
         pooling=pooling,
         zones=zones,
+        pool=pool,
     )
     observations: dict[str, Any]
     observations, _ = adapter.reset(seed=config.seed)
@@ -333,11 +340,19 @@ def order_metrics(
     order_line_by_task: Mapping[TaskId, tuple[int, int]],
     waiting_lines: Sequence[OrderLine],
     lines_waited: Collection[tuple[int, int]],
+    shipping: bool = False,
 ) -> dict[str, Any]:
     """The order measures of the arrival model. An order is complete when none of its lines
     still waits and all its tasks are completed. Its completion time is the longest service time
-    among its tasks, the order completion time. Tasks per line are counted over the lines with
-    no units still missing."""
+    among its tasks, the order completion time. With shipping (D21) an order is complete when
+    its ship task is, and its completion time runs from the order's release to the step it
+    leaves at the dock. Tasks per line are counted over the lines with no units still
+    missing."""
+    shipped = {
+        task.order_id: task.finish_time
+        for task in tasks
+        if task.kind == "ship" and task.finish_time is not None
+    }
     waiting_orders = {line.order_id for line in waiting_lines}
     waiting = {(line.order_id, line.line_index) for line in waiting_lines}
     tasks_by_order: dict[int, list[Task]] = {}
@@ -352,6 +367,11 @@ def order_metrics(
     completions = []
     for order_id, order_tasks in tasks_by_order.items():
         if order_id in waiting_orders:
+            continue
+        if shipping:
+            if order_id in shipped:
+                released = min(task.release_time for task in order_tasks)
+                completions.append(shipped[order_id] - released)
             continue
         times = [task.service_time for task in order_tasks]
         if all(time is not None for time in times):
@@ -529,7 +549,11 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 else None
             ),
             **order_metrics(
-                env.tasks, env.log.order_line_by_task, env.waiting_orders, env.log.lines_waited
+                env.tasks,
+                env.log.order_line_by_task,
+                env.waiting_orders,
+                env.log.lines_waited,
+                shipping=config.shipping,
             ),
         )
         arrival_fields["orders_per_timestep"] = arrival_fields["num_completed_orders"] / horizon

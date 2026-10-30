@@ -117,6 +117,7 @@ def build_observation(
     config: ExperimentConfig,
     window: Sequence[VertexId] | None = None,
     claimed: Collection[VertexId] = (),
+    parking: VertexId | None = None,
 ) -> Observation:
     """o_i(t) for one agent at one timestep. `window` is the set of
     visible vertices, in the order given. None means the field of view.
@@ -131,7 +132,7 @@ def build_observation(
     active_by_agent = active_tasks_by_agent(tasks, t)
     locations = fleet.locations()
     location = locations[agent_id]
-    target = current_target(location, active_by_agent.get(agent_id))
+    target = current_target(location, active_by_agent.get(agent_id), parking)
 
     field_of_view = local_subgraph(graph, location, config.observation_depth)
     visible = field_of_view if window is None else tuple(window)

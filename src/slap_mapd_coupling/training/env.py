@@ -81,6 +81,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
+from gymnasium.spaces import Discrete
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
 from slap_mapd_coupling.core.agents import AgentId
@@ -90,7 +91,7 @@ from slap_mapd_coupling.core.storage_state import SkuId, SkuType
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.environment.multi_agent_env import WarehouseMAPDEnv
 from slap_mapd_coupling.environment.observation import local_subgraph
-from slap_mapd_coupling.environment.spaces import action_for_slot, action_space, max_out_degree
+from slap_mapd_coupling.environment.spaces import action_for_slot, max_out_degree
 from slap_mapd_coupling.environment.zones import check_partition, halo
 from slap_mapd_coupling.models.gnn_encoder import Pooling
 from slap_mapd_coupling.models.local_subgraph_encoding import (
@@ -104,6 +105,7 @@ from slap_mapd_coupling.models.window_tables import (
     build_window_tables,
     compact_observation_space,
     compact_rllib_dict,
+    keyed_position,
 )
 
 Zones = Sequence[frozenset[VertexId]]
@@ -269,6 +271,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         *,
         pooling: Pooling,
         zones: Optional[Zones] = None,
+        pool: Optional[Any] = None,
         first_seed_index: int = 0,
         seed_from_cycle: bool = False,
         key_prefix: int = 0,
@@ -282,6 +285,10 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         )
         super().__init__()
         self.graph = graph
+        # D27: with a pool (training/warehouses.py) every reset plays the warehouse of its
+        # seed, and the samples name their vertex by a vertex key.
+        self._pool = pool
+        self._warehouse_seed: Optional[int] = None
         self.controller: ControllerArchitecture = config.controller
         self._config = config
         self._encoding_config = encoding_config
@@ -298,17 +305,26 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self.agents = self.possible_agents = [str(a) for a in range(1, config.num_agents + 1)]
         # The samples are compact (models/window_tables.py). The module rebuilds the padded
         # arrays from the same tables, which build_ppo_config puts in its model config.
-        self.window_tables = arm_window_tables(
-            graph, config.controller, config.observation_depth, encoding_config, zones, pooling
-        )
-        self._position = self.window_tables.position()
+        if pool is None:
+            self.window_tables = arm_window_tables(
+                graph, config.controller, config.observation_depth, encoding_config, zones, pooling
+            )
+            self._position = self.window_tables.position()
+            num_rows = len(self.window_tables.vertices)
+        else:
+            self._d_max = pool.manifest()["d_max"]
+            num_rows = 1
         base_observation_space = compact_observation_space(
-            encoding_config, len(self.window_tables.vertices), self._d_max, config.communication
+            encoding_config,
+            num_rows,
+            self._d_max,
+            config.communication,
+            keyed=pool is not None,
         )
         per_agent_observation_space = masked_observation_space(
             base_observation_space, self._d_max + 1
         )
-        per_agent_action_space = action_space(graph)
+        per_agent_action_space = Discrete(self._d_max + 1)
         self.observation_spaces = {aid: per_agent_observation_space for aid in self.agents}
         self.action_spaces = {aid: per_agent_action_space for aid in self.agents}
 
@@ -318,6 +334,35 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
         self.last_seed: Optional[int] = None  # the seed the most recent reset() actually used
         # True on the sub-step that ran the core, false on every other one.
         self.timestep_completed = False
+
+    def _play_warehouse(self, seed: int) -> None:
+        """Switches to the warehouse of `seed` (D27): its graph, windows, start stock and the
+        vertex keys of its stored tables. The core is rebuilt on it."""
+        built = self._pool.warehouse(seed)
+        graph = built.instance.graph
+        if max_out_degree(graph) > self._d_max:
+            raise ValueError(f"the warehouse of seed {seed} has a larger d_max than the pool.")
+        self.graph = graph
+        self._arm = arm_windows(
+            graph,
+            self.controller,
+            self._config.observation_depth,
+            self._encoding_config,
+            built.zones,
+        )
+        self.window_tables = self._pool.tables(seed)
+        self._position = keyed_position(self.window_tables.position(), seed)
+        self.core = WarehouseMAPDEnv(
+            graph, built.skus, built.counts, built.capacities, self._config
+        )
+        self._warehouse_seed = seed
+
+    @property
+    def positions(self) -> Optional[Mapping[VertexId, tuple[float, float]]]:
+        """The drawing positions of the warehouse played, with a pool, for the trace."""
+        if self._pool is None or self._warehouse_seed is None:
+            return None
+        return self._pool.warehouse(self._warehouse_seed).instance.positions
 
     def window_of(self, agent_id: AgentId) -> tuple[VertexId, ...]:
         """The window robot `agent_id`'s observation covers at the current t."""
@@ -339,6 +384,8 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             self._next_train_seed_index += 1
         self.last_seed = seed
         self._episode_count += 1
+        if self._pool is not None and seed != self._warehouse_seed:
+            self._play_warehouse(seed)
         super().reset(seed=seed, options=options)
         self.core.reset(seed=seed)
         self.timestep_completed = False
@@ -465,6 +512,7 @@ class WarehouseMAPDMultiAgentEnv(MultiAgentEnv):
             chosen=chosen,
             # The compact sample keeps the window arrays in tables (models/window_tables.py).
             padded=False,
+            parking=self.core.parking_targets,
         )
         if self._config.communication:
             agent_at = {v: agent_id for agent_id, v in locations.items()}

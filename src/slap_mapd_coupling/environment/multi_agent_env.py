@@ -94,10 +94,11 @@ from __future__ import annotations
 
 import bisect
 import random
+import statistics
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Collection, Mapping, NamedTuple
 
 import numpy as np
 
@@ -116,6 +117,7 @@ from slap_mapd_coupling.resolution.conflict_resolution import (
     resolve_conflicts,
 )
 from slap_mapd_coupling.storage.arrival import (
+    DrawnDocks,
     PutAwayRule,
     arrival_amounts,
     get_putaway_rule,
@@ -133,6 +135,8 @@ _ORDER_SEED_OFFSET = 1_000_000_007
 # The put-away stream of the "random" rule, seeded from the episode seed in the same way, so a
 # seed always gives the same draws and they never share the order stream.
 _PUTAWAY_SEED_OFFSET = 2_000_000_011
+# The dock draws of dock_choice "random" (step 12, D21), seeded the same way on their own stream.
+_DOCK_SEED_OFFSET = 3_000_000_019
 
 
 class OrderLine(NamedTuple):
@@ -372,12 +376,24 @@ class WarehouseMAPDEnv:
         self._home: dict[SkuId, VertexId] = {}
         if config.stock_model == "arrival":
             self._putaway_rule = get_putaway_rule(config.storage_mode)
-            self._home = _home_shelves(self._initial_counts)
+            self._home = (
+                _popularity_homes(graph, list(self._storage_capacities), self._sku_ids)
+                if config.fixed_homes == "popularity"
+                else _home_shelves(self._initial_counts)
+            )
             if config.storage_mode == "fixed" and set(self._home) != set(self._skus):
                 missing = sorted(set(self._skus) - set(self._home))
                 raise ValueError(
                     f"SKUs {missing} start with no units, so F_fix has no home shelf for them."
                 )
+        # D26: the parking leaves, the endpoints that are no slot, workstation or dock, as Token
+        # Passing parks on.
+        self._parking_leaves = sorted(
+            v
+            for v, vertex in graph.vertices.items()
+            if vertex.role.endpoint
+            and not (vertex.role.storage or vertex.role.delivery or vertex.role.receiving)
+        )
         # The prime shelves of the cold-stock measure, empty while it is off.
         self._prime_shelves: list[VertexId] = []
         if config.cold_stock_top_k is not None:
@@ -412,6 +428,11 @@ class WarehouseMAPDEnv:
         field of view. Computed once per timestep. After the step that ends the episode it
         still holds the values of the last timestep acted in."""
         return MappingProxyType(self._congestion_by_agent)
+
+    @property
+    def parking_targets(self) -> Mapping[AgentId, VertexId]:
+        """The parking leaf of every idle robot sent to one (D26), empty while it is off."""
+        return self._parking
 
     @property
     def priority(self) -> tuple[AgentId, ...]:
@@ -482,6 +503,13 @@ class WarehouseMAPDEnv:
         self._priority = priority_permutation(episode_seed, agent_ids)
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
         self._putaway_rng = random.Random(episode_seed + _PUTAWAY_SEED_OFFSET)
+        self._dock_rng = random.Random(episode_seed + _DOCK_SEED_OFFSET)
+        # D26: the parking leaf of every idle robot that was in the way, until it arrives or
+        # gets a task.
+        self._parking: dict[AgentId, VertexId] = {}
+        # Shipping only: every order not yet shipped, as its workstation, the SKU of its first
+        # line, its units not yet delivered to the workstation and its units in all.
+        self._open_orders: dict[int, list] = {}
         self._estimator = WindowEstimator()
         self.last_proposed = {}
         self.last_overridden = frozenset()
@@ -606,6 +634,7 @@ class WarehouseMAPDEnv:
         if not episode_done:
             self._release_and_assign()
             clock = self._timed("release_and_assign", clock)
+            self._update_parking(proposed, result.overridden)
             self._record_crowding()
             self._timed("crowding", clock)
         observations = dict(self.fleet.locations())
@@ -686,7 +715,12 @@ class WarehouseMAPDEnv:
         # Only the options a run sets are passed, so a rule written before them still works.
         options: dict[str, Any] = {}
         if self._receiving_vertices is not None:
-            options["receiving"] = self._receiving_vertices
+            # With random docks the rules weigh every dock alike ([A70]).
+            options["receiving"] = (
+                DrawnDocks(self._receiving_vertices)
+                if self.config.dock_choice == "random"
+                else self._receiving_vertices
+            )
         if robots:
             options["trip"] = True
         if self.config.storage_mode == "random":
@@ -724,7 +758,7 @@ class WarehouseMAPDEnv:
                         Task(
                             task_id=self._next_task_id,
                             release_time=arrival_t,
-                            pickup_vertex=nearest_receiving_point(self.graph, v, receiving),
+                            pickup_vertex=self._dock_for(v, receiving),
                             delivery_vertex=v,
                             sku=sku_id,
                             quantity=load,
@@ -752,6 +786,81 @@ class WarehouseMAPDEnv:
         if shares:
             self.log.shelf_fill_peak_by_update.append(max(shares))
             self.log.shelf_fill_mean_by_update.append(sum(shares) / len(shares))
+
+    def _update_parking(
+        self, proposed: Mapping[AgentId, Action], overridden: Collection[AgentId]
+    ) -> None:
+        """D26, at the new t after assignment. A robot that got a task or reached its parking
+        leaf drops it. A robot with no task that is in the way gets the nearest free parking
+        leaf, ties by vertex id: it stands on the pickup or delivery vertex of an unfinished
+        task, or another robot was stopped from moving onto its vertex this step. A free leaf
+        is one no other robot stands on or is sent to and no unfinished task needs."""
+        if not self.config.idle_parking:
+            return
+        t = self._t
+        active = active_tasks_by_agent(self.tasks, t)
+        locations = self.fleet.locations()
+        self._parking = {
+            agent_id: leaf
+            for agent_id, leaf in self._parking.items()
+            if agent_id not in active and locations[agent_id] != leaf
+        }
+        needed: set[VertexId] = set()
+        for task in self.tasks:
+            status = task.status(t)
+            if status == "waiting" or (status == "active" and task.pickup_time is None):
+                needed.add(task.pickup_vertex)
+            if status in ("waiting", "active"):
+                needed.add(task.delivery_vertex)
+        stopped_onto = {
+            proposed[agent_id].target
+            for agent_id in overridden
+            if agent_id in proposed and proposed[agent_id].kind == "move"
+        }
+        for agent_id in sorted(locations):
+            here = locations[agent_id]
+            if agent_id in active or agent_id in self._parking:
+                continue
+            if here not in needed and here not in stopped_onto:
+                continue
+            taken = set(locations.values()) | set(self._parking.values()) | needed
+            free = [v for v in self._parking_leaves if v not in taken]
+            if free:
+                self._parking[agent_id] = min(
+                    free, key=lambda v: (self.graph.distance(here, v), v)
+                )
+
+    def _dock_for(self, slot: VertexId, receiving: list[VertexId]) -> VertexId:
+        """The dock a put-away to `slot` starts from: the nearest, or one drawn at random."""
+        if self.config.dock_choice == "random":
+            return self._dock_rng.choice(receiving)
+        return nearest_receiving_point(self.graph, slot, receiving)
+
+    def _ship(self, pick: Task, t: int) -> Task | None:
+        """Shipping only: count a pick delivered at t against its order, and once the order's
+        last unit is at the workstation, the ship task released at t that carries the whole
+        order to a dock (D21). The workstation holds the units meanwhile, with no capacity and
+        no processing time."""
+        assert pick.order_id is not None
+        order = self._open_orders[pick.order_id]
+        order[2] -= pick.quantity
+        if order[2]:
+            return None
+        del self._open_orders[pick.order_id]
+        station, sku, _, units = order
+        assert self._receiving_vertices is not None  # the config requires the docks
+        task = Task(
+            task_id=self._next_task_id,
+            release_time=t,
+            pickup_vertex=station,
+            delivery_vertex=self._dock_rng.choice(self._receiving_vertices),
+            sku=sku,
+            quantity=units,
+            order_id=pick.order_id,
+            kind="ship",
+        )
+        self._next_task_id += 1
+        return task
 
     def _shelf_and_transit(self) -> StorageState:
         """x_t + x^in_t, the stock on the shelves plus the stock on its way to them."""
@@ -881,6 +990,12 @@ class WarehouseMAPDEnv:
             lines = self._draw_order_lines(t, ranked)
         counting = self.config.refill_units is not None
         for line in lines:
+            if self.config.shipping:
+                order = self._open_orders.setdefault(
+                    line.order_id, [line.delivery_vertex, line.sku, 0, 0]
+                )
+                order[2] += line.missing
+                order[3] += line.missing
             self._estimator.record_order(line.sku, line.missing)
             if counting:
                 self._ordered_since_refill[line.sku] += line.missing
@@ -1096,6 +1211,7 @@ class WarehouseMAPDEnv:
         depends on it."""
         locations = self.fleet.locations()
         updated: list[Task] = []
+        shipped: list[Task] = []
         for task in self.tasks:
             if task.status(next_t) != "active":
                 updated.append(task)
@@ -1110,8 +1226,12 @@ class WarehouseMAPDEnv:
                 task = task.complete(next_t)
                 if task.kind == "putaway":
                     self._shelve(task, next_t)
+                elif task.kind == "pick" and self.config.shipping:
+                    ship = self._ship(task, next_t)
+                    if ship is not None:
+                        shipped.append(ship)
             updated.append(task)
-        return updated
+        return updated + shipped
 
     def _record_crowding(self) -> None:
         """delta_i(t) of every robot for the current t, the congestion feature: the other
@@ -1188,6 +1308,7 @@ class WarehouseMAPDEnv:
                 move_cost=self.config.move_cost,
                 wait_cost=self.config.wait_cost,
                 congestion_reward_weight=self.config.congestion_reward_weight,
+                parking=self._parking.get(agent_id),
             )
             self.log.record_reward_terms(agent_id, terms, was_overridden)
             rewards[agent_id] = terms.total
@@ -1203,6 +1324,23 @@ def _home_shelves(counts: Mapping[SkuId, Mapping[VertexId, int]]) -> dict[SkuId,
         if held:
             home[sku_id] = min(held)[1]
     return home
+
+
+def _popularity_homes(
+    graph: WarehouseGraph, storage_vertices: list[VertexId], sku_ids: list[SkuId]
+) -> dict[SkuId, VertexId]:
+    """F_fix's home shelves under fixed_homes "popularity" ([A69]): the class-based placement at
+    t = 0. The storage vertices are ordered by their mean distance to the delivery vertices, ties
+    by vertex id, and the SKUs in their order at t = 0, the popularity ranking before any
+    rotation, fill them in blocks of ceil(|K| / |V_str|), so with more shelves than SKUs each
+    SKU gets its own shelf, the most popular the nearest."""
+    delivery = [v for v, vertex in graph.vertices.items() if vertex.role.delivery]
+    nearest_first = sorted(
+        storage_vertices,
+        key=lambda v: (statistics.mean(graph.distance(v, g) for g in delivery), v),
+    )
+    block = -(-len(sku_ids) // len(nearest_first))  # the ceiling, in integers
+    return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(sku_ids)}
 
 
 def _prime_shelves(

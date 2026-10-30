@@ -1,0 +1,95 @@
+# Step 12 of the model revision (D21 to D25), 8 agents, provisional. Made from
+# configs/fleet_8/decentralised.yaml: workstations on random rack faces, docks along the
+# left wall, 40 slots for 20 SKUs (about a quarter of the rack faces as SKUs), each SKU
+# starting alone on a random slot, shipping to a random dock. The SKU count and Q are set
+# from the sizing runs (part D of 12_flow_and_start.md).
+controller: decentralised
+regime: fixed_only
+communication: false
+evaluation_storage_mode: fixed
+arrival_rate: 0.12
+horizon: 2000
+experiment:
+  num_agents: 8
+  wait_cost: 0.2
+  keep_up_threshold: 0.8
+  observation_depth: 5
+  discount: 0.99
+  deliver_reward: 10.0
+  override_penalty: 0.5
+  move_cost: 0.1
+  congestion_reward_weight: 0.1
+  congestion_sensitive: false
+  idle_parking: true
+  seed: 0
+storage:
+  sku_names: null
+  unit_capacities:
+  - 0.5
+  - 1.0
+  - 2.0
+  initial_placement: random_slots
+  num_skus: 20
+  seed: 0
+demand:
+  skew: 1.0
+  rotation_period: 200
+  rotation_share: 0.05
+storage_rule:
+  epoch_length: 100
+  congestion_weight: 1.0
+arrival:
+  rule: refill
+  refill_units: 30
+  service_level: 0.99
+  units_per_line:
+  - 1
+  - 5
+  receiving: receiving
+  putaway: robots
+  cold_stock_top_k: 10
+  shipping: true
+  dock_choice: random
+arm:
+  num_zones: 3
+model:
+  num_rounds: 2
+  hidden_width: 32
+  head_hidden_width: 32
+ppo:
+  lr: 0.0003
+  clip_param: 0.2
+  gae_lambda: 0.95
+  minibatch_size: 128
+  num_epochs: 5
+  entropy_coeff: 0.02
+  vf_loss_coeff: 1.0
+  training_budget_env_steps: 500000
+train_seed_count: 250
+validation_seed_count: 2
+test_seed_count: 6
+checkpoint:
+  frequency: 3
+  num_to_keep: null
+  score_attribute: episode_return_mean
+  score_order: max
+# D27: every episode seed plays its own warehouse and start stock, 250 training warehouses,
+# one per episode of the budget. The window tables are stored under ~/thesis_runs/warehouses.
+warehouse_per_seed: true
+instance:
+  layout: v2
+  num_aisles: 6
+  rack_rows: 4
+  links_per_aisle_pair: 1
+  num_transit_vertices: 128
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: false
+  num_delivery_vertices: 4
+  num_receiving_vertices: 4
+  seed: 42
+  station_placement: rack_faces
+  lower_block: irregular
+  num_blocks: 2
+  dock_placement: left_wall
+  num_storage_vertices: 40

@@ -185,9 +185,17 @@ def refill_amounts(
     return amounts, left
 
 
+class DrawnDocks(list):
+    """The receiving vertices when every put-away's dock is drawn at random (dock_choice
+    "random", [A70]). A unit then comes from any of them alike, so the distances below take the
+    mean over them instead of the nearest. A plain list keeps the nearest."""
+
+
 def receiving_distance(graph: WarehouseGraph, vertex: VertexId, receiving: list[VertexId]) -> float:
     """min_{g in V_rcv} d_G(g, v): how far a unit travels from the nearest receiving vertex to
-    the storage vertex v."""
+    the storage vertex v. With DrawnDocks, the mean of d_G(g, v) over the receiving vertices."""
+    if isinstance(receiving, DrawnDocks):
+        return sum(graph.distance(g, vertex) for g in receiving) / len(receiving)
     return min(graph.distance(g, vertex) for g in receiving)
 
 
@@ -201,8 +209,9 @@ def nearest_receiving_point(
 def trip_distance(
     graph: WarehouseGraph, vertex: VertexId, receiving: list[VertexId], delivery: list[VertexId]
 ) -> float:
-    """d^trip(v), the trip distance: from the nearest receiving vertex to v, then on to the
-    nearest delivery vertex. Both legs are in timesteps, so they add with no weight."""
+    """d^trip(v), the trip distance: from the nearest receiving vertex to v, or from any of them
+    on average with DrawnDocks, then on to the nearest delivery vertex. Both legs are in
+    timesteps, so they add with no weight."""
     return receiving_distance(graph, vertex, receiving) + min(
         graph.distance(vertex, g) for g in delivery
     )
@@ -239,11 +248,19 @@ def trip_exposure(
     waiting_estimate: TrafficEstimate,
 ) -> float:
     """sum mu_hat_t(e) * w_hat_t(e) over the edges of the trip through v, the shortest path
-    from the nearest receiving vertex to v and on to the nearest delivery vertex."""
-    start = nearest_receiving_point(graph, vertex, receiving)
+    from the nearest receiving vertex to v and on to the nearest delivery vertex. With
+    DrawnDocks the put-away leg is the mean over the receiving vertices."""
     end = nearest_delivery_point(graph, vertex, delivery)
-    path = _shortest_path_edges(graph, start, vertex) + _shortest_path_edges(graph, vertex, end)
-    return sum(traversal_estimate.get(e, 0.0) * waiting_estimate.get(e, 0.0) for e in path)
+
+    def exposure(edges: list) -> float:
+        return sum(traversal_estimate.get(e, 0.0) * waiting_estimate.get(e, 0.0) for e in edges)
+
+    onward = exposure(_shortest_path_edges(graph, vertex, end))
+    if isinstance(receiving, DrawnDocks):
+        legs = [exposure(_shortest_path_edges(graph, g, vertex)) for g in receiving]
+        return sum(legs) / len(legs) + onward
+    start = nearest_receiving_point(graph, vertex, receiving)
+    return exposure(_shortest_path_edges(graph, start, vertex)) + onward
 
 
 def _put_away(

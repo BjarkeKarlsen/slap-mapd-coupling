@@ -37,7 +37,8 @@ them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from typing import Any, Collection, Mapping, Optional, Sequence
 
 import gymnasium as gym
@@ -69,6 +70,9 @@ COMPACT_SENDER_KEYS = ("row_key", "sender_row_key")
 # The largest row key (training/env.py::row_key), below 2^62 so that the space's range
 # high - low fits in int64.
 MAX_ROW_KEY = (1 << 62) - 1
+# A vertex key packs a warehouse seed and a row of that warehouse's tables, when every episode
+# plays its own warehouse (training/warehouses.py). Rows stay below the stride.
+VERTEX_KEY_STRIDE = 1 << 24
 # The rows the learner adds to a training minibatch for senders outside it.
 CONTEXT_KEYS = ("context_row_key", "context_vertex", "context_eta", "context_flags")
 
@@ -117,6 +121,37 @@ class WindowTables:
             pool_mask=arrays.get("pool_mask"),
             **{key: np.asarray(arrays[key]) for key in _ARRAY_KEYS},
         )
+
+
+def keyed_position(position: Mapping[VertexId, int], seed: int) -> dict[VertexId, int]:
+    """`position` with every row packed with the warehouse seed into a vertex key."""
+    if position and max(position.values()) >= VERTEX_KEY_STRIDE:
+        raise ValueError("a warehouse has more rows than a vertex key can hold.")
+    return {v: seed * VERTEX_KEY_STRIDE + p for v, p in position.items()}
+
+
+def pad_tables(tables: WindowTables, num_nodes: int, d_max: int) -> WindowTables:
+    """`tables` padded to `num_nodes` window vertices, so the tables of warehouses built with
+    different caps line up. The padding is masked out, as a window below the cap always is."""
+    if tables.move_target_index.shape[1] != d_max:
+        raise ValueError(
+            f"the tables have d_max {tables.move_target_index.shape[1]}, not {d_max}."
+        )
+    extra = num_nodes - tables.node_mask.shape[1]
+    if extra < 0:
+        raise ValueError(f"the tables hold windows of {num_nodes + extra} vertices, over the cap.")
+    if not extra:
+        return tables
+    return replace(
+        tables,
+        node_mask=np.pad(tables.node_mask, ((0, 0), (0, extra))),
+        edge_index=np.pad(tables.edge_index, ((0, 0), (0, extra * d_max), (0, 0))),
+        edge_mask=np.pad(tables.edge_mask, ((0, 0), (0, extra * d_max))),
+        static_features=np.pad(tables.static_features, ((0, 0), (0, extra), (0, 0))),
+        pool_mask=(
+            None if tables.pool_mask is None else np.pad(tables.pool_mask, ((0, 0), (0, extra)))
+        ),
+    )
 
 
 def build_window_tables(
@@ -181,14 +216,21 @@ def compact_observation_space(
     num_vertices: int,
     d_max: int,
     communication: bool,
+    keyed: bool = False,
 ) -> gym.spaces.Dict:
     """The "observations" half of masked_observation_space() for one agent,
     in the compact layout. `num_vertices` is the number of rows of the
-    tables. The pool mask is in the tables, so pooling adds no key."""
+    tables. The pool mask is in the tables, so pooling adds no key. With `keyed` the vertex is
+    a vertex key (`keyed_position`), for a run with a warehouse per episode."""
     check_communication_caps(config, communication)
     num_nodes = config.max_local_nodes
+    vertex: gym.Space = (
+        gym.spaces.Box(low=0, high=MAX_ROW_KEY, shape=(), dtype=np.int64)
+        if keyed
+        else gym.spaces.Discrete(num_vertices)
+    )
     spaces: dict[str, gym.Space] = {
-        "vertex": gym.spaces.Discrete(num_vertices),
+        "vertex": vertex,
         "eta": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(num_nodes,), dtype=np.float32),
         "flags": gym.spaces.Box(low=0, high=1, shape=(num_nodes, 2), dtype=np.uint8),
         "congestion": gym.spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
@@ -219,7 +261,7 @@ def compact_rllib_dict(
     if item.location is None:
         raise ValueError("the encoded observation has no location, so it has no compact form.")
     observations: dict[str, Any] = {
-        "vertex": position[item.location],
+        "vertex": np.int64(position[item.location]),
         "eta": np.ascontiguousarray(item.node_features[:, ETA_COLUMN]),
         "flags": item.node_features[:, FLAG_COLUMNS].astype(np.uint8),
         "congestion": np.float32(item.congestion),
@@ -265,14 +307,30 @@ class WindowLookup(nn.Module):
         if tables.pool_mask is not None:
             self.register_buffer("pool_mask", torch.as_tensor(tables.pool_mask), persistent=False)
 
+    def _select(self, vertex: torch.Tensor) -> tuple[Mapping[str, torch.Tensor], torch.Tensor]:
+        """The tables a batch of `vertex` entries reads, and each entry's row in them."""
+        tables = {key: getattr(self, key) for key in _ARRAY_KEYS}
+        if self.pooling != "none":
+            tables["pool_mask"] = self.pool_mask
+        return tables, vertex.long()
+
     def views(
         self, vertex: torch.Tensor, eta: torch.Tensor, flags: torch.Tensor
     ) -> dict[str, torch.Tensor]:
         """The padded view of each robot standing on `vertex` (table rows), the
         arrays GNNEncoder embeds."""
-        vertex = vertex.long()
-        window = self.window_of[vertex]
-        static = self.static_features[window]  # [B, N, 5]
+        tables, rows = self._select(vertex)
+        return self._views(tables, rows, eta, flags)
+
+    def _views(
+        self,
+        tables: Mapping[str, torch.Tensor],
+        vertex: torch.Tensor,
+        eta: torch.Tensor,
+        flags: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        window = tables["window_of"][vertex]
+        static = tables["static_features"][window]  # [B, N, 5]
         features = torch.empty(
             (*static.shape[:-1], NODE_FEATURE_DIM), dtype=static.dtype, device=static.device
         )
@@ -281,10 +339,10 @@ class WindowLookup(nn.Module):
         features[..., FLAG_COLUMNS] = flags.to(static.dtype)
         return {
             "node_features": features,
-            "node_mask": self.node_mask[window],
-            "edge_index": self.edge_index[window],
-            "edge_mask": self.edge_mask[window],
-            "own_index": self.own_index[vertex],
+            "node_mask": tables["node_mask"][window],
+            "edge_index": tables["edge_index"][window],
+            "edge_mask": tables["edge_mask"][window],
+            "own_index": tables["own_index"][vertex],
         }
 
     def forward(self, obs: Mapping[str, torch.Tensor]) -> dict[str, Any]:
@@ -292,11 +350,12 @@ class WindowLookup(nn.Module):
         it, except with communication on. The senders then stay keys
         (row_key, sender_row_key and the move slot arrays are passed on), and
         the context rows of a training minibatch are rebuilt under "context"."""
-        dense: dict[str, Any] = self.views(obs["vertex"], obs["eta"], obs["flags"])
+        tables, rows = self._select(obs["vertex"])
+        dense: dict[str, Any] = self._views(tables, rows, obs["eta"], obs["flags"])
         dense["congestion"] = obs["congestion"]
-        dense["move_target_index"] = self.move_target_index[obs["vertex"].long()]
+        dense["move_target_index"] = tables["move_target_index"][rows]
         if self.pooling != "none":
-            dense["pool_mask"] = self.pool_mask[self.window_of[obs["vertex"].long()]]
+            dense["pool_mask"] = tables["pool_mask"][tables["window_of"][rows]]
         if self.communication:
             for key in ("row_key", "sender_row_key", "move_sender_index", "move_sender_mask"):
                 dense[key] = obs[key]
@@ -306,6 +365,69 @@ class WindowLookup(nn.Module):
                 )
                 dense["context_row_key"] = obs["context_row_key"]
         return dense
+
+
+class StoredWindowLookup(WindowLookup):
+    """WindowLookup for a run with a warehouse per episode (training/warehouses.py). A
+    sample's vertex is a vertex key, and the tables of the warehouses a batch holds are read
+    from the pool on disk and joined, keeping the last few warehouses and joins on the device.
+    Nothing is a buffer, so the weights it syncs are the encoder's and the head's only."""
+
+    def __init__(self, pool: Any, pooling: Pooling, communication: bool, keep: int = 16) -> None:
+        nn.Module.__init__(self)
+        self.pooling = pooling
+        self.communication = communication
+        self._pool = pool
+        self._keep = keep
+        self._tables: OrderedDict[tuple[int, str], dict[str, torch.Tensor]] = OrderedDict()
+        self._joined: OrderedDict[tuple[tuple[int, ...], str], tuple] = OrderedDict()
+
+    def _warehouse(self, seed: int, device: torch.device) -> dict[str, torch.Tensor]:
+        key = (seed, str(device))
+        if key not in self._tables:
+            tables = self._pool.tables(seed)
+            if (self.pooling != "none") != (tables.pool_mask is not None):
+                raise ValueError("the stored tables must hold a pool mask exactly with pooling on.")
+            arrays = {k: getattr(tables, k) for k in _ARRAY_KEYS}
+            if tables.pool_mask is not None:
+                arrays["pool_mask"] = tables.pool_mask
+            self._tables[key] = {k: torch.as_tensor(v, device=device) for k, v in arrays.items()}
+            while len(self._tables) > self._keep:
+                self._tables.popitem(last=False)
+        self._tables.move_to_end(key)
+        return self._tables[key]
+
+    def _select(self, vertex: torch.Tensor) -> tuple[Mapping[str, torch.Tensor], torch.Tensor]:
+        vertex = vertex.long()
+        device = vertex.device
+        seed_of = torch.div(vertex, VERTEX_KEY_STRIDE, rounding_mode="floor")
+        seeds = tuple(int(seed) for seed in torch.unique(seed_of).tolist())
+        key = (seeds, str(device))
+        if key not in self._joined:
+            parts = [self._warehouse(seed, device) for seed in seeds]
+            row_start, window_start = [0], [0]
+            for part in parts:
+                row_start.append(row_start[-1] + len(part["window_of"]))
+                window_start.append(window_start[-1] + len(part["node_mask"]))
+            joined = {
+                k: torch.cat([part[k] for part in parts])
+                for k in parts[0]
+                if k != "window_of"
+            }
+            joined["window_of"] = torch.cat(
+                [part["window_of"] + start for part, start in zip(parts, window_start)]
+            )
+            self._joined[key] = (
+                joined,
+                torch.tensor(seeds, device=device),
+                torch.tensor(row_start[:-1], device=device),
+            )
+            while len(self._joined) > 4:
+                self._joined.popitem(last=False)
+        self._joined.move_to_end(key)
+        joined, seed_list, starts = self._joined[key]
+        rows = vertex - seed_of * VERTEX_KEY_STRIDE + starts[torch.searchsorted(seed_list, seed_of)]
+        return joined, rows
 
 
 def window_tables_from_config(model_config: Mapping[str, Any]) -> Optional[WindowTables]:

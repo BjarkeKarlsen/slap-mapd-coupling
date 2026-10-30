@@ -39,16 +39,23 @@ from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
 
 
-def current_target(location: VertexId, task: Task | None) -> VertexId:
+def current_target(
+    location: VertexId, task: Task | None, parking: VertexId | None = None
+) -> VertexId:
     """q_i(t), the current target: task.current_goal if
-    the agent is serving one, else its own vertex (see module docstring)."""
-    return location if task is None else task.current_goal
+    the agent is serving one, else its parking leaf when it has one (D26), else its own
+    vertex (see module docstring)."""
+    if task is not None:
+        return task.current_goal
+    return location if parking is None else parking
 
 
-def potential(graph: WarehouseGraph, location: VertexId, task: Task | None) -> float:
+def potential(
+    graph: WarehouseGraph, location: VertexId, task: Task | None, parking: VertexId | None = None
+) -> float:
     """Phi_i(t) = -eta_i(l_i(t),t) = -d_G(l_i(t), q_i(t)), from the distance
     label."""
-    return -graph.distance(location, current_target(location, task))
+    return -graph.distance(location, current_target(location, task, parking))
 
 
 @dataclass(frozen=True)
@@ -91,11 +98,13 @@ def reward_terms(
     move_cost: float,
     wait_cost: float,
     congestion_reward_weight: float,
+    parking: VertexId | None = None,
 ) -> RewardTerms:
     """The six terms of R_i(t), the reward, separately. See `reward` for the
-    arguments."""
-    phi_now = potential(graph, location_now, task_now)
-    phi_next = potential(graph, location_next, task_next)
+    arguments. `parking` is the idle robot's parking leaf over the step (D26), the target of
+    both potentials when it has no task."""
+    phi_now = potential(graph, location_now, task_now, parking)
+    phi_next = potential(graph, location_next, task_next, parking)
     return RewardTerms(
         shaping=discount * phi_next - phi_now,
         delivery=deliver_reward * completed_task,

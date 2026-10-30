@@ -19,20 +19,26 @@
 #    own main load, SEEDS seeds per value (default 20), then fleet 64 on its own.
 # The keep-up check is the one of [A59], picks and put-aways separately. Every step skips the rows
 # it already has, so the script can be started again. RESULTS sets where the results go, FLEETS
-# which fleets run (default "8 16 32 64").
+# which fleets run (default "8 16 32 64"). CONFIGS is the config of a fleet with {} for its size
+# (default configs/fleet_{}/decentralised.yaml), SWEEP_ARGS more load_sweep.py options for every
+# sweep (for example "--horizon 10000 --warmup 5000"), and WORKERS the processes each load sweep
+# of step 1 and 2 plays its seeds in (default 1).
 set -uo pipefail
 cd "$(dirname "$0")/../.."  # the repo root, where scripts/ and configs/ are
 
 PYTHON=~/.venvs/rl/bin/python
 RESULTS=${RESULTS:-~/Documents/thesis/thesis-progress/results}
 LOAD_SEEDS=${LOAD_SEEDS:-20}
-export RESULTS SEEDS=${SEEDS:-20}
+CONFIGS=${CONFIGS:-configs/fleet_\{\}/decentralised.yaml}
+SWEEP_ARGS=${SWEEP_ARGS:-}
+WORKERS=${WORKERS:-1}
+export RESULTS SEEDS=${SEEDS:-20} CONFIGS SWEEP_ARGS
 read -r -a FLEETS <<< "${FLEETS:-8 16 32 64}"
 GRID="0.0125 0.025 0.0375 0.05 0.0625 0.075 0.0875 0.1"
 
 log() { echo "$(date '+%d/%m %H:%M') $*"; }
 folder() { echo "$RESULTS/arrival_rates/load_fleet$1"; }
-config() { echo "configs/fleet_$1/decentralised.yaml"; }
+config() { echo "${CONFIGS//\{\}/$1}"; }
 
 # capacity FLEET KEY prints one value of the fixed rule's capacity.json, empty when unset.
 capacity() {
@@ -45,8 +51,10 @@ load_sweep() {  # load_sweep FLEET ARGS...
     local fleet=$1
     shift
     mkdir -p "$(folder "$fleet")"
+    # shellcheck disable=SC2086  # SWEEP_ARGS is a word list
     "$PYTHON" scripts/sweep/load_sweep.py --config "$(config "$fleet")" --seeds "$LOAD_SEEDS" \
-        --stop-when-overloaded --out "$(folder "$fleet")" "$@" >> "$(folder "$fleet")/sweep.log" 2>&1
+        --stop-when-overloaded --workers "$WORKERS" $SWEEP_ARGS --out "$(folder "$fleet")" "$@" \
+        >> "$(folder "$fleet")/sweep.log" 2>&1
 }
 
 log "step 1, load sweeps of fleets ${FLEETS[*]}, $LOAD_SEEDS seeds per rate"

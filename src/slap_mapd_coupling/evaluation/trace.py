@@ -188,7 +188,8 @@ def step_line(env: WarehouseMAPDEnv, previous: Mapping[int, VertexId]) -> dict[s
             "goal": goal,
         }
     # An order is done once every pick of it has finished and none of its lines still waits
-    # for stock. The last few tasks finished are listed for the replay's side panel.
+    # for stock, or with shipping once it has left at a dock (D21). The last few tasks finished
+    # are listed for the replay's side panel.
     short = {line.order_id for line in env.waiting_orders}
     open_orders: set[int] = set(short)
     orders: set[int] = set(short)
@@ -201,6 +202,9 @@ def step_line(env: WarehouseMAPDEnv, previous: Mapping[int, VertexId]) -> dict[s
         orders.add(task.order_id)
         if task.finish_time is None:
             open_orders.add(task.order_id)
+    if env.config.shipping:
+        shipped = {task.order_id for task in finished if task.kind == "ship"}
+        open_orders = orders - shipped
     finished.sort(key=lambda task: (task.finish_time, task.task_id))
     return {
         "type": "step",
@@ -212,6 +216,8 @@ def step_line(env: WarehouseMAPDEnv, previous: Mapping[int, VertexId]) -> dict[s
         "picks_released": sum(1 for task in env.tasks if task.kind == "pick"),
         "putaways_done": sum(1 for task in finished if task.kind == "putaway"),
         "putaways_released": sum(1 for task in env.tasks if task.kind == "putaway"),
+        "ships_done": sum(1 for task in finished if task.kind == "ship"),
+        "ships_released": sum(1 for task in env.tasks if task.kind == "ship"),
         "backlog": env.log.backlog_by_t[-1] if env.log.backlog_by_t else 0,
         "orders_done": len(orders - open_orders),
         "orders_released": len(orders),

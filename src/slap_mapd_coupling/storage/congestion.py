@@ -29,14 +29,12 @@ Two points flagged, not literally specified:
   points via two different distance directions would be a second,
   unstated degree of freedom.
 - WarehouseGraph.distance only returns a distance value, not the edges
-  along a shortest path, so this module computes its own Dijkstra with
-  predecessor tracking (_shortest_path_edges) to get the congestion-aware
-  score's path(v) as an explicit edge sequence.
+  along a shortest path, so the congestion-aware score's path(v) comes
+  from WarehouseGraph.shortest_path_edges (Dijkstra with predecessor
+  tracking, kept per pair) as an explicit edge sequence.
 """
 
 from __future__ import annotations
-
-import heapq
 
 from slap_mapd_coupling.core.graph import VertexId, WarehouseGraph
 from slap_mapd_coupling.core.storage_state import SkuId, StorageState
@@ -63,36 +61,10 @@ def _shortest_path_edges(
     graph: WarehouseGraph, source: VertexId, target: VertexId
 ) -> list[EdgeKey]:
     """The edge sequence of one shortest (cost-weighted) path from source
-    to target, via Dijkstra with predecessor tracking. WarehouseGraph's
-    own `distance` only returns the distance value, not the path itself,
-    which the congestion-aware score's path(v) congestion sum needs."""
-    if source == target:
-        return []
-    edge_cost = {(e.source, e.target): e.cost for e in graph.edges}
-    dist: dict[VertexId, float] = {source: 0.0}
-    predecessor: dict[VertexId, VertexId] = {}
-    frontier: list[tuple[float, VertexId]] = [(0.0, source)]
-    while frontier:
-        d, v = heapq.heappop(frontier)
-        if d > dist.get(v, float("inf")):
-            continue
-        if v == target:
-            break
-        for w in graph.out_neighbours(v):
-            nd = d + edge_cost[(v, w)]
-            if nd < dist.get(w, float("inf")):
-                dist[w] = nd
-                predecessor[w] = v
-                heapq.heappush(frontier, (nd, w))
-
-    if target not in dist:
-        raise KeyError(f"{target} is unreachable from {source}.")
-
-    vertices = [target]
-    while vertices[-1] != source:
-        vertices.append(predecessor[vertices[-1]])
-    vertices.reverse()
-    return list(zip(vertices, vertices[1:]))
+    to target, which the congestion-aware score's path(v) congestion sum
+    needs. WarehouseGraph works the path out once and keeps it, since the
+    graph never changes and the same paths are asked for on every update."""
+    return list(graph.shortest_path_edges(source, target))
 
 
 def congestion_exposure(

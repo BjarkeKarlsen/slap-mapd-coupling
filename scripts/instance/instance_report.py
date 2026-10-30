@@ -32,7 +32,7 @@ from typing import Any, Sequence
 
 from slap_mapd_coupling.instances.generator import GeneratedInstance, generate_instance
 from slap_mapd_coupling.instances.validation import check_connectivity, check_well_formedness
-from slap_mapd_coupling.storage.arrival import trip_distance
+from slap_mapd_coupling.storage.arrival import DrawnDocks, trip_distance
 from slap_mapd_coupling.training.spec import TrainingSpec, instance_params, load_spec
 
 ROWS = "instance_report.jsonl"
@@ -41,13 +41,18 @@ INSTANCES = "instances"
 USED_SEEDS = "used_seeds.json"
 
 
-def measure(instance: GeneratedInstance, num_agents: int) -> dict[str, Any]:
-    """The structure of one instance, and whether it passes both checks."""
+def measure(
+    instance: GeneratedInstance, num_agents: int, random_docks: bool = False
+) -> dict[str, Any]:
+    """The structure of one instance, and whether it passes both checks. With `random_docks`
+    the put-away leg of d^trip is the mean over the receiving vertices ([A70])."""
     graph = instance.graph
     roles = {v: vertex.role for v, vertex in graph.vertices.items()}
     storage = sorted(v for v, role in roles.items() if role.storage)
     delivery = sorted(v for v, role in roles.items() if role.delivery)
     receiving = sorted(v for v, role in roles.items() if role.receiving)
+    if random_docks:
+        receiving = DrawnDocks(receiving)
     parking = sorted(v for v, role in roles.items() if role.endpoint)
     neighbours = {v: set(graph.out_neighbours(v)) for v in graph.vertices}
     for v in graph.vertices:
@@ -135,7 +140,8 @@ def report_rows(
         seconds = time.perf_counter() - start
 
         row = {"config": str(config), "num_agents": num_agents, "seed": seed}
-        row.update(measure(instance, num_agents))
+        random_docks = spec.arrival is not None and spec.arrival.dock_choice == "random"
+        row.update(measure(instance, num_agents, random_docks))
         row["generation_seconds"] = seconds
         rows.append(row)
 

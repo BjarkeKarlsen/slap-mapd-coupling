@@ -40,7 +40,11 @@ from slap_mapd_coupling.models.base_model import (
     PolicyValueHeadConfig,
 )
 from slap_mapd_coupling.models.gnn_encoder import SENDER_KEYS, GNNEncoder, GNNEncoderConfig
-from slap_mapd_coupling.models.window_tables import WindowLookup, window_tables_from_config
+from slap_mapd_coupling.models.window_tables import (
+    StoredWindowLookup,
+    WindowLookup,
+    window_tables_from_config,
+)
 
 
 class _GNNSharedEncoder(nn.Module):
@@ -155,7 +159,9 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
     PolicyValueHeadConfig's own fields) -- RLlib passes model_config
     through as a dict, not the pydantic model itself. With "window_tables"
     (WindowTables.as_arrays()) the module reads compact samples, which is
-    what the adapter of training/env.py stores, and without it padded ones.
+    what the adapter of training/env.py stores, with "window_store" (a pool of
+    training/warehouses.py) compact samples keyed by warehouse, and without
+    either padded ones.
     """
 
     def __init__(self, *args: Any, catalog_class: Any = None, **kwargs: Any) -> None:
@@ -182,9 +188,18 @@ class GNNPPOTorchRLModule(DefaultPPOTorchRLModule):
 
         gnn_encoder = GNNEncoder(encoder_config)
         tables = window_tables_from_config(model_config)
-        lookup = None
+        lookup: Optional[WindowLookup] = None
         if tables is not None:
             lookup = WindowLookup(tables, encoder_config.pooling, encoder_config.communication)
+        elif "window_store" in model_config:
+            # A warehouse per episode: the tables are read from the pool on disk.
+            from slap_mapd_coupling.training.warehouses import WarehousePool
+
+            lookup = StoredWindowLookup(
+                WarehousePool.from_config(model_config["window_store"]),
+                encoder_config.pooling,
+                encoder_config.communication,
+            )
         self.encoder = _GNNSharedEncoder(gnn_encoder, lookup)
         head = PolicyValueHead(
             gnn_encoder.output_dim,
