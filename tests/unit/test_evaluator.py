@@ -193,6 +193,13 @@ def test_the_busy_share_counts_active_spans_up_to_the_horizon():
     assert robot_busy_share([], 0, 20) == 0.0
 
 
+def test_the_busy_share_counts_only_the_window_after_the_warm_up():
+    tasks = [_span(1, 0, 5), _span(2, 8, 14), _span(3, 12, None)]
+    # With a warm-up of 10, task 1 is left out, task 2 counts 10 to 14 and task 3 12 to 20,
+    # over two agents and the 10 steps of the window.
+    assert robot_busy_share(tasks, 2, 20, warmup=10) == pytest.approx(12 / 20)
+
+
 def test_the_endpoint_wait_is_averaged_per_kind_and_unset_without_token_passing():
     picks = [_span(1, 0, 5), _span(2, 0, 6)]
     found = endpoint_wait_metrics({1: (4, 2)}, picks, [])
