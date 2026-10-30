@@ -11,7 +11,13 @@ import pytest
 import slap_mapd_coupling.storage.demand  # noqa: F401 -- registers "demand"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.tasks import Task
-from slap_mapd_coupling.evaluation.evaluator import _planner_run, order_metrics
+from slap_mapd_coupling.evaluation.evaluator import (
+    _planner_run,
+    _to_run_metrics,
+    order_metrics,
+    row_keeps_up,
+    total_service,
+)
 from slap_mapd_coupling.training.spec import (
     TrainingSpec,
     build_experiment_config,
@@ -135,3 +141,60 @@ def test_with_random_docks_the_put_away_leg_is_the_mean_over_the_docks():
     assert trip_distance(graph, slot, DrawnDocks(docks), stations) >= trip_distance(
         graph, slot, docks, stations
     )
+
+
+def test_the_order_measures_count_only_orders_released_after_the_warm_up():
+    def task(task_id, kind, release, finish, order_id):
+        return Task(
+            task_id=task_id, release_time=release, pickup_vertex=1, delivery_vertex=2,
+            sku="a", order_id=order_id, kind=kind, assigned_agent=1,
+            assignment_time=release, pickup_time=release, finish_time=finish,
+        )  # fmt: skip
+
+    # Order 7 is released before the warm-up ends, order 8 after. Order 7's ship task is
+    # released after it, and still does not bring the order into the window.
+    tasks = [
+        task(1, "pick", 10, 30, 7), task(2, "ship", 120, 140, 7),
+        task(3, "pick", 150, 170, 8), task(4, "ship", 170, 200, 8),
+    ]  # fmt: skip
+    by_task = {1: (7, 0), 3: (8, 0)}
+    metrics = order_metrics(tasks, by_task, [], {(7, 0), (8, 0)}, shipping=True, warmup=100)
+    assert metrics["num_completed_orders"] == 1
+    assert metrics["mean_order_completion"] == 50
+    assert metrics["num_lines_waited"] == 1
+
+
+def test_the_pick_keep_up_counts_the_ship_tasks():
+    env = _run(shipping=True, dock_choice="random")
+    config = build_experiment_config(_spec(shipping=True, dock_choice="random"), SEED, "fixed")
+    config = ExperimentConfig.model_validate(
+        {**config.model_dump(), "controller": None, "planner": "token_passing",
+         "horizon": HORIZON}
+    )  # fmt: skip
+    first = _to_run_metrics(env, config).model_dump()
+    pick_backlog = first["backlog"] - first["putaway_backlog"]
+    with_ships = first["num_completed_tasks"] - first["num_completed_putaways"]
+    picks_only = sum(1 for t in env.tasks if t.kind == "pick" and t.finish_time is not None)
+    assert picks_only < with_ships and pick_backlog > 0
+    # A threshold between the two shares passes only when the ship tasks count.
+    share = (picks_only / (picks_only + pick_backlog) + with_ships / (with_ships + pick_backlog)) / 2
+    config = ExperimentConfig.model_validate({**config.model_dump(), "keep_up_threshold": share})
+    metrics = _to_run_metrics(env, config)
+    assert metrics.keeps_up_picks
+    assert metrics.keeps_up == row_keeps_up(metrics.model_dump(), share)
+
+
+def test_the_total_service_time_counts_only_the_window_after_the_warm_up():
+    env = _run(shipping=True, dock_choice="random")
+    config = build_experiment_config(_spec(shipping=True, dock_choice="random"), SEED, "fixed")
+    warmup = HORIZON // 2
+    config = ExperimentConfig.model_validate(
+        {**config.model_dump(), "controller": None, "planner": "token_passing",
+         "horizon": HORIZON, "warmup": warmup}
+    )  # fmt: skip
+    window = [t for t in env.tasks if t.release_time >= warmup]
+    lines = [line for line in env.waiting_orders if line.release_time >= warmup]
+    expected = total_service(window, env.log.blocked_ticks_by_task, lines, HORIZON)
+    metrics = _to_run_metrics(env, config)
+    assert metrics.total_service_time == expected["total_service_time"]
+    assert len(window) < len(env.tasks)

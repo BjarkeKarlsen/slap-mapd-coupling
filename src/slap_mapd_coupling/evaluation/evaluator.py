@@ -293,18 +293,21 @@ def longest_completion_gap(tasks: Sequence[Task], warmup: int, horizon: int) -> 
     return max(later - earlier for earlier, later in zip(marks, marks[1:]))
 
 
-def robot_busy_share(tasks: Sequence[Task], num_agents: int, horizon: int) -> float:
-    """The share of agent-timesteps in [0, T) in which an agent holds an active task. An agent
-    holds at most one active task at a time, so the tasks' active spans add up."""
-    if num_agents == 0 or horizon == 0:
+def robot_busy_share(
+    tasks: Sequence[Task], num_agents: int, horizon: int, warmup: int = 0
+) -> float:
+    """The share of agent-timesteps in the measured window [warmup, T) in which an agent holds
+    an active task ([A66]). An agent holds at most one active task at a time, so the tasks'
+    active spans add up. A task assigned before the warm-up ends counts from then on."""
+    if num_agents == 0 or horizon <= warmup:
         return 0.0
     busy = 0
     for task in tasks:
         if task.assignment_time is None:
             continue
         end = horizon if task.finish_time is None else min(task.finish_time, horizon)
-        busy += max(end - task.assignment_time, 0)
-    return busy / (num_agents * horizon)
+        busy += max(end - max(task.assignment_time, warmup), 0)
+    return busy / (num_agents * (horizon - warmup))
 
 
 def endpoint_wait_metrics(
@@ -341,13 +344,34 @@ def order_metrics(
     waiting_lines: Sequence[OrderLine],
     lines_waited: Collection[tuple[int, int]],
     shipping: bool = False,
+    warmup: int = 0,
 ) -> dict[str, Any]:
     """The order measures of the arrival model. An order is complete when none of its lines
     still waits and all its tasks are completed. Its completion time is the longest service time
     among its tasks, the order completion time. With shipping (D21) an order is complete when
     its ship task is, and its completion time runs from the order's release to the step it
     leaves at the dock. Tasks per line are counted over the lines with no units still
-    missing."""
+    missing. Only orders released in the measured window [warmup, T] count ([A66]), the
+    window every other measure uses. A ship task is released when its order's last unit
+    arrives, so an order's release is the earliest release among its tasks and lines."""
+
+    def order_of(task: Task) -> int | None:
+        order_line = order_line_by_task.get(task.task_id)
+        return order_line[0] if order_line is not None else task.order_id
+
+    released_at: dict[int, int] = {}
+    for task in tasks:
+        order_id = order_of(task)
+        if order_id is not None:
+            released_at[order_id] = min(released_at.get(order_id, task.release_time), task.release_time)
+    for line in waiting_lines:
+        released_at[line.order_id] = min(
+            released_at.get(line.order_id, line.release_time), line.release_time
+        )
+    in_window = {order_id for order_id, t in released_at.items() if t >= warmup}
+    tasks = [task for task in tasks if order_of(task) in in_window]
+    waiting_lines = [line for line in waiting_lines if line.order_id in in_window]
+    lines_waited = [line for line in lines_waited if line[0] in in_window]
     shipped = {
         task.order_id: task.finish_time
         for task in tasks
@@ -481,8 +505,10 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         and task.release_time < horizon
         and task.status(horizon) in ("waiting", "active")
     )
+    # The pick side is every completed task that is not a put-away, so the ship tasks count
+    # there, as their waiting ones do in backlog - putaway_backlog (step 12).
     keep_up, keep_up_picks, keep_up_putaways = keep_up_parts(
-        num_picks,
+        num_completed - len(putaways),
         backlog - putaway_backlog,
         len(putaways),
         putaway_backlog,
@@ -554,9 +580,13 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
                 env.waiting_orders,
                 env.log.lines_waited,
                 shipping=config.shipping,
+                warmup=warmup,
             ),
         )
-        arrival_fields["orders_per_timestep"] = arrival_fields["num_completed_orders"] / horizon
+        # Orders per step of the measured window, as throughput.
+        arrival_fields["orders_per_timestep"] = arrival_fields["num_completed_orders"] / (
+            horizon - warmup
+        )
 
     # Routing time is whatever produced the actions: planning for a planner, and the
     # observation build, forward pass and sampling for a learned arm.
@@ -594,13 +624,14 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         mean_travel_time=mean_travel,
         mean_blocked_time=mean_blocked,
         mean_crowding=mean_crowding,
-        robot_busy_share=robot_busy_share(env.tasks, config.num_agents, horizon),
+        robot_busy_share=robot_busy_share(env.tasks, config.num_agents, horizon, warmup),
         **endpoint_wait_metrics(getattr(env.assigner, "endpoint_wait", None), picks, putaways),
         num_storage_updates=num_storage_updates,
         mean_relocated_units=mean_relocated,
         mean_relocation_distance=mean_relocation_distance,
         mean_decision_runtime_seconds=mean_decision_runtime,
         stock_model=config.stock_model,
-        **total_service(env.tasks, env.log.blocked_ticks_by_task, env.waiting_orders, horizon),
+        # The tasks and waiting lines released in the measured window, as every mean ([A66]).
+        **total_service(tasks, env.log.blocked_ticks_by_task, waiting_lines, horizon),
         **arrival_fields,
     )
