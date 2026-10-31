@@ -1,13 +1,14 @@
-# Step 12 of the model revision (D21 to D25), 64 agents, provisional. Made from
-# configs/fleet_64/decentralised.yaml: workstations on random rack faces, docks along the
-# left wall, 200 slots for 100 SKUs (about a quarter of the rack faces as SKUs), each SKU
-# starting alone on a random slot, shipping to a random dock. The SKU count and Q are set
-# from the sizing runs (part D of 12_flow_and_start.md).
+# The 64-agent warehouse of the step 12 model. One file for every arm, the sweeps run Token Passing.
+# Everything scales with the fleet ([A77]): per robot 16 walkable vertices, 5 shelves, 2.5 SKUs,
+# half a workstation and one parking vertex, so 320 shelves, 160 SKUs and 32
+# workstations here. Each section of 20 SKUs is served by 4 neighbouring workstations, a random
+# split per seed ([A76]). Q = 10, 5 lines per order, the safety stock of the most popular rank.
+# arrival_rate is set again by the next load sweep (thesis-progress/results/E_load/README.md).
 controller: decentralised
 regime: fixed_only
 communication: false
 evaluation_storage_mode: fixed
-arrival_rate: 0.42
+arrival_rate: 0.24
 horizon: 2000
 experiment:
   num_agents: 64
@@ -29,7 +30,7 @@ storage:
   - 1.0
   - 2.0
   initial_placement: random_slots
-  num_skus: 100
+  num_skus: 160
   seed: 0
 demand:
   skew: 1.0
@@ -40,7 +41,7 @@ storage_rule:
   congestion_weight: 1.0
 arrival:
   rule: refill
-  refill_units: 30
+  refill_units: 10
   service_level: 0.99
   units_per_line:
   - 1
@@ -50,6 +51,11 @@ arrival:
   cold_stock_top_k: 10
   shipping: true
   dock_choice: random
+  lines_per_order:
+    distribution: shifted_poisson
+    mean: 5.0
+  safety_stock: top_rank
+  sku_sections: true
 arm:
   num_zones: 3
 model:
@@ -73,8 +79,6 @@ checkpoint:
   num_to_keep: null
   score_attribute: episode_return_mean
   score_order: max
-# D27: every episode seed plays its own warehouse and start stock, 250 training warehouses,
-# one per episode of the budget. The window tables are stored under ~/thesis_runs/warehouses.
 warehouse_per_seed: true
 instance:
   layout: v2
@@ -89,7 +93,8 @@ instance:
   num_receiving_vertices: 32
   seed: 42
   station_placement: rack_faces
+  workstations_per_section: 4
   lower_block: irregular
   num_blocks: 8
   dock_placement: left_wall
-  num_storage_vertices: 200
+  num_storage_vertices: 320

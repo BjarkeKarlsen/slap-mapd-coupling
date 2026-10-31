@@ -244,6 +244,11 @@ class ArrivalSettings(BaseModel):
     units_per_line: tuple[PositiveInt, PositiveInt] | None = None
     # The SKUs that count as popular in the cold-stock measure. None leaves it off.
     cold_stock_top_k: PositiveInt | None = None
+    # [A75]: the rank the safety stock is sized at, each SKU's rank at t = 0 ("start_rank") or
+    # the most popular rank for every SKU ("top_rank"), since the drift takes every SKU there.
+    safety_stock: Literal["start_rank", "top_rank"] = "start_rank"
+    # [A76] (D29): each SKU belongs to one delivery vertex, see ExperimentConfig.sku_sections.
+    sku_sections: bool = False
 
     @model_validator(mode="after")
     def _rule_settings(self) -> "ArrivalSettings":
@@ -275,6 +280,10 @@ class StockSizing(NamedTuple):
     service_level: float | None = None
     lines_per_order: LinesPerOrder | None = None
     units_per_line: tuple[int, int] | None = None
+    # [A75]: "top_rank" sizes every SKU's safety stock at the most popular rank. [A76]: the
+    # number of SKU sections ([A77]), None without sections.
+    safety_stock: str = "start_rank"
+    sections: int | None = None
 
 
 class ExperimentSettings(BaseModel):
@@ -804,7 +813,48 @@ def refill_starting_stock(
         sizing.lines_per_order,
         sizing.units_per_line,
     )
+    if sizing.safety_stock == "top_rank":
+        # [A75]: every SKU gets the safety stock of the most popular rank. With sections
+        # ([A76]) the most popular SKU of a section takes the largest share of that section's
+        # lines when the rest of its section is the least popular SKUs.
+        if sizing.sections:
+            top = section_top_quantile(
+                len(ranked), sizing, 0.0 if demand is None else demand.skew
+            )
+        else:
+            top = quantiles[0]
+        return {sku_id: sizing.refill_units + top for sku_id in ranked}
     return {sku_id: sizing.refill_units + quantiles[rank] for rank, sku_id in enumerate(ranked)}
+
+
+def section_top_quantile(num_skus: int, sizing: StockSizing, skew: float) -> int:
+    """The service-level quantile of one period's units of the most popular SKU with SKU
+    sections ([A76]), simulated like `period_demand_quantiles`. Orders reach one section with
+    Poisson(epoch_length * arrival_rate / (mean lines * sections)) per period, and draw their
+    lines from its SKUs without replacement. The section is the worst case, rank 0 with the
+    least popular SKUs, the largest share any SKU can take as the ranking drifts."""
+    assert sizing.sections and sizing.service_level is not None
+    size = max(1, num_skus // sizing.sections)
+    weights = np.asarray(zipf_weights(num_skus, skew))
+    own = weights[:1]
+    if size > 1:
+        own = np.concatenate([own, weights[num_skus - (size - 1) :]])
+    own = own / own.sum()
+    rng = np.random.default_rng(QUANTILE_SEED)
+    mean_lines = 1.0 if sizing.lines_per_order is None else sizing.lines_per_order.mean
+    low, high = sizing.units_per_line or (1, 1)
+    orders = rng.poisson(
+        sizing.epoch_length * sizing.arrival_rate / (mean_lines * sizing.sections),
+        size=QUANTILE_PERIODS,
+    )
+    units = np.zeros(QUANTILE_PERIODS, dtype=np.int64)
+    for period, count in enumerate(orders):
+        for _ in range(count):
+            lines = 1 if sizing.lines_per_order is None else 1 + rng.poisson(mean_lines - 1.0)
+            picked = rng.choice(size, size=min(lines, size), replace=False, p=own)
+            if 0 in picked:
+                units[period] += rng.integers(low, high + 1)
+    return int(np.quantile(units, sizing.service_level, method="inverted_cdf"))
 
 
 def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
@@ -824,7 +874,16 @@ def stock_sizing(spec: TrainingSpec) -> StockSizing | None:
         spec.arrival.service_level,
         spec.arrival.lines_per_order,
         units,
+        spec.arrival.safety_stock,
+        _num_sections(spec) if spec.arrival.sku_sections else None,
     )
+
+
+def _num_sections(spec: TrainingSpec) -> int:
+    """The SKU sections of `spec` ([A76]), its workstations over the workstations that serve
+    each section ([A77])."""
+    per_section = spec.instance.get("workstations_per_section", 1)
+    return spec.instance["num_delivery_vertices"] // per_section
 
 
 def training_storage_mode(spec: TrainingSpec) -> StorageMode:
@@ -917,6 +976,7 @@ def build_experiment_config(
         units_per_line=None if arrival is None else arrival.units_per_line,
         cold_stock_top_k=None if arrival is None else arrival.cold_stock_top_k,
         shipping=arrival is not None and arrival.shipping,
+        sku_sections=arrival is not None and arrival.sku_sections,
         dock_choice="nearest" if arrival is None else arrival.dock_choice,
         # A random start gives F_fix class-based homes instead ([A69]).
         fixed_homes="popularity" if spec.storage.initial_placement == "random_slots" else "start",

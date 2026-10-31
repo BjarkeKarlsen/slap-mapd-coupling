@@ -55,6 +55,9 @@ class Vertex(BaseModel):
 
     id: VertexId
     role: VertexRole = Field(default_factory=VertexRole)
+    # [A77]: the section of SKUs a workstation serves, named by the smallest id among the
+    # section's workstations. None for every other vertex, and for a section of one workstation.
+    section: VertexId | None = None
 
 
 class Edge(BaseModel):

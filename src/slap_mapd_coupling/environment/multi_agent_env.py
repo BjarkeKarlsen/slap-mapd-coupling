@@ -98,7 +98,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Collection, Mapping, NamedTuple
+from typing import Any, Collection, Mapping, NamedTuple, Sequence
 
 import numpy as np
 
@@ -122,6 +122,7 @@ from slap_mapd_coupling.storage.arrival import (
     arrival_amounts,
     get_putaway_rule,
     nearest_receiving_point,
+    pick_distance,
     refill_amounts,
 )
 from slap_mapd_coupling.storage.base import EdgeKey
@@ -358,6 +359,19 @@ class WarehouseMAPDEnv:
         self._delivery_vertices = sorted(
             v for v, vertex in graph.vertices.items() if vertex.role.delivery
         )
+        # [A77]: the SKU sections, each named by its first workstation, and the neighbouring
+        # workstations that serve it. A workstation without a section serves one of its own.
+        self._section_workstations: dict[VertexId, tuple[VertexId, ...]] = {}
+        for v in self._delivery_vertices:
+            section = graph.vertices[v].section
+            key = v if section is None else section
+            self._section_workstations[key] = self._section_workstations.get(key, ()) + (v,)
+        self._section_names = sorted(self._section_workstations)
+        self._section_of = {
+            v: section
+            for section, workstations in self._section_workstations.items()
+            for v in workstations
+        }
         # V_rcv when it is the receiving role. None means the delivery vertices.
         self._receiving_vertices: list[VertexId] | None = None
         if config.stock_receiving == "receiving":
@@ -504,6 +518,26 @@ class WarehouseMAPDEnv:
         self._order_rng = np.random.default_rng(episode_seed + _ORDER_SEED_OFFSET)
         self._putaway_rng = random.Random(episode_seed + _PUTAWAY_SEED_OFFSET)
         self._dock_rng = random.Random(episode_seed + _DOCK_SEED_OFFSET)
+        # [A76]: each SKU's delivery vertex h(k), a random split of equal size per seed, the
+        # lines of each SKU per delivery vertex in the current storage period, and the estimate
+        # h_hat_t(k) the demand rules use.
+        self._sections: dict[SkuId, VertexId] = {}
+        self._section_lines: dict[SkuId, dict[VertexId, int]] = {}
+        self._section_estimate: dict[SkuId, VertexId] = {}
+        if self.config.sku_sections:
+            shuffled = sorted(self._sku_ids)
+            random.Random(f"{episode_seed}:sections").shuffle(shuffled)
+            self._sections = {
+                sku_id: self._section_names[i % len(self._section_names)]
+                for i, sku_id in enumerate(shuffled)
+            }
+            if self.config.fixed_homes == "popularity":
+                self._home = _section_homes(
+                    self.graph,
+                    list(self._storage_capacities),
+                    self._sku_ids,
+                    {k: self._section_workstations[s] for k, s in self._sections.items()},
+                )
         # D26: the parking leaf of every idle robot that was in the way, until it arrives or
         # gets a task.
         self._parking: dict[AgentId, VertexId] = {}
@@ -728,6 +762,20 @@ class WarehouseMAPDEnv:
         if refill_units is not None:
             options["refill_units"] = refill_units
             options["unit_estimate"] = estimates.units
+        if self._sections:
+            # F_fix knows h(k) ([A76]). The demand rules use h_hat_t(k), the section most of k's
+            # lines went to this period, or the last one seen. A SKU with no line yet has none,
+            # and its pick leg stays the mean over the delivery vertices. Either way the rules
+            # get the section's workstations ([A77]).
+            for sku_id, seen in self._section_lines.items():
+                self._section_estimate[sku_id] = max(seen, key=lambda v: (seen[v], -v))
+            self._section_lines = {}
+            known = (
+                self._sections if self.config.storage_mode == "fixed" else self._section_estimate
+            )
+            options["sku_delivery"] = {
+                sku_id: self._section_workstations[section] for sku_id, section in known.items()
+            }
         result = self._putaway_rule(
             given,
             self.graph,
@@ -985,6 +1033,10 @@ class WarehouseMAPDEnv:
             self._rotation_shift,
         )
         if self.config.lines_per_order is None and self.config.units_per_line is None:
+            if self._sections:
+                raise ValueError(
+                    "sku_sections needs order lines (lines_per_order or units_per_line)."
+                )
             lines = self._draw_single_line_orders(t, ranked)
         else:
             lines = self._draw_order_lines(t, ranked)
@@ -997,6 +1049,10 @@ class WarehouseMAPDEnv:
                 order[2] += line.missing
                 order[3] += line.missing
             self._estimator.record_order(line.sku, line.missing)
+            if self._sections:
+                seen = self._section_lines.setdefault(line.sku, {})
+                section = self._section_of[line.delivery_vertex]
+                seen[section] = seen.get(section, 0) + 1
             if counting:
                 self._ordered_since_refill[line.sku] += line.missing
         self._waiting_orders.extend(lines)
@@ -1085,11 +1141,28 @@ class WarehouseMAPDEnv:
             num_lines = 1
             if lines_config is not None:
                 num_lines = 1 + int(self._order_rng.poisson(lines_config.mean - 1.0))
-            num_lines = min(num_lines, len(ranked))
-            ranks = self._order_rng.choice(len(ranked), size=num_lines, replace=False, p=weights)
-            delivery = self._delivery_vertices[
-                int(self._order_rng.integers(len(self._delivery_vertices)))
-            ]
+            if self._sections:
+                # [A76]: the workstation first, then lines from its section's SKUs only, by
+                # their popularity renormalised over the section ([A77]).
+                delivery = self._delivery_vertices[
+                    int(self._order_rng.integers(len(self._delivery_vertices)))
+                ]
+                section = self._section_of[delivery]
+                own = [r for r, sku_id in enumerate(ranked) if self._sections[sku_id] == section]
+                p = None
+                if weights is not None:
+                    p = weights[own] / weights[own].sum()
+                num_lines = min(num_lines, len(own))
+                picked = self._order_rng.choice(len(own), size=num_lines, replace=False, p=p)
+                ranks = [own[int(i)] for i in picked]
+            else:
+                num_lines = min(num_lines, len(ranked))
+                ranks = self._order_rng.choice(
+                    len(ranked), size=num_lines, replace=False, p=weights
+                )
+                delivery = self._delivery_vertices[
+                    int(self._order_rng.integers(len(self._delivery_vertices)))
+                ]
             quantities = self._order_rng.integers(low, high + 1, size=num_lines)
             for index, (rank, quantity) in enumerate(zip(ranks, quantities)):
                 lines.append(
@@ -1341,6 +1414,27 @@ def _popularity_homes(
     )
     block = -(-len(sku_ids) // len(nearest_first))  # the ceiling, in integers
     return {sku_id: nearest_first[rank // block] for rank, sku_id in enumerate(sku_ids)}
+
+
+def _section_homes(
+    graph: WarehouseGraph,
+    storage_vertices: list[VertexId],
+    sku_ids: list[SkuId],
+    sections: Mapping[SkuId, Sequence[VertexId]],
+) -> dict[SkuId, VertexId]:
+    """F_fix's home shelves with SKU sections ([A76]): the SKUs in their order at t = 0, the
+    most popular first, each on the free shelf nearest the workstations of its own section
+    h(k) on average ([A77]), ties by vertex id. With more shelves than SKUs each SKU gets its
+    own shelf."""
+    free = list(storage_vertices)
+    homes: dict[SkuId, VertexId] = {}
+    for sku_id in sku_ids:
+        if not free:
+            free = list(storage_vertices)
+        home = min(free, key=lambda v: (pick_distance(graph, v, list(sections[sku_id])), v))
+        homes[sku_id] = home
+        free.remove(home)
+    return homes
 
 
 def _prime_shelves(

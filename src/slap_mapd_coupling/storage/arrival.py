@@ -102,7 +102,9 @@ class PutAwayRule(Protocol):
     run's put-away stream, which only "random" uses. Every rule takes it, so the environment
     can pass it to any of them. `refill_units` is Q under the refill rule, None under the top-up
     rule, and `unit_estimate` is rho_hat^unit, which the refill rule weighs the put-away leg by.
-    The returned storage satisfies the capacity constraint, which StorageState enforces.
+    `sku_delivery` maps a SKU to the workstations of its section, where its lines go ([A76],
+    [A77]), None without SKU sections. The returned storage satisfies the capacity constraint,
+    which StorageState enforces.
     """
 
     def __call__(
@@ -121,6 +123,7 @@ class PutAwayRule(Protocol):
         rng: random.Random | None = None,
         refill_units: int | None = None,
         unit_estimate: DemandEstimate | None = None,
+        sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
     ) -> PutAwayResult: ...
 
 
@@ -339,9 +342,13 @@ def _refill_scores(
     unit_estimate: DemandEstimate,
     refill_units: int,
     extra: dict[VertexId, float] | None = None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> Callable[[SkuId], list[VertexId]]:
     """Each SKU's shelves under the refill rule with robot put-away, by the leg-weighted
-    distance plus `extra` (the congestion term), ties by d^trip, then vertex id."""
+    distance plus `extra` (the congestion term), ties by d^trip, then vertex id. With
+    `sku_delivery` ([A76], [A77]) a SKU's pick leg is the mean distance to the workstations of
+    its own section, since an order picks any of them alike, and a SKU missing from it keeps
+    the mean over every delivery vertex."""
     storage = storage_vertices(graph)
     delivery = delivery_vertices(graph)
     receiving = delivery if receiving is None else receiving
@@ -350,13 +357,21 @@ def _refill_scores(
     trip = {v: trip_distance(graph, v, receiving, delivery) for v in storage}
     added = extra or {}
 
+    targets = sku_delivery or {}
+
     def order(sku_id: SkuId) -> list[VertexId]:
         picks = demand_estimate.get(sku_id, 0.0)
         refills = unit_estimate.get(sku_id, 0.0) / refill_units
+        target = targets.get(sku_id)
+        own = (
+            pick_leg
+            if target is None
+            else {v: pick_distance(graph, v, list(target)) for v in storage}
+        )
         return sorted(
             storage,
             key=lambda v: (
-                leg_weighted_distance(picks, refills, pick_leg[v], putaway_leg[v])
+                leg_weighted_distance(picks, refills, own[v], putaway_leg[v])
                 + added.get(v, 0.0),
                 trip[v],
                 v,
@@ -373,12 +388,15 @@ def _refill_order(
     demand_estimate: DemandEstimate,
     unit_estimate: DemandEstimate | None,
     refill_units: int | None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> Callable[[SkuId], list[VertexId]] | None:
     """The per-SKU shelf order of "fixed" and "demand" under the refill rule with robot
     put-away, or None when the shelves keep one order for every SKU."""
     if refill_units is None or not trip:
         return None
-    return _refill_scores(graph, receiving, demand_estimate, unit_estimate or {}, refill_units)
+    return _refill_scores(
+        graph, receiving, demand_estimate, unit_estimate or {}, refill_units, None, sku_delivery
+    )
 
 
 def _by_demand(x_prev: StorageState, demand_estimate: DemandEstimate) -> list[SkuId]:
@@ -402,10 +420,11 @@ def putaway_fixed(
     rng: random.Random | None = None,
     refill_units: int | None = None,
     unit_estimate: DemandEstimate | None = None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> PutAwayResult:
     """Dedicated storage: the home shelf first, then the nearest shelves with room."""
     refill_order = _refill_order(
-        graph, receiving, trip, demand_estimate, unit_estimate, refill_units
+        graph, receiving, trip, demand_estimate, unit_estimate, refill_units, sku_delivery
     )
     by_access = _shelf_ranking(graph, receiving, trip) if refill_order is None else []
 
@@ -434,10 +453,11 @@ def putaway_demand(
     rng: random.Random | None = None,
     refill_units: int | None = None,
     unit_estimate: DemandEstimate | None = None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into the nearest shelves with room."""
     refill_order = _refill_order(
-        graph, receiving, trip, demand_estimate, unit_estimate, refill_units
+        graph, receiving, trip, demand_estimate, unit_estimate, refill_units, sku_delivery
     )
     if refill_order is None:
         by_access = _shelf_ranking(graph, receiving, trip)
@@ -467,6 +487,7 @@ def putaway_congestion(
     rng: random.Random | None = None,
     refill_units: int | None = None,
     unit_estimate: DemandEstimate | None = None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> PutAwayResult:
     """The most demanded SKUs first, each into its shelves by the congestion-aware score."""
     if congestion_weight is None:
@@ -488,7 +509,13 @@ def putaway_congestion(
             for v in storage
         }
         order = _refill_scores(
-            graph, receiving, demand_estimate, unit_estimate or {}, refill_units, exposure
+            graph,
+            receiving,
+            demand_estimate,
+            unit_estimate or {},
+            refill_units,
+            exposure,
+            sku_delivery,
         )
         return _put_away(
             x_prev, amounts, _by_demand(x_prev, demand_estimate), order, whole=refill_units
@@ -546,6 +573,7 @@ def putaway_random(
     rng: random.Random | None = None,
     refill_units: int | None = None,
     unit_estimate: DemandEstimate | None = None,
+    sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
 ) -> PutAwayResult:
     """SKUs by id, each into the shelves in a random order: the first shelf of a uniformly
     random order that has room is uniform among the shelves with room."""

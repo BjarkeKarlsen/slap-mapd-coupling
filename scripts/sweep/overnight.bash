@@ -5,9 +5,10 @@
 #     nohup systemd-inhibit --what=sleep:idle:handle-lid-switch \
 #         scripts/sweep/overnight.bash > ~/Documents/thesis/thesis-progress/results/overnight.log 2>&1 &
 #
-# 1. The load sweep of fleets 8, 16, 32 and 64 at once, fixed storage only, on the grid of [A58]
-#    (0.0125 m to 0.1 m in eight steps), LOAD_SEEDS seeds per rate (default 20). RATES_<m>, for
-#    instance RATES_64="0.5 0.6", adds rates for fleet m where an earlier sweep put its capacity.
+# 1. The load sweep of fleets 8, 16, 32 and 64, one after another, fixed storage only, on the
+#    grid of [A58] (0.0125 m to 0.1 m in eight steps), LOAD_SEEDS seeds per rate (default 20).
+#    RATES_<m>, for instance RATES_64="0.5 0.6", adds rates for fleet m where an earlier sweep
+#    put its capacity.
 # 2. Twice, three more rates between the last passing and the first failing rate of each fleet,
 #    or below the lowest rate when that already fails, so the capacity is read on a finer grid
 #    ([A58]). A fleet whose two rates are a quarter of a grid step apart is not refined again.
@@ -15,14 +16,16 @@
 #    longer fits on the shelves.
 # 3. The main load of each fleet, 0.6 of its capacity, from its capacity.json. A fleet without
 #    one is skipped, never given a rate by hand.
-# 4. The sensitivity sweeps (parameter_sweep.bash) of fleets 8, 16 and 32 at once, each at its
-#    own main load, SEEDS seeds per value (default 20), then fleet 64 on its own.
+# 4. The sensitivity sweeps (parameter_sweep.bash) of every fleet, one after another, each at its
+#    own main load, SEEDS seeds per value (default 20).
+# Every sweep plays its episodes on WORKERS processes (default every core), fleet 64 on
+# WORKERS_64 (default 6), since one of its episodes holds 2 to 3 GB, so a core never waits for
+# another fleet.
 # The keep-up check is the one of [A59], picks and put-aways separately. Every step skips the rows
 # it already has, so the script can be started again. RESULTS sets where the results go, FLEETS
 # which fleets run (default "8 16 32 64"). CONFIGS is the config of a fleet with {} for its size
 # (default configs/fleet_{}/decentralised.yaml), SWEEP_ARGS more load_sweep.py options for every
-# sweep (for example "--horizon 10000 --warmup 5000"), and WORKERS the processes each load sweep
-# of step 1 and 2 plays its seeds in (default 1).
+# sweep (for example "--horizon 10000 --warmup 5000").
 set -uo pipefail
 cd "$(dirname "$0")/../.."  # the repo root, where scripts/ and configs/ are
 
@@ -31,7 +34,8 @@ RESULTS=${RESULTS:-~/Documents/thesis/thesis-progress/results}
 LOAD_SEEDS=${LOAD_SEEDS:-20}
 CONFIGS=${CONFIGS:-configs/fleet_\{\}/decentralised.yaml}
 SWEEP_ARGS=${SWEEP_ARGS:-}
-WORKERS=${WORKERS:-1}
+WORKERS=${WORKERS:-$(nproc)}
+WORKERS_64=${WORKERS_64:-6}
 export RESULTS SEEDS=${SEEDS:-20} CONFIGS SWEEP_ARGS
 read -r -a FLEETS <<< "${FLEETS:-8 16 32 64}"
 GRID="0.0125 0.025 0.0375 0.05 0.0625 0.075 0.0875 0.1"
@@ -39,6 +43,7 @@ GRID="0.0125 0.025 0.0375 0.05 0.0625 0.075 0.0875 0.1"
 log() { echo "$(date '+%d/%m %H:%M') $*"; }
 folder() { echo "$RESULTS/arrival_rates/load_fleet$1"; }
 config() { echo "${CONFIGS//\{\}/$1}"; }
+workers() { if [ "$1" = 64 ]; then echo "$WORKERS_64"; else echo "$WORKERS"; fi; }
 
 # capacity FLEET KEY prints one value of the fixed rule's capacity.json, empty when unset.
 capacity() {
@@ -53,26 +58,24 @@ load_sweep() {  # load_sweep FLEET ARGS...
     mkdir -p "$(folder "$fleet")"
     # shellcheck disable=SC2086  # SWEEP_ARGS is a word list
     "$PYTHON" scripts/sweep/load_sweep.py --config "$(config "$fleet")" --seeds "$LOAD_SEEDS" \
-        --stop-when-overloaded --workers "$WORKERS" $SWEEP_ARGS --out "$(folder "$fleet")" "$@" \
+        --stop-when-overloaded --workers "$(workers "$fleet")" $SWEEP_ARGS --out "$(folder "$fleet")" "$@" \
         >> "$(folder "$fleet")/sweep.log" 2>&1
 }
 
 log "step 1, load sweeps of fleets ${FLEETS[*]}, $LOAD_SEEDS seeds per rate"
 for fleet in "${FLEETS[@]}"; do
-    (
-        # shellcheck disable=SC2086  # GRID is a word list
-        load_sweep "$fleet" --rates-per-agent $GRID
-        # RATES_<m>, more rates where an earlier sweep put the capacity, run after the grid.
-        extra_name="RATES_$fleet"
-        extra=${!extra_name:-}
-        if [ -n "$extra" ]; then
-            log "fleet $fleet, extra rates $extra"
-            # shellcheck disable=SC2086  # extra is a word list
-            load_sweep "$fleet" --rates $extra
-        fi
-    ) &
+    log "fleet $fleet, $(workers "$fleet") workers"
+    # shellcheck disable=SC2086  # GRID is a word list
+    load_sweep "$fleet" --rates-per-agent $GRID
+    # RATES_<m>, more rates where an earlier sweep put the capacity, run after the grid.
+    extra_name="RATES_$fleet"
+    extra=${!extra_name:-}
+    if [ -n "$extra" ]; then
+        log "fleet $fleet, extra rates $extra"
+        # shellcheck disable=SC2086  # extra is a word list
+        load_sweep "$fleet" --rates $extra
+    fi
 done
-wait
 
 for pass in 1 2; do
     log "step 2, finer rates around each capacity, pass $pass"
@@ -93,10 +96,9 @@ else:
         if [ -n "$rates" ]; then
             log "fleet $fleet, rates $rates"
             # shellcheck disable=SC2086  # rates is a word list
-            load_sweep "$fleet" --rates $rates &
+            load_sweep "$fleet" --rates $rates
         fi
     done
-    wait
 done
 
 log "step 3, main loads"
@@ -106,25 +108,15 @@ for fleet in "${FLEETS[@]}"; do
     log "fleet $fleet capacity $(capacity "$fleet" capacity), main load ${LOAD[$fleet]:-none}"
 done
 
-# The sensitivity sweep of one fleet at its main load, in the background.
-parameter_sweep() {
-    local load=${LOAD[$1]}
-    if [ -z "$load" ]; then
-        log "fleet $1 skipped, no main load"
-        return
-    fi
-    RATE=$load scripts/sweep/parameter_sweep.bash "$1" \
-        > "$RESULTS/parameter_sweep_fleet$1.log" 2>&1 &
-}
-
-log "step 4, sensitivity sweeps of every fleet but 64 at once, $SEEDS seeds per value"
+log "step 4, sensitivity sweeps of every fleet, one after another, $SEEDS seeds per value"
 for fleet in "${FLEETS[@]}"; do
-    [ "$fleet" = 64 ] || parameter_sweep "$fleet"
+    load=${LOAD[$fleet]}
+    if [ -z "$load" ]; then
+        log "fleet $fleet skipped, no main load"
+        continue
+    fi
+    log "fleet $fleet at $load, $(workers "$fleet") workers"
+    RATE=$load WORKERS=$(workers "$fleet") scripts/sweep/parameter_sweep.bash "$fleet" \
+        > "$RESULTS/parameter_sweep_fleet$fleet.log" 2>&1
 done
-wait
-if [[ " ${FLEETS[*]} " == *" 64 "* ]]; then
-    log "step 4, sensitivity sweep of fleet 64 on its own, $SEEDS seeds per value"
-    parameter_sweep 64
-    wait
-fi
 log "done, see $RESULTS/parameter_sweep_fleet*.log"

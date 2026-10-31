@@ -159,7 +159,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="steps between two stock lines of a trace",
     )
     parser.add_argument(
-        "--workers", type=int, default=1, help="processes that play the seeds of a rate at once"
+        "--workers",
+        type=int,
+        default=1,
+        help="processes that play episodes at once, the seeds of a rate with "
+        "--stop-when-overloaded, else every episode of the sweep",
     )
     parser.add_argument(
         "--stop-when-overloaded",
@@ -184,6 +188,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     sweep_rates = args.rates or [round(share * num_agents, 6) for share in args.rates_per_agent]
 
     f_up = spec.experiment.keep_up_threshold
+    timing = args.out / "timing.jsonl"
+
+    def record(row: dict[str, Any], value: Any, rate: float, seed: int, mode: StorageMode) -> None:
+        if value is not None:
+            row.update(varied=args.vary, value=value)
+        with rows_path.open("a", encoding="utf-8") as sink:
+            sink.write(json.dumps(row) + "\n")
+        rows.append(row)
+        done.add((value, mode, rate, seed))
+        at = "" if value is None else f"{args.vary} {value:g} "
+        print(f"{at}{mode} rate {rate} seed {seed}: throughput {row['throughput']:.3f}")
+
+    def play(jobs: list[tuple[Any, float, str, int, StorageMode, Path | None]]) -> None:
+        """Play `jobs`, (value, rate, spec JSON, seed, mode, trace) each, on args.workers
+        processes at once, recording every row as it comes in."""
+        if args.workers <= 1:
+            for value, rate, rated_json, seed, mode, trace in jobs:
+                row = _play(rated_json, seed, mode, trace, timing, args.stock_every)
+                record(row, value, rate, seed, mode)
+        elif jobs:
+            # Spawned, not forked, so no worker inherits the parent's threads.
+            context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(min(args.workers, len(jobs)), mp_context=context) as pool:
+                futures = {
+                    pool.submit(_play, rated_json, seed, mode, trace, timing, args.stock_every): (
+                        value,
+                        rate,
+                        seed,
+                        mode,
+                    )
+                    for value, rate, rated_json, seed, mode, trace in jobs
+                }
+                for future in as_completed(futures):
+                    record(future.result(), *futures[future])
+
+    # Without --stop-when-overloaded no rate waits on the rows of another, so every value, rate,
+    # mode and seed goes into one pool and no worker idles at the end of a rate.
+    pending: list[tuple[Any, float, str, int, StorageMode, Path | None]] = []
     for value in args.values or [None]:
         valued = spec if value is None else with_setting(spec, args.vary, value)
         for rate in sorted(sweep_rates):
@@ -207,40 +249,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if n < args.trace_seeds:
                         at = "" if value is None else f"{args.vary}_{value:g}_"
                         trace = args.out / "traces" / f"{at}{mode}_rate{rate:g}_seed{seed}.jsonl"
-                    jobs.append((rated.model_dump_json(), seed, mode, trace))
-
-            def record(row: dict[str, Any], seed: int, mode: StorageMode) -> None:
-                if value is not None:
-                    row.update(varied=args.vary, value=value)
-                with rows_path.open("a", encoding="utf-8") as sink:
-                    sink.write(json.dumps(row) + "\n")
-                rows.append(row)
-                done.add((value, mode, rate, seed))
-                at = "" if value is None else f"{args.vary} {value:g} "
-                print(f"{at}{mode} rate {rate} seed {seed}: throughput {row['throughput']:.3f}")
-
-            timing = args.out / "timing.jsonl"
-            if args.workers <= 1:
-                for rated_json, seed, mode, trace in jobs:
-                    record(_play(rated_json, seed, mode, trace, timing, args.stock_every), seed, mode)
-            elif jobs:
-                # Spawned, not forked, so no worker inherits the parent's threads.
-                context = multiprocessing.get_context("spawn")
-                with ProcessPoolExecutor(min(args.workers, len(jobs)), mp_context=context) as pool:
-                    futures = {
-                        pool.submit(_play, rated_json, seed, mode, trace, timing, args.stock_every): (
-                            seed,
-                            mode,
-                        )
-                        for rated_json, seed, mode, trace in jobs
-                    }
-                    for future in as_completed(futures):
-                        record(future.result(), *futures[future])
+                    jobs.append((value, rate, rated.model_dump_json(), seed, mode, trace))
+            if not args.stop_when_overloaded:
+                pending += jobs
+                continue
+            play(jobs)
             # With --stop-when-overloaded, a rate at which no seed of any rule keeps up ends the
             # sweep, since a higher rate cannot change a capacity. The rates above capacity
             # that some seed still passes are kept, for the load and demand appendix.
-            if not args.stop_when_overloaded:
-                continue
             at_rate = [
                 row for row in rows if row.get("value") == value and row["arrival_rate"] == rate
             ]
@@ -248,6 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if rate != max(sweep_rates):
                     print(f"no seed keeps up at rate {rate}, the higher rates are skipped")
                 break
+    play(pending)
 
     study = build_study(spec, prepare=False)
     by_value: dict[Any, list[dict[str, Any]]] = {}

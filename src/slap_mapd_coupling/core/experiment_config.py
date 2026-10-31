@@ -159,6 +159,12 @@ class ExperimentConfig(BaseModel):
     # the popularity ranking on the r-th storage vertex nearest the delivery vertices on
     # average, so a random start does not make fixed storage random dedicated storage.
     fixed_homes: Literal["start", "popularity"] = "start"
+    # [A76] (D29): each SKU belongs to one workstation. Each episode seed splits the SKUs at random
+    # over the delivery vertices, the same number each, fixed for the episode. An order picks its
+    # delivery vertex uniformly and draws its lines from that vertex's SKUs by popularity. The
+    # rules score a shelf by the trip to the SKU's delivery vertex, which F_fix knows and the
+    # demand rules estimate from the last storage period's lines. Needs order lines.
+    sku_sections: bool = False
 
     @model_validator(mode="after")
     def _storage_mode_parameters(self) -> "ExperimentConfig":
@@ -196,6 +202,8 @@ class ExperimentConfig(BaseModel):
                 raise ValueError("stock_putaway only applies to stock_model='arrival'.")
             if self.stock_rule != "topup":
                 raise ValueError("stock_rule only applies to stock_model='arrival'.")
+            if self.sku_sections:
+                raise ValueError("sku_sections only applies to stock_model='arrival'.")
             for name in ("lines_per_order", "units_per_line", "cold_stock_top_k"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"{name} only applies to stock_model='arrival'.")

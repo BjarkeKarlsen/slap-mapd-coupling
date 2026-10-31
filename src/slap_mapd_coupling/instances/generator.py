@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import math
 import random
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pydantic import (
     BaseModel,
@@ -98,6 +98,10 @@ class GeneratorParams(BaseModel):
     # Graph v2 only: the workstations spread along the front wall, or on rack faces drawn from
     # the seed anywhere in the warehouse (D24).
     station_placement: Literal["front_wall", "rack_faces"] = "front_wall"
+    # Graph v2 with "rack_faces" only ([A77]): the workstations that serve one section of SKUs,
+    # the rack faces nearest one drawn from the seed. num_delivery_vertices counts every
+    # workstation, so there are num_delivery_vertices / workstations_per_section sections.
+    workstations_per_section: PositiveInt = 1
     # Graph v2 only: the inner aisles of the lower rack block all reach the front lane, or hang
     # down from the main pair with lengths drawn from the seed like the upper block's, so some
     # stop short of the front lane. The walkable count stays 16 m either way.
@@ -175,13 +179,14 @@ class GeneratorParams(BaseModel):
                 raise ValueError(f"{name} only applies to layout='v2'.")
         if (
             self.station_placement != "front_wall"
+            or self.workstations_per_section != 1
             or self.dock_placement != "corner"
             or self.lower_block != "full"
             or self.num_blocks is not None
         ):
             raise ValueError(
-                "station_placement, dock_placement, lower_block and num_blocks only apply to "
-                "layout='v2'."
+                "station_placement, workstations_per_section, dock_placement, lower_block and "
+                "num_blocks only apply to layout='v2'."
             )
         assert self.max_num_cross_aisles is not None and self.max_aisle_length is not None
 
@@ -241,6 +246,14 @@ class GeneratorParams(BaseModel):
         assert self.num_transit_vertices is not None
         if self.num_aisles < 3:
             raise ValueError("layout='v2' needs at least 3 aisles, two outer and one inner.")
+        if self.workstations_per_section > 1:
+            if self.station_placement != "rack_faces":
+                raise ValueError("workstations_per_section needs station_placement='rack_faces'.")
+            if self.num_delivery_vertices % self.workstations_per_section:
+                raise ValueError(
+                    f"{self.num_delivery_vertices} workstations do not make whole sections of "
+                    f"{self.workstations_per_section}."
+                )
         if self.num_blocks is not None:
             if self.num_blocks < 2:
                 raise ValueError("num_blocks must be at least 2, one each side of the main pair.")
@@ -1471,23 +1484,54 @@ def _v2_shape(num_agents: int) -> tuple[int, int]:
 
 
 def _v2_stations_and_slots(
-    leaves: list[tuple[GridCell, GridCell, VertexRole]], params: GeneratorParams
-) -> list[tuple[GridCell, GridCell, VertexRole]]:
-    """The rack faces of graph v2 turned into workstations, slots and parking. Under
-    ``station_placement`` "rack_faces" the workstations are rack faces drawn from the seed
-    (D24). With ``num_storage_vertices`` that many of the faces left are slots, spread evenly
-    over them in row order, then ``num_endpoints`` of the faces left after that are parking,
-    spread evenly the same way, and the rest are not built (D25)."""
+    leaves: list[tuple[GridCell, GridCell, VertexRole]],
+    params: GeneratorParams,
+    links: Sequence[tuple[GridCell, GridCell]] = (),
+) -> tuple[list[tuple[GridCell, GridCell, VertexRole]], list[list[GridCell]]]:
+    """The rack faces of graph v2 turned into workstations, slots and parking, and the cells of
+    the workstations of each section. Under ``station_placement`` "rack_faces" the workstations
+    are rack faces drawn from the seed (D24). With ``workstations_per_section`` above one, the
+    workstations of each section are the free rack faces nearest a face drawn from the seed, by
+    the steps between the walkable cells they hang off over `links` in either direction, ties
+    by cell ([A77]). With ``num_storage_vertices`` that many of the faces left are slots, spread
+    evenly over them in row order, then ``num_endpoints`` of the faces left after that are
+    parking, spread evenly the same way, and the rest are not built (D25)."""
     faces = sorted((cell, at) for cell, at, role in leaves if role.storage)
     others = [leaf for leaf in leaves if not leaf[2].storage]
     stations: list[tuple[GridCell, GridCell]] = []
+    groups: list[list[GridCell]] = []
     if params.station_placement == "rack_faces":
         num_stations = params.num_delivery_vertices
         if num_stations > len(faces):
             raise InstanceGenerationError(
                 f"{num_stations} workstations do not fit {len(faces)} rack faces."
             )
-        stations = random.Random(f"{params.seed}:v2:stations").sample(faces, num_stations)
+        per_section = params.workstations_per_section
+        if per_section == 1:
+            stations = random.Random(f"{params.seed}:v2:stations").sample(faces, num_stations)
+        else:
+            anchors = random.Random(f"{params.seed}:v2:stations").sample(
+                faces, num_stations // per_section
+            )
+            neighbours: dict[GridCell, list[GridCell]] = {}
+            for a, b in links:
+                neighbours.setdefault(a, []).append(b)
+                neighbours.setdefault(b, []).append(a)
+            for anchor in anchors:
+                steps = {anchor[1]: 0}
+                queue = deque([anchor[1]])
+                while queue:
+                    cell = queue.popleft()
+                    for nxt in neighbours.get(cell, ()):
+                        if nxt not in steps:
+                            steps[nxt] = steps[cell] + 1
+                            queue.append(nxt)
+                free = sorted(
+                    (face for face in faces if face not in stations),
+                    key=lambda face: (steps.get(face[1], len(steps)), face),
+                )
+                stations.extend(free[:per_section])
+                groups.append([cell for cell, _ in free[:per_section]])
         taken = set(stations)
         faces = [face for face in faces if face not in taken]
     num_slots = params.num_storage_vertices
@@ -1514,7 +1558,7 @@ def _v2_stations_and_slots(
         + [(cell, at, VertexRole(delivery=True)) for cell, at in stations]
         + [(cell, at, VertexRole(storage=True)) for cell, at in slots]
         + [(cell, at, VertexRole(endpoint=True)) for cell, at in parking]
-    )
+    ), groups
 
 
 def _build_v2(params: GeneratorParams) -> GeneratedInstance:
@@ -1750,7 +1794,7 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
     for cell, at in left_wall + right_wall:
         if cell not in used and cell[0] in rack_rows_of_wall:
             leaves.append((cell, at, slot))
-    leaves = _v2_stations_and_slots(leaves, params)
+    leaves, section_groups = _v2_stations_and_slots(leaves, params, segments + one_way)
 
     # Vertex ids: the walkable cells row by row from the front, then the leaves likewise.
     walkable_ids = {cell: index for index, cell in enumerate(sorted(walkable))}
@@ -1772,11 +1816,18 @@ def _build_v2(params: GeneratorParams) -> GeneratedInstance:
         roles[leaf] = role
         edges.update({(leaf, walkable_ids[at]), (walkable_ids[at], leaf)})
 
+    # [A77]: each workstation names its section by the smallest id among the section's
+    # workstations.
+    section: dict[VertexId, VertexId] = {}
+    for group in section_groups:
+        members = [ids[cell] for cell in group]
+        section.update({v: min(members) for v in members})
+
     def band(column: int) -> int:
         return min(num_aisles - 1, max(0, (column + 1) // _V2_AISLE_PITCH))
 
     graph = _create_graph(
-        vertices={v: Vertex(id=v, role=role) for v, role in roles.items()},
+        vertices={v: Vertex(id=v, role=role, section=section.get(v)) for v, role in roles.items()},
         directed_edges=edges,
         params=params,
         cost_rng=random.Random(f"{params.seed}:v2:costs"),

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The sensitivity sweeps at the main load. One Token Passing sweep per demand, arrival and
 # storage-rule setting, each changing only that setting over its values (load_sweep.py --vary),
-# every other setting as the fleet's config has it. The settings run at once, the fleets
-# one after another. RESULTS sets where the results go.
+# every other setting as the fleet's config has it. The settings and the fleets run one after
+# another, each sweep playing all its episodes on WORKERS processes (default every core).
+# RESULTS sets where the results go.
 #
 #     scripts/sweep/parameter_sweep.bash [FLEET ...]
 #
@@ -20,6 +21,7 @@ RESULTS=${RESULTS:-~/Documents/thesis/thesis-progress/results}
 SEEDS=${SEEDS:-50}
 CONFIGS=${CONFIGS:-configs/fleet_\{\}/decentralised.yaml}
 SWEEP_ARGS=${SWEEP_ARGS:-}
+WORKERS=${WORKERS:-$(nproc)}
 
 # section.key | storage modes | values. The main result is the gain of demand over fixed storage,
 # so a demand or stock setting runs under both. Delta is also the arrival period, so it runs under
@@ -64,10 +66,7 @@ for fleet in "$@"; do
         # shellcheck disable=SC2086  # modes, values and SWEEP_ARGS are word lists
         "$PYTHON" scripts/sweep/load_sweep.py --config "$config" --rates "$rate" \
             --seeds "$SEEDS" --storage-modes $modes --vary "$setting" --values $values \
-            $SWEEP_ARGS --out "$dir" > "$dir/sweep.log" 2>&1 &
-    done
-    for job in $(jobs -p); do
-        wait "$job" || failed=1
+            --workers "$WORKERS" $SWEEP_ARGS --out "$dir" > "$dir/sweep.log" 2>&1 || failed=1
     done
     echo "fleet $fleet done"
 done
