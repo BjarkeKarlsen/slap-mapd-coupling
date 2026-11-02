@@ -34,7 +34,9 @@ from slap_mapd_coupling.training.spec import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-FLEET_8 = ROOT / "configs" / "fleet_8" / "decentralised.yaml"
+# A frozen fleet 8 config, so the expected values of these tests do not move with the training
+# settings (tests/unit/data/fleet_8_before_step12.yaml).
+FLEET_8 = Path(__file__).parent / "data" / "fleet_8_before_step12.yaml"
 SEED = 300_000
 Q = 30
 # What a 300-step Token Passing episode of FLEET_8 under the top-up rule (margin 1, floor 8,
@@ -245,19 +247,20 @@ def test_the_simulated_quantile_matches_the_poisson_quantile():
     assert quantile == k
 
 
-def test_the_number_of_skus_fills_the_start_fill_of_every_fleet():
-    for fleet in (8, 16):
-        spec = load_spec(ROOT / "configs" / f"fleet_{fleet}" / "decentralised.yaml")
-        study = build_study(spec)
-        room = sum(
-            units * study.skus[k].unit_capacity
-            for k, per_vertex in study.counts.items()
-            for units in per_vertex.values()
-        )
-        fill = room / sum(study.capacities.values())
-        # Rounded to the nearest multiple of 20 SKUs, so near the start fill, not at it.
-        assert len(study.skus) % 20 == 0
-        assert abs(fill - spec.storage.start_fill) < 0.04, (fleet, fill)
+def test_every_fleet_has_two_and_a_half_skus_per_agent():
+    """[A77]: the SKU count scales with the fleet, 2.5 per agent, a multiple of 20 so the
+    rotation moves a whole number of SKUs. Every SKU is named, and every arm has the same."""
+    for fleet in (8, 16, 32, 64):
+        counts = set()
+        for arm in ("centralised", "section", "decentralised"):
+            spec = load_spec(ROOT / "configs" / f"fleet_{fleet}" / f"{arm}.yaml")
+            assert spec.storage.start_fill is None
+            assert len(spec.storage.sku_names) == spec.storage.num_skus
+            counts.add(spec.storage.num_skus)
+        assert counts == {fleet * 5 // 2}
+        assert fleet * 5 // 2 % 20 == 0
+    study = build_study(load_spec(ROOT / "configs" / "fleet_8" / "decentralised.yaml"))
+    assert len(study.skus) == 20
 
 
 def test_sku_names_name_the_first_skus_of_a_derived_count():

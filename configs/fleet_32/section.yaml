@@ -1,26 +1,23 @@
-# The training run of the 8-agent warehouse with robots carrying the put-away, read by
-# `slap-mapd train`. The four files of configs/medium_putaway differ only in `controller`. Each
-# is its namesake in configs/medium_arrival with three changes. The instance has receiving
-# vertices on row 0, the inbound side, as many as it has delivery vertices
-# (`num_receiving_vertices`). Stock arrives at them (`arrival.receiving: receiving`). Every
-# (SKU, shelf) of an arrival is a put-away task, and its units can be picked only once it is
-# delivered (`arrival.putaway: robots`).
+# The training run of the 32-agent warehouse, read by `slap-mapd train`. The three files of
+# configs/fleet_32 differ only in `controller`. See training/spec.py for what each section means.
 #
-# Values are illustrative and are not thesis values, apart from the arrival rate, which the
-# Token Passing load sweep sets (scripts/sweep/load_sweep.py). Everything else is
-# configs/medium_arrival. See training/spec.py for what each section means.
-
+# The model is the one the Token Passing runs settled (thesis Appendices E, F and G, rows in
+# thesis-progress/results/E_load, F_demand and G_storage). It is the model of
+# configs/step12/fleet_32.yaml, which the updated Token Passing run of 2026-10-31 used, with the
+# main load that run found. Token Passing only checks these values. The stock waits and the
+# congestion weight are read again under the learned arms (GAPS.md, "Still open"). The arm, model,
+# PPO and checkpoint sections are illustrative, not thesis values.
 
 controller: section
 regime: fixed_only          # fixed_only | matched
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 
-# Selected main load from the fixed-storage Token Passing load sweep, 0.6 of the highest rate at
-# which fixed storage keeps up on every seed (scripts/sweep/load_sweep.py). A sampling call of a
+# The main load, 0.6 of the capacity 0.5 that the updated Token Passing run found under fixed
+# storage (results/E_load/fleet_32/capacity.json). Every seed kept up there. A sampling call of a
 # runner is one complete episode, and the budget below counts timesteps, one per timestep however
 # many robots choose within it.
-arrival_rate: 0.36
+arrival_rate: 0.3
 horizon: 2000
 
 experiment:
@@ -29,55 +26,51 @@ experiment:
   keep_up_threshold: 0.8    # f_up of eq:throughput
   observation_depth: 5      # d_obs
   discount: 0.99            # gamma
-  # n_deliver is raised well above 1.0. A 5000-iteration run on this instance showed rising
-  # training return with zero evaluation completions, consistent with the per-step shaping
-  # term outweighing a small completion bonus.
+  # n_deliver is raised well above 1.0. A 5000-iteration run showed rising training return with
+  # zero evaluation completions, consistent with the per-step shaping term outweighing a small
+  # completion bonus.
   deliver_reward: 10.0
   override_penalty: 0.5
   move_cost: 0.1            # c_move, after van Knippenberg et al. (2021)
   congestion_reward_weight: 0.1
   congestion_sensitive: false
+  idle_parking: true        # D26, an idle robot in the way goes to the nearest free parking leaf
   seed: 0
 
-# No instance section: the warehouse follows experiment.num_agents
-# (instances/generator.py::fleet_defaults). An `instance:` section would build that one instead.
-
-# SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), as many as fill 0.4 of the
-# shelves at the start (start_fill), so every fleet starts equally full. The most popular
-# SKUs are at the storage vertices nearest the delivery vertices. Each SKU starts with one refill
-# plus the service-level quantile of its orders in one arrival period. vertex_capacity is left
-# out, so every vertex holds as much as the starting stock of the fullest one takes. An order
-# picks a SKU by its popularity and takes units from the shelf holding it nearest its delivery
-# vertex, or waits for the next arrival.
-# See StorageSettings, ArrivalSettings and DemandSettings.
+# SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), 2.5 per agent ([A77]), a
+# multiple of 20 so the rotation moves a whole number of SKUs. The start is random ([A75], D22):
+# every SKU alone on a shelf drawn at random for the seed, so the start carries no demand
+# information. The names are for reading a run, the first is the most popular at t = 0.
 storage:
-  start_fill: 0.4          # the number of SKUs is derived from it
-  # Names for the first SKUs, e.g. [tea, coffee, mugs, ...]. The first is the most popular at
-  # t = 0. The rest, or all with null, are named sku_000, sku_001 and so on by position.
-  sku_names: null
+  sku_names: [tea, coffee, mugs, sugar, milk_powder, instant_noodles, pasta, rice, canned_tomatoes, olive_oil, flour, bread_mix, cereal, oatmeal, honey, jam, peanut_butter, chocolate_bars, biscuits, crackers, chips, nuts, dried_fruit, granola_bars, energy_drinks, soda, sparkling_water, juice, bottled_water, sports_drink, protein_powder, protein_bars, vitamins, pain_relief, bandages, hand_sanitizer, soap, shampoo, conditioner, toothpaste, toothbrushes, deodorant, razors, shaving_cream, tissues, toilet_paper, paper_towels, dish_soap, laundry_detergent, fabric_softener, cleaning_spray, sponges, trash_bags, aluminum_foil, plastic_wrap, zip_lock_bags, paper_plates, plastic_cups, cutlery_sets, napkins, candles, light_bulbs, batteries, phone_chargers, usb_cables, power_strips, headphones, mouse_pads, notebooks, pens, pencils, markers, sticky_notes, envelopes, printer_paper, staplers, scissors, tape, glue, folders]
   unit_capacities: [0.5, 1.0, 2.0]
-  initial_placement: demand_sized_blocks
+  initial_placement: random_slots
+  num_skus: 80
+  seed: 0
 
 # SKU popularity is Zipf with the given skew, and every 200 steps the ranking rotates by 5 % of
-# the SKUs, so it turns once every 4000 steps whatever the number of SKUs.
+# the SKUs, so it turns once every 4000 steps whatever the number of SKUs (Appendix F).
 demand:
   skew: 1.0
   rotation_period: 200
   rotation_share: 0.05
 
 # Delta, the arrival period of every storage rule, and beta of the congestion rule, used by
-# `slap-mapd evaluate --storage-modes`. Nothing is relocated, so there is no nu.
+# `slap-mapd evaluate --storage-modes`. Both kept by the Token Passing runs (Appendix G).
 storage_rule:
   epoch_length: 100
   congestion_weight: 1.0
 
 # The arrival stock model. Stock is replaced a refill of Q units at a time, once Q units of a SKU
-# have been ordered since its last refill, and each refill is one put-away to one shelf. The
-# starting stock covers a period's orders at the service level. Lines ask for 1 to 5 units
-# ([A46]). The stock arrives at the receiving vertices and robots carry it to its shelves.
+# have been ordered since its last refill, and each refill is one put-away to one shelf. Every SKU
+# keeps the safety stock of the most popular rank, since the rotation takes every SKU to the top
+# ([A75]). Lines ask for 1 to 5 units and an order has 5 lines on average ([A46]). The stock
+# arrives at the receiving vertices and robots carry it to its shelves. An order ships from its
+# workstation to a dock drawn at random. Each SKU belongs to a section of 20 SKUs, served by 4
+# neighbouring workstations, a random split per seed ([A76], [A77]).
 arrival:
   rule: refill
-  refill_units: 30          # Q, about 10 picks per refill
+  refill_units: 10          # Q, put-aways about a fifth of the trips ([A77])
   service_level: 0.99
   units_per_line: [1, 5]
   receiving: receiving
@@ -85,6 +78,13 @@ arrival:
   # The cold-stock measure: a SKU outside the top 10 of the current ranking is cold, and the
   # prime shelves are the nearest ones the starting placement gives the top 10. Evaluation only.
   cold_stock_top_k: 10
+  shipping: true
+  dock_choice: random
+  lines_per_order:
+    distribution: shifted_poisson
+    mean: 5.0
+  safety_stock: top_rank
+  sku_sections: true
 
 arm:
   num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)
@@ -105,7 +105,7 @@ ppo:
   vf_loss_coeff: 1.0
   training_budget_env_steps: 500000
 
-train_seed_count: 100
+train_seed_count: 250
 validation_seed_count: 2
 test_seed_count: 6
 
@@ -114,3 +114,29 @@ checkpoint:
   num_to_keep: null         # keep every one, a checkpoint is chosen on validation seeds
   score_attribute: episode_return_mean   # a top-level key of the result
   score_order: max
+
+# Every seed plays its own generated warehouse (D27).
+warehouse_per_seed: true
+
+# Graph v2 scaled with the fleet ([A62], [A77]): 16 walkable vertices, 5 shelves, half a
+# workstation and half a dock per agent, and one parking vertex per agent (num_endpoints follows
+# experiment.num_agents). Workstations stand on rack faces, 4 neighbouring ones per section, and
+# the docks on the left wall.
+instance:
+  layout: v2
+  num_aisles: 10
+  rack_rows: 4
+  links_per_aisle_pair: 1
+  num_transit_vertices: 512
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: false
+  num_delivery_vertices: 16
+  num_receiving_vertices: 16
+  seed: 42
+  station_placement: rack_faces
+  workstations_per_section: 4
+  lower_block: irregular
+  num_blocks: 6
+  dock_placement: left_wall
+  num_storage_vertices: 160
