@@ -142,8 +142,25 @@ def test_build_observation_eta_uses_current_goal_before_pickup():
     config = _config(observation_depth=4)
 
     obs = build_observation(graph, fleet, [task], agent_id=1, t=0, config=config)
-    assert obs.features[0].eta == 4  # d_G(0, pickup=4)
-    assert obs.features[4].eta == 0  # the goal itself
+    assert obs.features[0].eta == 0  # the robot's own vertex
+    assert obs.features[1].eta == -1  # one step closer to pickup=4
+    assert obs.features[4].eta == -4  # the goal itself, 4 closer, within the cap d_obs=4
+
+
+def test_the_relative_distance_label_is_capped_at_the_field_of_view():
+    """eq:relativeeta: far vertices of a wide window get plus or minus d_obs."""
+    graph = _line_graph(8)
+    fleet = _fleet({1: 4})
+    task = Task(task_id=1, release_time=0, pickup_vertex=0, delivery_vertex=7, sku="sku-1").assign(
+        agent_id=1, t=0
+    )
+    config = _config(observation_depth=2)
+    window = tuple(range(8))
+
+    obs = build_observation(graph, fleet, [task], agent_id=1, t=0, config=config, window=window)
+
+    # d_G(v, pickup=0) = v, minus the robot's own 4, capped at +-2
+    assert [obs.features[v].eta for v in range(8)] == [-2, -2, -2, -1, 0, 1, 2, 2]
 
 
 def test_build_observation_congestion_present_when_insensitive():
@@ -209,7 +226,8 @@ def test_a_window_sets_the_visible_vertices_and_keeps_the_vertex_features():
 
     assert obs.visible_vertices == window
     assert set(obs.features) == set(window)
-    assert [obs.features[v].eta for v in range(6)] == [0, 1, 2, 3, 4, 5]  # d_G(v, pickup=0)
+    # d_G(v, pickup=0) = v, minus the robot's own 2, capped at +-1
+    assert [obs.features[v].eta for v in range(6)] == [-1, -1, 0, 1, 1, 1]
     assert obs.features[5].occupied is True  # agent 2 stands there, outside the field of view
     assert obs.features[2].occupied is False  # the agent's own vertex
 

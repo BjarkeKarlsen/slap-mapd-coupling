@@ -558,10 +558,12 @@ def test_the_padded_arrays_follow_the_window(name):
         item = encoded[agent_id]
         n = len(window)
         assert item.node_mask.tolist() == [1.0] * n + [0.0] * (8 - n)
-        # a transit vertex, eta is the distance to the robot's own vertex (no task), and
-        # occupied marks the other robot, and nothing is claimed
+        # a transit vertex, eta is the distance to the robot's own vertex (no task) capped
+        # at d_obs = 1 (the relative distance label), occupied marks the other robot, and
+        # nothing is claimed
         expected = [
-            [0.0, 0.0, 0.0, 1.0, abs(v - location), float(v == other), 0.0, 0.0] for v in window
+            [0.0, 0.0, 0.0, 1.0, min(1, abs(v - location)), float(v == other), 0.0, 0.0]
+            for v in window
         ]
         np.testing.assert_array_equal(item.node_features[:n], expected)
         assert not item.node_features[n:].any()
@@ -638,15 +640,15 @@ def test_no_windows_gives_the_same_arrays_as_before_windows_existed():
         graph, fleet, [task], 0, _config(observation_depth=2), encoding_config, 2
     )
 
-    # robot 1 at 2 sees {0, ..., 4} with eta to its pickup at 5, and robot 2 on vertex 4.
-    # Robot 2 at 4 has no task, so eta is the distance to its own vertex.
+    # robot 1 at 2 sees {0, ..., 4} with eta to its pickup at 5 minus its own 3, and robot 2
+    # on vertex 4. Robot 2 at 4 has no task, so eta is the distance to its own vertex.
     first, second = encoded[1], encoded[2]
     expected_first = [
-        [0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 4.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, -2.0, 1.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     ]
     expected_second = [
