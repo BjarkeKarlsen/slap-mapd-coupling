@@ -1,6 +1,6 @@
 """o_i(t), the decentralised observation (sec:pf:observations).
 
-Built from the field of view G_i^(d_obs)(t), the distance label eta_i(v,t)
+Built from the field of view G_i^(d_obs)(t), the relative distance label
 on every visible vertex and the congestion feature delta_i(t). The result
 is a structured Observation. Messages are not part of it, since they depend
 on the network's weights (sec:method:model). Encoding the observation into
@@ -15,6 +15,11 @@ view whatever the window is, so it means the same under every router.
 The vertex features use a multi-hot role (storage, delivery, endpoint,
 transit, receiving), because VertexRole allows a vertex several roles.
 Transit is true when none of the other four apply.
+
+The distance feature is the relative distance label (sec:method:model):
+the vertex's distance label eta_i(v,t) minus that of the robot's own
+vertex, capped at plus or minus d_obs. The reward's potential still uses
+eta_i itself (environment/reward_function.py).
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from slap_mapd_coupling.environment.reward_function import current_target
 @dataclass(frozen=True)
 class VertexFeatures:
     """f(v,t), the vertex features: the multi-hot role, the
-    distance label eta_i(v,t), whether another agent occupies v, and
+    relative distance label (`eta`), whether another agent occupies v, and
     whether v is in V_{<i}(t), the vertices the earlier agents of the same
     decision have chosen to end the timestep on."""
 
@@ -40,7 +45,7 @@ class VertexFeatures:
     delivery: bool
     endpoint: bool
     transit: bool  # true iff none of the above -- see module docstring
-    eta: float
+    eta: float  # the relative distance label, not eta_i(v,t) itself
     occupied: bool
     claimed: bool = False
     receiving: bool = False
@@ -73,6 +78,13 @@ def eta(graph: WarehouseGraph, vertex: VertexId, target: VertexId) -> float:
     """eta_i(v,t) = d_G(v, q_i(t)), the distance label, for
     any visible vertex v."""
     return graph.distance(vertex, target)
+
+
+def relative_eta(own_eta: float, vertex_eta: float, observation_depth: float) -> float:
+    """The relative distance label, eta_i(v,t) - eta_i(l_i(t),t) capped at
+    plus or minus d_obs. 0 at the robot's own vertex, -1 one step closer to the
+    target and +1 one step further on unit edge costs."""
+    return min(observation_depth, max(-observation_depth, vertex_eta - own_eta))
 
 
 def occupancy_fraction(fleet: FleetState, window: Sequence[VertexId], excl: set[AgentId]) -> float:
@@ -140,6 +152,7 @@ def build_observation(
         raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
     occupied_vertices = {loc for aid, loc in locations.items() if aid != agent_id}
     claimed_vertices = set(claimed)
+    own_eta = eta(graph, location, target)
     features = {}
     for v in visible:
         storage, delivery, endpoint, transit, receiving = role_flags(graph.vertices[v].role)
@@ -148,7 +161,7 @@ def build_observation(
             delivery,
             endpoint,
             transit,
-            eta=eta(graph, v, target),
+            eta=relative_eta(own_eta, eta(graph, v, target), config.observation_depth),
             occupied=v in occupied_vertices,
             claimed=v in claimed_vertices,
             receiving=receiving,
