@@ -5,8 +5,10 @@ of checkpoints. This module rebuilds the instance, the storage and the arm from 
 checkpoint is played exactly as it was trained, on any warehouse.
 
 1. Validation. Every saved checkpoint plays the validation seeds of the run's seed split. The
-   one that completes the most tasks on average is chosen, the later one on a tie. The training
-   return is not used, because its shaping term dominates it.
+   checkpoint is chosen by [A60]: among those that keep up on every validation seed, the one
+   with the shortest mean pick service time, or with none keeping up the highest throughput,
+   the later one on a tie. The training return is not used, because its shaping term dominates
+   it, and nor is the number of completed tasks, which follows how many orders arrived.
 2. Test. The chosen checkpoint and the last one play the test seeds under every storage mode
    asked for, F_fix when it is among them. Under the template stock model an adaptive mode
    takes its epoch length, relocation cap and congestion weight from the spec's `storage_rule`
@@ -29,7 +31,7 @@ from __future__ import annotations
 import json
 import statistics
 from pathlib import Path
-from typing import NamedTuple, Sequence
+from typing import Any, NamedTuple, Sequence
 
 # The adaptive rules register themselves on import. Training imports them in every runner
 # (training/config.py), and evaluation under --storage-modes needs them in this process.
@@ -111,17 +113,53 @@ def play(
 
 
 def build_test_study(
-    spec: TrainingSpec, study: Study, arrival_rate: float | None
+    spec: TrainingSpec,
+    study: Study,
+    arrival_rate: float | None,
+    horizon: int | None = None,
+    warmup: int | None = None,
 ) -> tuple[TrainingSpec, Study]:
-    """The spec and the study the test episodes play: `spec` and `study` themselves at the
-    training load, or both rebuilt at `arrival_rate`. The starting stock of
-    "demand_sized_blocks" is sized by the arrival rate, so the test episodes start from stock
-    sized at the load they play. Every other part of the study, and the stock of every other
-    placement, does not depend on the arrival rate, so it is the training study's."""
-    if arrival_rate is None:
+    """The spec and the study the test episodes play: `spec` and `study` themselves, or the
+    spec with the `arrival_rate`, `horizon` and `warmup` given. The starting stock of
+    "demand_sized_blocks" is sized by the arrival rate, so at another load the study is rebuilt
+    and the test episodes start from stock sized at the load they play. The episode length and
+    the warm-up change no part of the study, so with those alone it is the training study.
+    Raises ValueError when the warm-up leaves no step to measure."""
+    if arrival_rate is None and horizon is None and warmup is None:
         return spec, study
-    test_spec = override_spec(spec, arrival_rate=arrival_rate)
+    test_spec = override_spec(spec, arrival_rate=arrival_rate, horizon=horizon, warmup=warmup)
+    if test_spec.warmup >= test_spec.horizon:
+        raise ValueError(
+            f"The warm-up of {test_spec.warmup} steps leaves nothing of an episode of "
+            f"{test_spec.horizon} steps to measure."
+        )
+    if arrival_rate is None:
+        return test_spec, study
     return test_spec, build_study(test_spec)
+
+
+def choose_checkpoint(validation: Sequence[Sequence[Any]]) -> int:
+    """The index of the checkpoint to test, from its validation episodes in the order the
+    checkpoints were saved ([A60]). Among the checkpoints that keep up on every validation seed,
+    the one with the shortest mean pick service time. If none does, the one with the highest
+    mean throughput, and the arm is reported by its throughput. A tie goes to the later
+    checkpoint. The number of completed tasks is not used, since it follows how many orders
+    arrived more than how well they were served."""
+
+    def keeps_up(episodes: Sequence[Any]) -> bool:
+        return all(getattr(m, "keeps_up", False) for m in episodes)
+
+    def service(episodes: Sequence[Any]) -> float:
+        times = [m.mean_service_time for m in episodes if m.mean_service_time is not None]
+        return statistics.mean(times) if times else float("inf")
+
+    passing = [i for i, episodes in enumerate(validation) if keeps_up(episodes)]
+    if passing:
+        return min(passing, key=lambda i: (service(validation[i]), -i))
+    return max(
+        range(len(validation)),
+        key=lambda i: (statistics.mean(m.throughput for m in validation[i]), i),
+    )
 
 
 def evaluate_run(
@@ -130,8 +168,11 @@ def evaluate_run(
     storage_modes: Sequence[StorageMode] | None = None,
     arrival_rate: float | None = None,
     trace_seeds: int = 0,
+    horizon: int | None = None,
+    warmup: int | None = None,
 ) -> RunEvaluation:
-    """Chooses the checkpoint of the run in `run_dir` on the validation seeds and plays it and
+    """Chooses the checkpoint of the run in `run_dir` on the validation seeds
+    (`choose_checkpoint`, [A60]) and plays it and
     the last checkpoint on the test seeds under each of `storage_modes`, by default only the
     storage rule the run trained with. Writes `validation.jsonl`, `test.jsonl` and `summary.md`
     to `out_dir`, replacing earlier ones. The two row files get one row per episode as it
@@ -140,7 +181,9 @@ def evaluate_run(
     `arrival_rate` plays the test seeds at another load than the run trained at, for example a
     load where the fleet keeps up, so service time counts. The checkpoint is still chosen at
     the training load, so the same checkpoint is measured at every load. The test episodes
-    start from the stock of that load (`build_test_study`).
+    start from the stock of that load (`build_test_study`). `horizon` and `warmup` play the test
+    seeds for another episode length and warm-up, for example the 10000 steps with a 5000-step
+    warm-up of the Token Passing runs, while training and the choice keep the run's own.
 
     The first `trace_seeds` test seeds of each checkpoint and rule also write a per-step trace
     to `out_dir/traces/`, for the viewer (viz/pygame_renderer.py)."""
@@ -152,7 +195,7 @@ def evaluate_run(
     for mode in modes:
         check_storage_rule(spec, mode)
     study = build_study(spec)
-    test_spec, test_study = build_test_study(spec, study, arrival_rate)
+    test_spec, test_study = build_test_study(spec, study, arrival_rate, horizon, warmup)
     seeds = split_seeds(study.seed_split)
     out_dir.mkdir(parents=True, exist_ok=True)
     validation_path, test_path = out_dir / "validation.jsonl", out_dir / "test.jsonl"
@@ -160,17 +203,17 @@ def evaluate_run(
         path.write_text("", encoding="utf-8")
 
     validation_rows: list[dict] = []
-    scores: list[tuple[float, int, Path]] = []
-    for index, checkpoint in enumerate(checkpoints):
-        completed = []
+    played_validation: list[list] = []
+    for checkpoint in checkpoints:
+        episodes = []
         for seed in seeds.validation:
             metrics = play(study, spec, checkpoint, seed)
-            completed.append(metrics.num_completed_tasks)
+            episodes.append(metrics)
             row = {"checkpoint": checkpoint.name, **metrics.model_dump(mode="json")}
             validation_rows.append(row)
             _append(validation_path, row)
-        scores.append((statistics.mean(completed), index, checkpoint))
-    chosen = max(scores, key=lambda score: (score[0], score[1]))[2]
+        played_validation.append(episodes)
+    chosen = checkpoints[choose_checkpoint(played_validation)]
     last = checkpoints[-1]
 
     test_rows: list[dict] = []

@@ -54,7 +54,7 @@ def fake_episodes(monkeypatch):
     )
 
     def install(completed):
-        def play(study, spec, checkpoint, seed, storage_mode=None):
+        def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
             index = int(checkpoint.name.split("_")[-1])
             played.append((checkpoint.name, seed))
             return FakeMetrics(
@@ -77,7 +77,7 @@ def test_checkpoints_are_in_the_order_they_were_saved(tmp_path):
     assert checkpoints_of(run)[-1].name == "checkpoint_000011"
 
 
-def test_the_checkpoint_with_most_completed_tasks_on_validation_is_chosen(tmp_path, fake_episodes):
+def test_with_no_checkpoint_keeping_up_the_highest_throughput_is_chosen(tmp_path, fake_episodes):
     played = fake_episodes([3, 9, 5])
     result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out")
     assert (result.chosen.name, result.last.name) == ("checkpoint_000001", "checkpoint_000002")
@@ -96,6 +96,35 @@ def test_a_tie_goes_to_the_later_checkpoint(tmp_path, fake_episodes):
     fake_episodes([7, 7, 2])
     result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out")
     assert result.chosen.name == "checkpoint_000001"
+
+
+def _validation(keeps_up, service, throughput=0.1):
+    return [SimpleNamespace(keeps_up=keeps_up, mean_service_time=service, throughput=throughput)
+            for _ in range(2)]
+
+
+def test_the_shortest_service_time_among_those_that_keep_up_is_chosen():
+    """[A60]: a checkpoint that does not keep up is passed over even with a shorter service
+    time, and the number of completed tasks plays no part."""
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    validation = [_validation(True, 80.0), _validation(False, 50.0, 0.9),
+                  _validation(True, 60.0), _validation(True, 70.0)]
+    assert choose_checkpoint(validation) == 2
+
+
+def test_a_service_time_tie_goes_to_the_later_checkpoint():
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    assert choose_checkpoint([_validation(True, 60.0), _validation(True, 60.0)]) == 1
+
+
+def test_a_checkpoint_keeps_up_only_if_every_validation_seed_does():
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    mixed = _validation(True, 40.0)
+    mixed[1].keeps_up = False
+    assert choose_checkpoint([mixed, _validation(True, 90.0)]) == 1
 
 
 def _real_metrics(seed, storage_mode, service_time):
@@ -148,7 +177,7 @@ def test_the_test_seeds_are_played_under_every_mode_and_summarised(
     fake_episodes([3, 9, 5])
     modes_played = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
         modes_played.append(storage_mode)
         if storage_mode is None:
             return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
@@ -227,7 +256,7 @@ def test_another_load_plays_the_test_seeds_but_the_choice_stays_at_the_training_
 ):
     rates = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
         rates.append((seed >= TEST_SEED_START, spec.arrival_rate))
         return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
 
@@ -246,6 +275,39 @@ def test_the_command_names_the_output_after_the_load(tmp_path, fake_episodes):
     result = CliRunner().invoke(cli, ["evaluate", str(run), "--arrival-rate", "0.3"])
     assert result.exit_code == 0, result.output
     assert (run / "evaluation_rate0.3" / "test.jsonl").exists()
+
+
+def test_another_horizon_and_warmup_play_the_test_seeds_only(tmp_path, fake_episodes, monkeypatch):
+    """The test seeds can play as the Token Passing runs did, 10000 steps with 5000 of warm-up,
+    while the checkpoint is still chosen on the run's own episodes."""
+    played = []
+
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+        played.append((seed >= TEST_SEED_START, spec.horizon, spec.warmup))
+        return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
+
+    fake_episodes([1, 1])
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    spec = load_spec(CONFIG)
+    evaluate_run(_run_dir(tmp_path, 2), tmp_path / "out", horizon=10000, warmup=5000)
+    assert {(h, w) for is_test, h, w in played if not is_test} == {(spec.horizon, spec.warmup)}
+    assert {(h, w) for is_test, h, w in played if is_test} == {(10000, 5000)}
+
+
+def test_a_warmup_as_long_as_the_episode_is_rejected(tmp_path, fake_episodes):
+    fake_episodes([1, 1])
+    with pytest.raises(ValueError, match="nothing"):
+        evaluate_run(_run_dir(tmp_path, 2), tmp_path / "out", horizon=5000, warmup=5000)
+
+
+def test_the_command_names_the_output_after_the_horizon_and_warmup(tmp_path, fake_episodes):
+    fake_episodes([1, 1])
+    run = _run_dir(tmp_path, 2)
+    result = CliRunner().invoke(
+        cli, ["evaluate", str(run), "--horizon", "10000", "--warmup", "5000"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (run / "evaluation_horizon10000_warmup5000" / "test.jsonl").exists()
 
 
 ARRIVAL_CONFIG = (
@@ -270,7 +332,7 @@ def _arrival_metrics(seed, storage_mode, service_time):
 
 
 def _summary_of(tmp_path, monkeypatch, metrics, spec_path):
-    def play(study, spec, checkpoint, seed, storage_mode=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
         if storage_mode is None:
             return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
         return metrics(seed, storage_mode, 10.0 if storage_mode == "fixed" else 8.0 + seed % 3)
@@ -334,7 +396,7 @@ def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episod
     )
     rates = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
         rates.append((seed >= TEST_SEED_START, study.rate, spec.arrival_rate))
         return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
 

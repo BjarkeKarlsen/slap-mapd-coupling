@@ -323,20 +323,41 @@ def resume(output):
     help="Write a per-step trace of the first N test seeds of each checkpoint and rule to "
     "OUTPUT/traces/, for the viewer (python -m slap_mapd_coupling.viz.pygame_renderer).",
 )
-def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds):
+@click.option(
+    "--horizon",
+    type=int,
+    default=None,
+    help="Episode length of the test seeds, in steps. Default: the run's. The checkpoint is "
+    "still chosen with the run's own episodes.",
+)
+@click.option(
+    "--warmup",
+    type=int,
+    default=None,
+    help="Warm-up of the test seeds, the first steps left out of every measure. Default: the "
+    "run's. With --horizon 10000 --warmup 5000 the test seeds play as the Token Passing runs "
+    "of the appendices did.",
+)
+def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
-    validation seeds under the rule the run trained with, the one with the most completed tasks
-    is chosen, and it and the last checkpoint play the test seeds under every storage rule
-    given. summary.md compares each adaptive rule with fixed storage."""
+    validation seeds under the rule the run trained with. Among those that keep up on every
+    seed the one with the shortest pick service time is chosen ([A60]), and it and the last
+    checkpoint play the test seeds under every storage rule given. summary.md compares each adaptive rule with fixed storage."""
     from pathlib import Path
 
     from slap_mapd_coupling.training.evaluate_run import evaluate_run
 
     run = Path(run_dir)
-    default_name = "evaluation" if arrival_rate is None else f"evaluation_rate{arrival_rate:g}"
+    default_name = "evaluation" + "".join(
+        f"_{name}{value:g}"
+        for name, value in (("rate", arrival_rate), ("horizon", horizon), ("warmup", warmup))
+        if value is not None
+    )
     out = Path(output) if output is not None else run / default_name
     try:
-        result = evaluate_run(run, out, list(storage_modes) or None, arrival_rate, trace_seeds)
+        result = evaluate_run(
+            run, out, list(storage_modes) or None, arrival_rate, trace_seeds, horizon, warmup
+        )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
     for role, checkpoint in (("chosen", result.chosen), ("last", result.last)):
