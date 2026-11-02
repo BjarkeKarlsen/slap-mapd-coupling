@@ -83,6 +83,16 @@ def test_a_trace_replays_with_every_layer_on_and_off(tmp_path):
             step_with_planner(env, planner)
             writer.record(env)
 
+    # The same run with two zones, as the section arm would write them.
+    movable = sorted(v for v, vertex in graph.vertices.items() if vertex.role.movable)
+    zones = (frozenset(movable[: len(movable) // 2]), frozenset(movable[len(movable) // 2 :]))
+    zoned = tmp_path / "zoned.jsonl"
+    env.reset()
+    with EpisodeTraceWriter(zoned, env, positions=instance.positions, zones=zones) as writer:
+        for _ in range(3):
+            step_with_planner(env, planner)
+            writer.record(env)
+
     data = TraceReplay(path)
     # At a stock line's own step, what the replay works out from the task list is what the
     # writer saw.
@@ -127,6 +137,48 @@ def test_a_trace_replays_with_every_layer_on_and_off(tmp_path):
             renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(14))
         renderer.help = True
         renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(14))
+    finally:
+        renderer.close()
+
+
+def _key(char: str):
+    return pygame.event.Event(pygame.KEYDOWN, unicode=char, key=ord(char), mod=0)
+
+
+def test_z_and_w_show_the_zones_and_the_workstation_sections(tmp_path):
+    test_a_trace_replays_with_every_layer_on_and_off(tmp_path)
+    data = TraceReplay(tmp_path / "zoned.jsonl")
+    plain = TraceReplay(tmp_path / "trace.jsonl")
+    renderer = WarehouseRenderer(None, header=data.header, window_size=(640, 480))
+    try:
+        zones = data.header["zones"]
+        assert len(zones) == 2
+        assert renderer._zone_of == {v: z for z, zone in enumerate(zones) for v in zone}
+        workstations = [v["id"] for v in data.header["vertices"] if v["delivery"]]
+        assert set(renderer._section_index) == set(workstations)
+        before = renderer._background.copy()
+        renderer._key(_key("z"))
+        assert renderer.show_zones
+        assert pygame.image.tostring(renderer._background, "RGB") != pygame.image.tostring(
+            before, "RGB"
+        )
+        renderer._key(_key("w"))
+        assert renderer.show_sections
+        step = data.steps[-1]
+        for view in VIEWS:
+            renderer.view = view
+            renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(2))
+        renderer.help = True
+        renderer.draw_frame(step, data.stock_at(step["t"]), data.header, data.history(2))
+        renderer._key(_key("z"))
+        assert not renderer.show_zones
+    finally:
+        renderer.close()
+    # A run of another router has no zones, and Z says so instead of drawing nothing quietly.
+    renderer = WarehouseRenderer(None, header=plain.header, window_size=(640, 480))
+    try:
+        renderer._key(_key("z"))
+        assert renderer._zone_of == {} and "no zones" in renderer._note
     finally:
         renderer.close()
 

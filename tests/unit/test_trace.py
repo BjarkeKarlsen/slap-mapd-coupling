@@ -492,3 +492,23 @@ def test_cli_pools_the_share_of_goal_moves_that_bring_an_agent_closer(tmp_path, 
     main([*paths, "--window", "4"])
     out = capsys.readouterr().out
     assert "goal moves that bring an agent closer, over all episodes: 67%" in out
+
+
+def test_header_names_each_workstations_section_and_the_zones_when_given(tmp_path):
+    env = _generated_env(_config())
+    env.reset()
+    movable = sorted(v for v, vertex in env.graph.vertices.items() if vertex.role.movable)
+    zones = (frozenset(movable[: len(movable) // 2]), frozenset(movable[len(movable) // 2 :]))
+    with EpisodeTraceWriter(tmp_path / "zones.jsonl", env, zones=zones):
+        pass
+    with EpisodeTraceWriter(tmp_path / "plain.jsonl", env):
+        pass
+    header, _ = load_trace(tmp_path / "zones.jsonl")
+    assert header["zones"] == [sorted(zone) for zone in zones]
+    assert load_trace(tmp_path / "plain.jsonl")[0]["zones"] is None
+    for v in header["vertices"]:
+        vertex = env.graph.vertices[v["id"]]
+        if vertex.role.delivery:
+            assert v["section"] == (v["id"] if vertex.section is None else vertex.section)
+        else:
+            assert v["section"] is None

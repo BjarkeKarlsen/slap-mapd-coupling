@@ -35,11 +35,17 @@ step and continue, the step slider and the speed slider. A live run keeps
 every step it has drawn, so it can be paused, stepped back through and
 continued from where it stopped.
 
+Two layers can be laid over any view. Z colours the zones of the
+section-based arm, each block of aisles in its own colour with a dark line
+where two zones meet, and rings every agent in the colour of the zone it
+stands in. W colours each workstation by the SKU section it serves ([A77]).
+A trace without zones, from any other router, has nothing to show under Z.
+
 Keys: space pauses or continues, left and right step (with shift, 10
 steps), home and end jump, up and down halve or double the speed, 1 to 3
-choose the map view, F follows the selected agent, R resets the zoom, S
-saves a screenshot, H shows the help and the legend, Escape clears the
-selection.
+choose the map view, Z and W show the zones and the workstation sections,
+F follows the selected agent, R resets the zoom, S saves a screenshot, H
+shows the help and the legend, Escape clears the selection.
 """
 
 from __future__ import annotations
@@ -126,12 +132,44 @@ _HELP = (
     ("up, down", "faster or slower"),
     ("1, 2, 3", "agents, stock or congestion view"),
     ("wheel, drag", "zoom and pan the map"),
+    ("Z", "zones of the section-based arm"),
+    ("W", "workstations by SKU section"),
     ("F", "follow the selected agent"),
     ("R", "reset the zoom"),
     ("S", "save a screenshot"),
     ("H", "this help"),
     ("Escape", "clear the selection"),
 )
+
+
+# Colours of the zones and of the SKU sections, repeated when there are more. Distinct hues
+# of similar weight, so neighbouring zones stay apart. A zone is drawn as a pale tint of its
+# colour, so the vertices on top stay readable.
+_GROUP_COLOURS = (
+    "#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#17becf", "#d62728", "#8c564b", "#e377c2",
+    "#bcbd22", "#7f7f7f",
+)
+_ZONE_TINT = 0.78  # share of white mixed into a zone's colour for its background
+_ZONE_EDGE = (40, 40, 40)
+
+
+# The SKU sections start further down the list, so with up to 5 zones a section never shares
+# a colour with a zone.
+_SECTION_OFFSET = 5
+
+
+def group_colour(index: int) -> tuple[int, int, int]:
+    """The colour of zone `index`."""
+    return _hex(_GROUP_COLOURS[index % len(_GROUP_COLOURS)])
+
+
+def section_colour(index: int) -> tuple[int, int, int]:
+    """The colour of SKU section `index`."""
+    return group_colour(index + _SECTION_OFFSET)
+
+
+def _tint(colour: tuple[int, int, int], share: float) -> tuple[int, int, int]:
+    return tuple(round(c + (255 - c) * share) for c in colour)  # type: ignore[return-value]
 
 
 def _hex(colour: str) -> tuple[int, int, int]:
@@ -181,9 +219,12 @@ def _stat(label: str, value: Any, colour=None, action=None) -> tuple:
 
 
 def header_from_graph(
-    graph: WarehouseGraph, positions: Mapping[VertexId, tuple[float, float]]
+    graph: WarehouseGraph,
+    positions: Mapping[VertexId, tuple[float, float]],
+    zones: Sequence[frozenset[VertexId]] | None = None,
 ) -> dict[str, Any]:
-    """The part of a trace header the renderer reads, built from a graph."""
+    """The part of a trace header the renderer reads, built from a graph, with the zones of
+    the section arm when there are any."""
     return {
         "vertices": [
             {
@@ -192,10 +233,16 @@ def header_from_graph(
                 "delivery": vertex.role.delivery,
                 "endpoint": vertex.role.endpoint,
                 "receiving": vertex.role.receiving,
+                "section": (
+                    None
+                    if not vertex.role.delivery
+                    else (v if vertex.section is None else vertex.section)
+                ),
             }
             for v, vertex in sorted(graph.vertices.items())
         ],
         "edges": [[e.source, e.target, e.cost] for e in graph.edges],
+        "zones": None if zones is None else [sorted(zone) for zone in zones],
         "positions": {str(v): [float(x), float(y)] for v, (x, y) in positions.items()},
         "capacities": {},
         "skus": {},
@@ -332,13 +379,14 @@ class WarehouseRenderer:
         surface: Any = None,
         sidebar: bool = True,
         title: str = "",
+        zones: Sequence[frozenset[VertexId]] | None = None,
     ) -> None:
         import pygame
 
         if header is None:
             if graph is None or positions is None:
                 raise ValueError("give a graph and its positions, or a trace header.")
-            header = header_from_graph(graph, positions)
+            header = header_from_graph(graph, positions, zones)
         if not header.get("positions"):
             raise ValueError("the trace header has no positions, so it cannot be drawn.")
         self._pygame = pygame
@@ -366,8 +414,24 @@ class WarehouseRenderer:
         self._label.set_bold(True)
         self._roles = {v["id"]: v for v in header["vertices"]}
         self._edges = {(int(s), int(t)) for s, t, _ in header["edges"]}
+        # The zone of each vertex (section arm only) and the index of each workstation's SKU
+        # section, both empty when the header has none.
+        self._zone_of = {
+            int(v): z for z, zone in enumerate(header.get("zones") or ()) for v in zone
+        }
+        sections = sorted(
+            {v["section"] for v in header["vertices"] if v.get("section") is not None}
+        )
+        self._section_index = {
+            v["id"]: sections.index(v["section"])
+            for v in header["vertices"]
+            if v.get("section") is not None
+        }
+        self.show_zones = False
+        self.show_sections = False
         positions = {int(v): (x, y) for v, (x, y) in header["positions"].items()}
         self._base, unit = self._fit(positions)
+        self._unit = unit
         self._base_radius = max(3, int(unit * 0.22))
         self.zoom = 1.0
         self._pan = (0.0, 0.0)
@@ -479,9 +543,24 @@ class WarehouseRenderer:
         surface = pygame.Surface(self._size)
         surface.fill(_WHITE)
         surface.set_clip(self._map_rect())
+        zones = self.show_zones and self._zone_of
+        if zones:
+            # A pale square per vertex in its zone's colour. Squares one grid step wide touch,
+            # so each zone shows as one block of colour.
+            side = max(4, int(self._unit * self.zoom))
+            for v, zone in self._zone_of.items():
+                if v in self._pixels:
+                    cell = pygame.Rect(0, 0, side, side)
+                    cell.center = self._pixels[v]
+                    pygame.draw.rect(surface, _tint(group_colour(zone), _ZONE_TINT), cell)
         edge, one_way = _hex(theme.PALETTE["edge"]), _hex(theme.PALETTE["one_way_edge"])
         for s, t in self._edges:
             p1, p2 = self._pixels[s], self._pixels[t]
+            between = self._zone_of.get(s) != self._zone_of.get(t)
+            if zones and s in self._zone_of and t in self._zone_of and between:
+                # The line where two zones meet: the edge between them, drawn thick and dark.
+                pygame.draw.line(surface, _ZONE_EDGE, p1, p2, 4)
+                continue
             if (t, s) in self._edges:
                 if s < t:
                     pygame.draw.line(surface, edge, p1, p2, 2)
@@ -496,6 +575,14 @@ class WarehouseRenderer:
                 pygame.draw.circle(surface, _hex(theme.PALETTE["transit"]), p, max(2, r // 2), 1)
             elif role != "storage":  # a slot is drawn every frame, with its stock
                 self._marker(surface, role, p, r)
+                if self.show_sections and v in self._section_index:
+                    # A thick ring in the colour of the workstation's SKU section, and its
+                    # number, counting from 1 as the sections are sorted.
+                    section = self._section_index[v]
+                    colour = section_colour(section)
+                    pygame.draw.circle(surface, colour, p, r + 5, 4)
+                    tag = self._label.render(f"S{section + 1}", True, colour)
+                    surface.blit(tag, (p[0] + r + 6, p[1] - r - 12))
         surface.set_clip(None)
         return surface
 
@@ -579,6 +666,16 @@ class WarehouseRenderer:
         views = list(VIEWS)
         if key in ("1", "2", "3"):
             self.view = views[int(key) - 1]
+        elif key == "z":
+            self.show_zones = not self.show_zones
+            if not self._zone_of:
+                self._note = "this run has no zones (not the section-based arm)"
+            self._background = self._render_background()
+        elif key == "w":
+            self.show_sections = not self.show_sections
+            if not self._section_index:
+                self._note = "this run has no workstation sections"
+            self._background = self._render_background()
         elif key == "f":
             self.follow = not self.follow
         elif key == "r":
@@ -924,6 +1021,9 @@ class WarehouseRenderer:
             else:
                 colour = _RED if debug["still_for"].get(a, 0) else _MUTED
             pygame.draw.circle(screen, colour, at, r)
+            zone = self._zone_of.get(agent["at"]) if self.show_zones else None
+            if zone is not None:
+                pygame.draw.circle(screen, group_colour(zone), at, r + 4, 4)
             if self.view == "congestion" and (agent.get("overridden") or a in debug["blocked"]):
                 pygame.draw.circle(screen, (0, 0, 0), at, r + 2, 2)
             label = self._label.render(a, True, _WHITE)
@@ -1478,7 +1578,7 @@ class WarehouseRenderer:
         pygame = self._pygame
         screen = self._screen
         area = self._map_rect()
-        box = pygame.Rect(0, 0, min(460, area.width - 40), min(420, area.height - 40))
+        box = pygame.Rect(0, 0, min(460, area.width - 40), min(500, area.height - 40))
         box.topright = (area.right - 20, area.top + 20)
         layer = pygame.Surface(box.size, pygame.SRCALPHA)
         layer.fill((255, 255, 255, 240))
