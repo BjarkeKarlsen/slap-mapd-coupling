@@ -101,7 +101,7 @@ def run_episode(
             step()
     else:
         with EpisodeTraceWriter(
-            trace_path, env, positions=positions, stock_every=stock_every
+            trace_path, env, positions=positions, stock_every=stock_every, zones=zones
         ) as writer:
             for _ in range(config.horizon):
                 step()

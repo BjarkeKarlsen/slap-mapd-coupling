@@ -44,7 +44,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from slap_mapd_coupling.core.graph import VertexId
 from slap_mapd_coupling.core.tasks import Task, active_tasks_by_agent
@@ -80,6 +80,7 @@ class EpisodeTraceWriter:
         *,
         positions: Mapping[VertexId, tuple[float, float]] | None = None,
         stock_every: int = DEFAULT_STOCK_EVERY,
+        zones: Sequence[frozenset[VertexId]] | None = None,
     ) -> None:
         if stock_every < 1:
             raise ValueError(f"stock_every must be at least 1, got {stock_every}.")
@@ -88,7 +89,7 @@ class EpisodeTraceWriter:
         self._previous = env.fleet.locations()
         self._stock_every = stock_every
         self._env = env
-        self._write(header_line(env, positions))
+        self._write(header_line(env, positions, zones))
         self._write(stock_line(env))
 
     def record(self, env: WarehouseMAPDEnv) -> None:
@@ -121,9 +122,13 @@ class EpisodeTraceWriter:
 def header_line(
     env: WarehouseMAPDEnv,
     positions: Mapping[VertexId, tuple[float, float]] | None = None,
+    zones: Sequence[frozenset[VertexId]] | None = None,
 ) -> dict[str, Any]:
     """The first line of a trace: the configuration and the warehouse, so a file can be read
-    or drawn without the instance that produced it."""
+    or drawn without the instance that produced it. A workstation carries its SKU section
+    ([A77]), named by its first workstation, and `zones` lists the zones of the section arm,
+    each as its sorted vertices, or None for every other router. Both are optional for a
+    reader, so a format 2 file without them still loads."""
     graph = env.graph
     storage = env.storage
     return {
@@ -137,10 +142,12 @@ def header_line(
                 "delivery": vertex.role.delivery,
                 "endpoint": vertex.role.endpoint,
                 "receiving": vertex.role.receiving,
+                "section": workstation_section(v, vertex),
             }
             for v, vertex in sorted(graph.vertices.items())
         ],
         "edges": [[e.source, e.target, e.cost] for e in graph.edges],
+        "zones": None if zones is None else [sorted(zone) for zone in zones],
         "initial": {str(a): v for a, v in env.fleet.locations().items()},
         "positions": (
             None
@@ -150,6 +157,15 @@ def header_line(
         "capacities": {str(v): c for v, c in sorted(storage.capacities.items())},
         "skus": {k: sku.unit_capacity for k, sku in storage.skus.items()},
     }
+
+
+def workstation_section(v: VertexId, vertex: Any) -> VertexId | None:
+    """The SKU section a workstation serves, as the environment names it: the section's first
+    workstation, or the workstation itself when it serves a section of its own. None for
+    every vertex that is not a workstation."""
+    if not vertex.role.delivery:
+        return None
+    return v if vertex.section is None else vertex.section
 
 
 def step_line(env: WarehouseMAPDEnv, previous: Mapping[int, VertexId]) -> dict[str, Any]:
