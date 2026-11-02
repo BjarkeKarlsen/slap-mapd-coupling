@@ -26,7 +26,9 @@ from slap_mapd_coupling.training.spec import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-FLEET_8 = ROOT / "configs" / "fleet_8" / "decentralised.yaml"
+# A frozen fleet 8 config, so the expected values of these tests do not move with the training
+# settings (tests/unit/data/fleet_8_before_step12.yaml).
+FLEET_8 = Path(__file__).parent / "data" / "fleet_8_before_step12.yaml"
 SEED = 300_000
 HORIZON = 600
 
