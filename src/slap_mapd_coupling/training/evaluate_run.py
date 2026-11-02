@@ -5,8 +5,10 @@ of checkpoints. This module rebuilds the instance, the storage and the arm from 
 checkpoint is played exactly as it was trained, on any warehouse.
 
 1. Validation. Every saved checkpoint plays the validation seeds of the run's seed split. The
-   one that completes the most tasks on average is chosen, the later one on a tie. The training
-   return is not used, because its shaping term dominates it.
+   checkpoint is chosen by [A60]: among those that keep up on every validation seed, the one
+   with the shortest mean pick service time, or with none keeping up the highest throughput,
+   the later one on a tie. The training return is not used, because its shaping term dominates
+   it, and nor is the number of completed tasks, which follows how many orders arrived.
 2. Test. The chosen checkpoint and the last one play the test seeds under every storage mode
    asked for, F_fix when it is among them. Under the template stock model an adaptive mode
    takes its epoch length, relocation cap and congestion weight from the spec's `storage_rule`
@@ -29,7 +31,7 @@ from __future__ import annotations
 import json
 import statistics
 from pathlib import Path
-from typing import NamedTuple, Sequence
+from typing import Any, NamedTuple, Sequence
 
 # The adaptive rules register themselves on import. Training imports them in every runner
 # (training/config.py), and evaluation under --storage-modes needs them in this process.
@@ -136,6 +138,30 @@ def build_test_study(
     return test_spec, build_study(test_spec)
 
 
+def choose_checkpoint(validation: Sequence[Sequence[Any]]) -> int:
+    """The index of the checkpoint to test, from its validation episodes in the order the
+    checkpoints were saved ([A60]). Among the checkpoints that keep up on every validation seed,
+    the one with the shortest mean pick service time. If none does, the one with the highest
+    mean throughput, and the arm is reported by its throughput. A tie goes to the later
+    checkpoint. The number of completed tasks is not used, since it follows how many orders
+    arrived more than how well they were served."""
+
+    def keeps_up(episodes: Sequence[Any]) -> bool:
+        return all(getattr(m, "keeps_up", False) for m in episodes)
+
+    def service(episodes: Sequence[Any]) -> float:
+        times = [m.mean_service_time for m in episodes if m.mean_service_time is not None]
+        return statistics.mean(times) if times else float("inf")
+
+    passing = [i for i, episodes in enumerate(validation) if keeps_up(episodes)]
+    if passing:
+        return min(passing, key=lambda i: (service(validation[i]), -i))
+    return max(
+        range(len(validation)),
+        key=lambda i: (statistics.mean(m.throughput for m in validation[i]), i),
+    )
+
+
 def evaluate_run(
     run_dir: Path,
     out_dir: Path,
@@ -145,7 +171,8 @@ def evaluate_run(
     horizon: int | None = None,
     warmup: int | None = None,
 ) -> RunEvaluation:
-    """Chooses the checkpoint of the run in `run_dir` on the validation seeds and plays it and
+    """Chooses the checkpoint of the run in `run_dir` on the validation seeds
+    (`choose_checkpoint`, [A60]) and plays it and
     the last checkpoint on the test seeds under each of `storage_modes`, by default only the
     storage rule the run trained with. Writes `validation.jsonl`, `test.jsonl` and `summary.md`
     to `out_dir`, replacing earlier ones. The two row files get one row per episode as it
@@ -176,17 +203,17 @@ def evaluate_run(
         path.write_text("", encoding="utf-8")
 
     validation_rows: list[dict] = []
-    scores: list[tuple[float, int, Path]] = []
-    for index, checkpoint in enumerate(checkpoints):
-        completed = []
+    played_validation: list[list] = []
+    for checkpoint in checkpoints:
+        episodes = []
         for seed in seeds.validation:
             metrics = play(study, spec, checkpoint, seed)
-            completed.append(metrics.num_completed_tasks)
+            episodes.append(metrics)
             row = {"checkpoint": checkpoint.name, **metrics.model_dump(mode="json")}
             validation_rows.append(row)
             _append(validation_path, row)
-        scores.append((statistics.mean(completed), index, checkpoint))
-    chosen = max(scores, key=lambda score: (score[0], score[1]))[2]
+        played_validation.append(episodes)
+    chosen = checkpoints[choose_checkpoint(played_validation)]
     last = checkpoints[-1]
 
     test_rows: list[dict] = []

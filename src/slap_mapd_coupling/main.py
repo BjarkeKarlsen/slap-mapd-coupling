@@ -340,9 +340,9 @@ def resume(output):
 )
 def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
-    validation seeds under the rule the run trained with, the one with the most completed tasks
-    is chosen, and it and the last checkpoint play the test seeds under every storage rule
-    given. summary.md compares each adaptive rule with fixed storage."""
+    validation seeds under the rule the run trained with. Among those that keep up on every
+    seed the one with the shortest pick service time is chosen ([A60]), and it and the last
+    checkpoint play the test seeds under every storage rule given. summary.md compares each adaptive rule with fixed storage."""
     from pathlib import Path
 
     from slap_mapd_coupling.training.evaluate_run import evaluate_run

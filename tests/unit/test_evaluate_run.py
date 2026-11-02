@@ -77,7 +77,7 @@ def test_checkpoints_are_in_the_order_they_were_saved(tmp_path):
     assert checkpoints_of(run)[-1].name == "checkpoint_000011"
 
 
-def test_the_checkpoint_with_most_completed_tasks_on_validation_is_chosen(tmp_path, fake_episodes):
+def test_with_no_checkpoint_keeping_up_the_highest_throughput_is_chosen(tmp_path, fake_episodes):
     played = fake_episodes([3, 9, 5])
     result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out")
     assert (result.chosen.name, result.last.name) == ("checkpoint_000001", "checkpoint_000002")
@@ -96,6 +96,35 @@ def test_a_tie_goes_to_the_later_checkpoint(tmp_path, fake_episodes):
     fake_episodes([7, 7, 2])
     result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out")
     assert result.chosen.name == "checkpoint_000001"
+
+
+def _validation(keeps_up, service, throughput=0.1):
+    return [SimpleNamespace(keeps_up=keeps_up, mean_service_time=service, throughput=throughput)
+            for _ in range(2)]
+
+
+def test_the_shortest_service_time_among_those_that_keep_up_is_chosen():
+    """[A60]: a checkpoint that does not keep up is passed over even with a shorter service
+    time, and the number of completed tasks plays no part."""
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    validation = [_validation(True, 80.0), _validation(False, 50.0, 0.9),
+                  _validation(True, 60.0), _validation(True, 70.0)]
+    assert choose_checkpoint(validation) == 2
+
+
+def test_a_service_time_tie_goes_to_the_later_checkpoint():
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    assert choose_checkpoint([_validation(True, 60.0), _validation(True, 60.0)]) == 1
+
+
+def test_a_checkpoint_keeps_up_only_if_every_validation_seed_does():
+    from slap_mapd_coupling.training.evaluate_run import choose_checkpoint
+
+    mixed = _validation(True, 40.0)
+    mixed[1].keeps_up = False
+    assert choose_checkpoint([mixed, _validation(True, 90.0)]) == 1
 
 
 def _real_metrics(seed, storage_mode, service_time):
