@@ -111,16 +111,28 @@ def play(
 
 
 def build_test_study(
-    spec: TrainingSpec, study: Study, arrival_rate: float | None
+    spec: TrainingSpec,
+    study: Study,
+    arrival_rate: float | None,
+    horizon: int | None = None,
+    warmup: int | None = None,
 ) -> tuple[TrainingSpec, Study]:
-    """The spec and the study the test episodes play: `spec` and `study` themselves at the
-    training load, or both rebuilt at `arrival_rate`. The starting stock of
-    "demand_sized_blocks" is sized by the arrival rate, so the test episodes start from stock
-    sized at the load they play. Every other part of the study, and the stock of every other
-    placement, does not depend on the arrival rate, so it is the training study's."""
-    if arrival_rate is None:
+    """The spec and the study the test episodes play: `spec` and `study` themselves, or the
+    spec with the `arrival_rate`, `horizon` and `warmup` given. The starting stock of
+    "demand_sized_blocks" is sized by the arrival rate, so at another load the study is rebuilt
+    and the test episodes start from stock sized at the load they play. The episode length and
+    the warm-up change no part of the study, so with those alone it is the training study.
+    Raises ValueError when the warm-up leaves no step to measure."""
+    if arrival_rate is None and horizon is None and warmup is None:
         return spec, study
-    test_spec = override_spec(spec, arrival_rate=arrival_rate)
+    test_spec = override_spec(spec, arrival_rate=arrival_rate, horizon=horizon, warmup=warmup)
+    if test_spec.warmup >= test_spec.horizon:
+        raise ValueError(
+            f"The warm-up of {test_spec.warmup} steps leaves nothing of an episode of "
+            f"{test_spec.horizon} steps to measure."
+        )
+    if arrival_rate is None:
+        return test_spec, study
     return test_spec, build_study(test_spec)
 
 
@@ -130,6 +142,8 @@ def evaluate_run(
     storage_modes: Sequence[StorageMode] | None = None,
     arrival_rate: float | None = None,
     trace_seeds: int = 0,
+    horizon: int | None = None,
+    warmup: int | None = None,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds and plays it and
     the last checkpoint on the test seeds under each of `storage_modes`, by default only the
@@ -140,7 +154,9 @@ def evaluate_run(
     `arrival_rate` plays the test seeds at another load than the run trained at, for example a
     load where the fleet keeps up, so service time counts. The checkpoint is still chosen at
     the training load, so the same checkpoint is measured at every load. The test episodes
-    start from the stock of that load (`build_test_study`).
+    start from the stock of that load (`build_test_study`). `horizon` and `warmup` play the test
+    seeds for another episode length and warm-up, for example the 10000 steps with a 5000-step
+    warm-up of the Token Passing runs, while training and the choice keep the run's own.
 
     The first `trace_seeds` test seeds of each checkpoint and rule also write a per-step trace
     to `out_dir/traces/`, for the viewer (viz/pygame_renderer.py)."""
@@ -152,7 +168,7 @@ def evaluate_run(
     for mode in modes:
         check_storage_rule(spec, mode)
     study = build_study(spec)
-    test_spec, test_study = build_test_study(spec, study, arrival_rate)
+    test_spec, test_study = build_test_study(spec, study, arrival_rate, horizon, warmup)
     seeds = split_seeds(study.seed_split)
     out_dir.mkdir(parents=True, exist_ok=True)
     validation_path, test_path = out_dir / "validation.jsonl", out_dir / "test.jsonl"
