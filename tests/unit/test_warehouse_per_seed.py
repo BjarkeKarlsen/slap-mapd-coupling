@@ -15,7 +15,11 @@ import slap_mapd_coupling.training.env as env_module
 from slap_mapd_coupling.environment.action_masking import masked_observation_space
 from slap_mapd_coupling.models.local_subgraph_encoding import encoded_observation_space
 from slap_mapd_coupling.models.rl_module import GNNActionMaskingRLModule
-from slap_mapd_coupling.models.window_tables import VERTEX_KEY_STRIDE, compact_rllib_dict
+from slap_mapd_coupling.models.window_tables import (
+    VERTEX_KEY_STRIDE,
+    StoredWindowLookup,
+    compact_rllib_dict,
+)
 from slap_mapd_coupling.training import policy as policy_module
 from slap_mapd_coupling.training.config import split_seeds
 from slap_mapd_coupling.training.env import WarehouseMAPDMultiAgentEnv
@@ -175,3 +179,16 @@ def test_without_a_warehouse_per_seed_nothing_changes(tmp_path):
     data = {**load_spec(STEP12).model_dump(), "warehouse_per_seed": False}
     plain = build_study(TrainingSpec.model_validate(data))
     assert plain.pool is None
+
+
+def test_a_minibatch_without_context_rows_gets_empty_views(study):
+    _, built = study
+    seed = split_seeds(built.seed_split).train[0]
+    lookup = StoredWindowLookup(built.pool, built.arm.pooling, communication=True)
+    nodes = built.pool.manifest()["max_local_nodes"]
+    own = torch.tensor([seed * VERTEX_KEY_STRIDE, seed * VERTEX_KEY_STRIDE + 1])
+    lookup.views(own, torch.zeros(2, nodes), torch.zeros(2, nodes, 2))
+    empty = torch.zeros(0, dtype=torch.long)
+    views = lookup.views(empty, torch.zeros(0, nodes), torch.zeros(0, nodes, 2))
+    assert views["node_features"].shape[:2] == (0, nodes)
+    assert views["own_index"].shape == (0,)

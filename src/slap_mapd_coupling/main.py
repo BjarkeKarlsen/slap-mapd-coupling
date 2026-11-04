@@ -302,7 +302,8 @@ def resume(output):
     "--storage-modes",
     type=click.Choice(STORAGE_RULES),
     multiple=True,
-    help="Storage rules the test seeds are played under, e.g. --storage-modes fixed demand. "
+    help="Storage rules the test seeds are played under, repeated per rule, e.g. "
+    "--storage-modes fixed --storage-modes demand. "
     "Default: the rule the run trained with. An adaptive rule takes its epoch length, "
     "relocation cap and congestion weight from the storage_rule section of the run's spec. "
     "With an arrival section in the spec every rule takes the epoch length, the arrival "

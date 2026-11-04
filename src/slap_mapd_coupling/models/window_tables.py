@@ -400,7 +400,11 @@ class StoredWindowLookup(WindowLookup):
     def _select(self, vertex: torch.Tensor) -> tuple[Mapping[str, torch.Tensor], torch.Tensor]:
         vertex = vertex.long()
         device = vertex.device
-        seed_of = torch.div(vertex, VERTEX_KEY_STRIDE, rounding_mode="floor")
+        if vertex.numel() == 0 and self._joined:
+            # No context rows, when a minibatch holds all its senders. Any tables give the
+            # empty views, so take the ones just read for the minibatch itself.
+            return next(reversed(self._joined.values()))[0], vertex
+        seed_of =torch.div(vertex, VERTEX_KEY_STRIDE, rounding_mode="floor")
         seeds = tuple(int(seed) for seed in torch.unique(seed_of).tolist())
         key = (seeds, str(device))
         if key not in self._joined:
