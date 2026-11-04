@@ -152,6 +152,13 @@ def simulate(
     "runs out of GPU memory. Changes no result.",
 )
 @click.option(
+    "--learner-cpus",
+    type=click.IntRange(min=1),
+    default=1,
+    help="CPUs of the learner, the cores its update uses without a GPU (default 1). "
+    "Changes no result. A resumed run keeps the value it started with.",
+)
+@click.option(
     "--checkpoint-every",
     type=int,
     default=None,
@@ -182,6 +189,7 @@ def train(
     gpu,
     batch_on_cpu,
     value_chunk_rows,
+    learner_cpus,
     checkpoint_every,
     keep_checkpoints,
     output,
@@ -219,6 +227,7 @@ def train(
             use_gpu=gpu,
             batch_on_cpu=batch_on_cpu,
             value_chunk_rows=value_chunk_rows,
+            learner_cpus=learner_cpus,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error

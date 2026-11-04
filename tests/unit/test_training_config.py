@@ -495,3 +495,27 @@ def test_every_training_env_draws_the_same_seeds_in_cycle_order_whatever_rllib_p
         env.reset(seed=rllib_seed)
         seen.append(env.last_seed)
     assert seen == [100, 101, 102, 100]
+
+
+@pytest.mark.parametrize("learner_cpus", [1, 5])
+def test_the_learner_cpus_set_the_main_process_and_leave_the_batch(learner_cpus):
+    graph = _graph()
+    skus, capacities, counts = _instance(graph)
+    config = _config()
+    ppo_config = build_ppo_config(
+        graph,
+        skus,
+        counts,
+        capacities,
+        config,
+        LocalSubgraphEncodingConfig(max_local_nodes=20, max_messages=2),
+        GNNEncoderConfig(num_rounds=1, hidden_width=8, communication=False, pooling="none"),
+        PolicyValueHeadConfig(hidden_width=8),
+        _ppo_hp(),
+        _seed_split(training_seed=42, train_seed_count=3),
+        num_env_runners=3,
+        learner_cpus=learner_cpus,
+    )
+    assert ppo_config.num_cpus_for_main_process == learner_cpus
+    # The batch still follows the runners alone, so the update is the same.
+    assert ppo_config.train_batch_size_per_learner == 3 * config.horizon
