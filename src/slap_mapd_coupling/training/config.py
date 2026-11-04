@@ -195,6 +195,7 @@ def build_ppo_config(
     use_gpu: bool = False,
     batch_on_cpu: bool = False,
     value_chunk_rows: Optional[int] = None,
+    learner_cpus: int = 1,
 ) -> PPOConfig:
     """A PPOConfig for the learned controller `experiment_config.controller`.
     It registers the adapter of training/env.py, maps every robot to
@@ -213,8 +214,12 @@ def build_ppo_config(
     study parameters, so they have defaults. So are `batch_on_cpu`, which keeps
     the train batch in host memory and moves one minibatch at a time to the GPU
     (training/learner.py), and `value_chunk_rows`, the rows per encoder pass of
-    the value pass (environment/action_masking.py, 512 when None). Neither
-    changes a result.
+    the value pass (environment/action_masking.py, 512 when None), and
+    `learner_cpus`, the CPUs of the main process, where the local learner runs.
+    Ray limits PyTorch's threads in a process to the CPUs it was given, so on a
+    machine without a GPU the learner's update uses `learner_cpus` cores. One,
+    RLlib's default, unless set. None of them changes the batch or the update,
+    so none changes a result beyond the order floating point sums are taken in.
 
     With `pool` (training/warehouses.py) every episode plays the warehouse of its seed. The
     graph, storage and zones given are then those of the first training seed, the adapter
@@ -341,6 +346,7 @@ def build_ppo_config(
             sample_timeout_s=None,
         )
         .debugging(seed=seed_split.training_seed)
+        .resources(num_cpus_for_main_process=learner_cpus)
         # The learner adds the senders' rows to each minibatch and can keep the batch in
         # host memory (training/learner.py).
         .learners(

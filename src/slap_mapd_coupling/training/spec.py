@@ -1078,6 +1078,7 @@ def build_study_ppo_config(
     use_gpu: bool = False,
     batch_on_cpu: bool = False,
     value_chunk_rows: int | None = None,
+    learner_cpus: int = 1,
 ) -> PPOConfig:
     """The PPOConfig of a run, which `trainer.train` takes."""
     return build_ppo_config(
@@ -1097,4 +1098,5 @@ def build_study_ppo_config(
         use_gpu=use_gpu,
         batch_on_cpu=batch_on_cpu,
         value_chunk_rows=value_chunk_rows,
+        learner_cpus=learner_cpus,
     )
