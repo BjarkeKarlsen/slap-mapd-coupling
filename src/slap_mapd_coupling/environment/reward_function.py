@@ -26,9 +26,15 @@ Every move pays c_move, whether the agent serves a task or not. A move is a chan
 vertex between t and t+1, so a move that conflict resolution turned into a wait is not one.
 
 Free agent: the current target defines q_i(t) only for
-an agent serving a task. Here a free agent's target is its own vertex, so
-it gets no shaping signal while idle. This is an open thesis decision,
-see issue #102.
+an agent serving a task. Here a free agent's target is its own vertex, or its
+parking leaf when it was sent to one (D26), so it gets no shaping signal while
+idle and in nobody's way.
+
+[A79]: Phi_i(t+1) is the potential the robot sees at t+1, read after stage 1 and 2
+of t+1 (new tasks) and the parking update. So the task and the parking leaf of the
+two potentials are passed apart, and a new target is charged once, on the step it
+is handed out. The environment computes the reward after both
+(environment/multi_agent_env.py::step).
 """
 
 from __future__ import annotations
@@ -98,13 +104,15 @@ def reward_terms(
     move_cost: float,
     wait_cost: float,
     congestion_reward_weight: float,
-    parking: VertexId | None = None,
+    parking_now: VertexId | None = None,
+    parking_next: VertexId | None = None,
 ) -> RewardTerms:
     """The six terms of R_i(t), the reward, separately. See `reward` for the
-    arguments. `parking` is the idle robot's parking leaf over the step (D26), the target of
-    both potentials when it has no task."""
-    phi_now = potential(graph, location_now, task_now, parking)
-    phi_next = potential(graph, location_next, task_next, parking)
+    arguments. `parking_now` and `parking_next` are the idle robot's parking leaf (D26) at t
+    and at t+1, read after the parking update of t+1 ([A79]). Each is the target of its
+    potential when the robot has no task at that time."""
+    phi_now = potential(graph, location_now, task_now, parking_now)
+    phi_next = potential(graph, location_next, task_next, parking_next)
     return RewardTerms(
         shaping=discount * phi_next - phi_now,
         delivery=deliver_reward * completed_task,
@@ -136,9 +144,10 @@ def reward(
 ) -> float:
     """R_i(t), the reward: the sum of the terms of `reward_terms`.
 
-    `task_now`/`task_next` are whichever task the agent is serving just
-    before / just after this timestep's transition -- None for a free
-    agent. `moved` is 1[a_i moves at t] and `move_cost` is c_move. `stood_still` is
+    `task_now`/`task_next` are whichever task the agent is serving at t and
+    at t+1 -- None for a free agent. `task_next` is read after the assignment
+    of t+1, so a task handed out then is already the agent's ([A79]).
+    `moved` is 1[a_i moves at t] and `move_cost` is c_move. `stood_still` is
     omega_i(t) and `wait_cost` is c_wait. `congestion` is
     delta_i(t), the congestion feature, computed upstream and only weighted here.
     """

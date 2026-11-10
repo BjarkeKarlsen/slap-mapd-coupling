@@ -136,8 +136,13 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
     The six `return_*` values are the terms of the reward summed over the robots and the
     steps of the episode (environment/reward_function.py::RewardTerms, each signed). They add
     up to the episode return RLlib reports, also when the credit is a group mean, which
-    only moves reward between robots. `override_rate` is the share of robot-steps in which a
-    robot was overridden by conflict resolution. `episode_max_agent_override_share` is the
+    only moves reward between robots. `return_unshaped` is that return without the shaping
+    term, a breakdown of what the reward pays for. The shaping term pays (1 - gamma) times the
+    distance to the target on every step, so its plain sum over an episode grows while robots
+    stand far from their targets. Neither return measures how well the robots work. The
+    unshaped one also rises when robots swap waits for cheaper moves that lead nowhere, so the
+    training curve is `episode_tasks_completed`. `override_rate` is the share of robot-steps
+    in which a robot was overridden by conflict resolution. `episode_max_agent_override_share` is the
     share of all the episode's overrides that fell on the single most overridden robot, and
     is 0 when there were none. A planner run has no reward, so all of these are 0 for it.
     """
@@ -145,6 +150,14 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
     finish_times = [task.finish_time for task in env.tasks if task.finish_time is not None]
     overrides = sum(log.overrides_by_agent.values())
     agent_steps = env.config.num_agents * env.t
+    # Added in the order of RewardTerms.total, without the shaping term.
+    unshaped = (
+        sum(log.return_delivery_by_agent.values())
+        + sum(log.return_override_by_agent.values())
+        + sum(log.return_move_by_agent.values())
+        + sum(log.return_wait_by_agent.values())
+        + sum(log.return_congestion_by_agent.values())
+    )
     return {
         "return_shaping": sum(log.return_shaping_by_agent.values()),
         "return_deliver": sum(log.return_delivery_by_agent.values()),
@@ -152,6 +165,7 @@ def episode_metrics(env: WarehouseMAPDEnv) -> dict[str, float]:
         "return_move": sum(log.return_move_by_agent.values()),
         "return_wait": sum(log.return_wait_by_agent.values()),
         "return_congestion": sum(log.return_congestion_by_agent.values()),
+        "return_unshaped": unshaped,
         "override_rate": overrides / agent_steps if agent_steps else 0.0,
         "episode_tasks_completed": float(len(finish_times)),
         "episode_tasks_released": float(len(env.tasks)),
@@ -191,6 +205,10 @@ class StandingStillCounter:
 # when the score is a top-level key, and RLlib nests the return under "env_runners", so
 # on_train_result copies it here (see training/trainer.py::CheckpointSettings).
 EPISODE_RETURN_KEY = "episode_return_mean"
+# The mean number of tasks completed per episode (`episode_metrics`), copied to the top level the
+# same way. It is the default checkpoint score, since either return can rise while fewer tasks
+# are done.
+TASKS_COMPLETED_KEY = "episode_tasks_completed_mean"
 
 # Warehouse timesteps of the finished episodes, summed over the runners and the run. Neither
 # RLlib step counter gives it, since both count sub-steps or observations, so this is what
@@ -208,8 +226,8 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     over the environments (see `progress_metrics`).
 
     The exact per-episode totals are the `episode_*` keys, together with `return_shaping`,
-    `return_deliver`, `return_override`, `return_move`, `return_wait`, `return_congestion` and
-    `override_rate`, logged when an episode ends (see `episode_metrics`).
+    `return_deliver`, `return_override`, `return_move`, `return_wait`, `return_congestion`,
+    `return_unshaped` and `override_rate`, logged when an episode ends (see `episode_metrics`).
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -229,8 +247,9 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
     def on_train_result(
         self, *, algorithm=None, metrics_logger=None, result: dict, **kwargs: Any
     ) -> None:
-        """Copies the mean episode return to the top level of the result, which is where Tune
-        looks for the score of a checkpoint. An iteration without a finished episode has none.
+        """Copies the mean episode return, and the mean number of tasks completed per episode,
+        to the top level of the result, which is where Tune looks for the score of a checkpoint.
+        An iteration without a finished episode has neither.
 
         Also stops the run if the iteration has fewer episodes than runners. That happens when
         RLlib's sample timeout drops a slow runner's episode, and the arms would then train on
@@ -248,6 +267,9 @@ class TrainingProgressCallbacks(CorrectnessInvariantCallbacks):
         value = result.get("env_runners", {}).get("episode_return_mean")
         if _is_number(value):
             result[EPISODE_RETURN_KEY] = float(value)
+        completed = result.get("env_runners", {}).get("episode_tasks_completed")
+        if _is_number(completed):
+            result[TASKS_COMPLETED_KEY] = float(completed)
         timesteps = result.get("env_runners", {}).get(TIMESTEPS_KEY)
         if _is_number(timesteps):
             result[TIMESTEPS_KEY] = int(timesteps)
@@ -291,6 +313,7 @@ _EPISODE_KEYS = (
     "return_move",
     "return_wait",
     "return_congestion",
+    "return_unshaped",
     "override_rate",
     "episode_tasks_completed",
     "episode_tasks_released",
@@ -341,16 +364,15 @@ def format_iteration(i: int, n: int, result: Mapping[str, Any]) -> str:
     """One line per training iteration, in plain numbers (no exponents).
 
     The episode return mean comes first because it is the number PPO
-    reports. An iteration in which no episode ended has none, and then the line
-    shows 0. A real return of 0 prints as 0.0, so the two can still be told apart.
+    reports, then the return without the shaping term, which says what the reward paid for.
+    An iteration in which no episode ended has neither, and then the line shows 0. A real
+    return of 0 prints as 0.0, so the two can still be told apart.
     """
     runners = result.get("env_runners", {})
-    episode_return = runners.get("episode_return_mean")
-    parts = [
-        f"episode_return_mean={episode_return:.1f}"
-        if _is_number(episode_return)
-        else "episode_return_mean=0"
-    ]
+    parts = []
+    for key in ("episode_return_mean", "return_unshaped"):
+        value = runners.get(key)
+        parts.append(f"{key}={value:.1f}" if _is_number(value) else f"{key}=0")
     for key in _COUNT_KEYS:
         value = runners.get(key)
         parts.append(f"{key}={value:.0f}" if _is_number(value) else f"{key}=n/a")

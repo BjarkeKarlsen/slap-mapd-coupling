@@ -137,6 +137,6 @@ def test_the_parking_leaf_is_the_target_of_the_shaping(study):
         graph, location_now=here, task_now=None, location_next=leaf, task_next=None,
         completed_task=False, overridden=False, moved=True, stood_still=False, congestion=0.0,
         discount=1.0, deliver_reward=0.0, override_penalty=0.0, move_cost=0.0, wait_cost=0.0,
-        congestion_reward_weight=0.0, parking=leaf,
+        congestion_reward_weight=0.0, parking_now=leaf, parking_next=leaf,
     )  # fmt: skip
     assert terms.shaping == pytest.approx(graph.distance(here, leaf))

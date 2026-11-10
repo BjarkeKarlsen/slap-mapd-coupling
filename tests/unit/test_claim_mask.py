@@ -1,6 +1,7 @@
 """Unit tests for slap_mapd_coupling.environment.spaces.claim_mask."""
 
 import random
+from functools import lru_cache
 
 import pytest
 
@@ -13,7 +14,7 @@ from slap_mapd_coupling.environment.spaces import (
     max_out_degree,
 )
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
-from slap_mapd_coupling.resolution.conflict_resolution import resolve_conflicts
+from slap_mapd_coupling.resolution.conflict_resolution import move_blocked, resolve_conflicts
 
 NEG_INF = float("-inf")
 
@@ -38,7 +39,7 @@ def test_nothing_chosen_and_no_neighbours_occupied_leaves_every_slot_open():
 
 def test_vertex_chosen_by_an_earlier_agent_is_blocked():
     graph = _graph()
-    mask = claim_mask(graph, 2, {1: 1, 2: 2}, {1: 3})
+    mask = claim_mask(graph, 2, {1: 1, 2: 2}, {1: 1})  # agent 1 waits
     assert mask[_slot(graph, 2, 3)] == 0.0  # 3 is empty and unclaimed
     mask = claim_mask(graph, 2, {1: 1, 2: 2}, {1: 4})
     assert mask[_slot(graph, 2, 4)] == NEG_INF
@@ -53,9 +54,9 @@ def test_vertex_holding_an_agent_that_has_not_chosen_is_blocked():
 
 
 def test_swap_with_an_earlier_agent_is_blocked():
-    graph = _graph()
-    mask = claim_mask(graph, 1, {1: 1, 2: 2}, {2: 1})
-    assert mask[_slot(graph, 1, 2)] == NEG_INF
+    # Through claim_mask an earlier agent can never take the vertex of one that has not
+    # chosen, so claim_mask raises before the swap rule is reached. Test the rule itself.
+    assert move_blocked(1, 1, 2, {1: 1, 2: 2}, {2: 1})
 
 
 def test_following_an_earlier_agent_that_leaves_is_allowed():
@@ -89,12 +90,15 @@ def test_an_agent_blocked_from_waiting_raises():
         claim_mask(graph, 2, {1: 1, 2: 2}, {1: 2})
 
 
+@lru_cache(maxsize=None)
 def _random_instance(seed: int) -> WarehouseGraph:
+    # One-way fraction 0.2, since the generator now rejects most topologies of this size at
+    # 0.3 (seeds 0, 2 and 3 raise InstanceGenerationError). Cached, the 200 cases share 5 graphs.
     params = GeneratorParams(
         max_num_aisles=6,
         max_aisle_length=6,
         max_num_cross_aisles=5,
-        one_way_fraction=0.3,
+        one_way_fraction=0.2,
         wait_cost=0.5,
         num_storage_vertices=6,
         num_delivery_vertices=2,

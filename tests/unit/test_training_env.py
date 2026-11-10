@@ -8,7 +8,7 @@ import pytest
 import slap_mapd_coupling.storage.fixed  # noqa: F401 -- registers "fixed"
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.storage_state import SkuType
-from slap_mapd_coupling.environment.observation import local_subgraph
+from slap_mapd_coupling.environment.observation import DISTANCE_SCALE, local_subgraph
 from slap_mapd_coupling.environment.spaces import action_for_slot, claim_mask, legality_mask
 from slap_mapd_coupling.environment.zones import halo, zone_of, zones_by_aisle
 from slap_mapd_coupling.instances.generator import (
@@ -323,12 +323,16 @@ def test_step_respects_action_mask_and_truncates_at_horizon():
     assert truncated["__all__"] is True
 
 
-ETA_COLUMN = 4  # the distance label in a node feature row (models/gnn_encoder.py)
+# The distance column of a node feature row [A82] (models/gnn_encoder.py). The eta column
+# holds the label relative to the robot's own vertex, which is 0 there, so the target shows
+# in the distance column.
+DISTANCE_COLUMN = 8
 
 
 def _own_eta(env: WarehouseMAPDMultiAgentEnv, obs: dict, aid: str) -> float:
+    """eta_i(l_i(t),t), the robot's own distance to its target, read back from its view."""
     view = _padded(env, obs[aid])
-    return float(view["node_features"][int(view["own_index"])][ETA_COLUMN])
+    return float(view["node_features"][int(view["own_index"])][DISTANCE_COLUMN]) * DISTANCE_SCALE
 
 
 def test_the_reset_observation_shows_the_target_of_a_robot_assigned_at_t0():
@@ -491,7 +495,8 @@ def test_the_logged_reward_terms_add_up_to_the_rewards_the_env_returned(controll
         wait_cost=0.2,
         move_cost=0.1,
     )
-    rollout = _random_rollout(env, 60, seed=3)
+    # A seed whose random walk completes a task in every arm, so the delivery term is not empty
+    rollout = _random_rollout(env, 60, seed=0)
     log = env.core.log
     returned = {aid: sum(rewards[aid] for *_, rewards in rollout) for aid in env.agents}
     if controller != "centralised":  # credited with its own reward
@@ -643,8 +648,9 @@ def _first_legal_move_trajectory() -> str:
 
 CLAIM_COLUMN = 6  # the claimed flag in a node feature row (models/gnn_encoder.py)
 
-# Recorded on main before the adapter became turn-based.
-_DECENTRALISED_DIGEST = "1f50d1931a5b604dd6b02b4923910236d70413f16e6a15714d2494bb3b73fea3"
+# Recorded on main before the adapter became turn-based, then re-recorded for the reward
+# computed after the assignment of t+1 [A79]. The locations and overrides are unchanged.
+_DECENTRALISED_DIGEST = "1e0da75f6ed810de08f5d2741033eb0d2ccfc59ecdebb236ac8a502934bdae54"
 
 
 def _random_slot(rng):

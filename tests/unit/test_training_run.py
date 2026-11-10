@@ -145,6 +145,23 @@ def test_load_progress_turns_nulls_into_nan(tmp_path: Path):
     assert list(log["tasks_completed"]) == [1.5, 3.0, 4.5]
 
 
+def test_an_old_log_gets_the_return_without_shaping_from_its_terms(tmp_path: Path):
+    rows = _full_rows(3)
+    for row in rows:
+        row["return_move"], row["return_wait"] = -0.25, -0.75
+    path = tmp_path / "x_training_progress.jsonl"
+    _write_progress(path, rows)
+
+    log = load_progress(path)
+
+    expected = [row["return_deliver"] + row["return_override"] - 1.0 + row["return_congestion"]
+                for row in rows]  # fmt: skip
+    assert list(log["return_unshaped"]) == pytest.approx(expected)
+    # A log missing a term is left without it, rather than given a wrong sum.
+    _write_progress(path, _full_rows(3))
+    assert "return_unshaped" not in load_progress(path)
+
+
 def test_load_progress_tolerates_missing_keys(tmp_path: Path):
     path = tmp_path / "x_training_progress.jsonl"
     _write_progress(

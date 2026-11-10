@@ -7,7 +7,11 @@ from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
 from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
-from slap_mapd_coupling.environment.observation import build_observation, local_subgraph
+from slap_mapd_coupling.environment.observation import (
+    DISTANCE_SCALE,
+    build_observation,
+    local_subgraph,
+)
 from slap_mapd_coupling.environment.spaces import legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, SENDER_KEYS
 from slap_mapd_coupling.models.local_subgraph_encoding import (
@@ -103,6 +107,7 @@ def test_encode_observation_own_index_points_at_agent_vertex():
             float(own_features.occupied),
             float(own_features.claimed),
             float(own_features.receiving),
+            own_features.distance,
         ],
     )
     assert encoded.node_mask[encoded.own_index] == 1.0
@@ -560,9 +565,20 @@ def test_the_padded_arrays_follow_the_window(name):
         assert item.node_mask.tolist() == [1.0] * n + [0.0] * (8 - n)
         # a transit vertex, eta is the distance to the robot's own vertex (no task) capped
         # at d_obs = 1 (the relative distance label), occupied marks the other robot, and
-        # nothing is claimed
+        # nothing is claimed. The distance column [A82] is the uncapped distance to the
+        # robot's own vertex over DISTANCE_SCALE.
         expected = [
-            [0.0, 0.0, 0.0, 1.0, min(1, abs(v - location)), float(v == other), 0.0, 0.0]
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                min(1, abs(v - location)),
+                float(v == other),
+                0.0,
+                0.0,
+                np.float32(abs(v - location) / DISTANCE_SCALE),
+            ]
             for v in window
         ]
         np.testing.assert_array_equal(item.node_features[:n], expected)
@@ -643,22 +659,26 @@ def test_no_windows_gives_the_same_arrays_as_before_windows_existed():
     # robot 1 at 2 sees {0, ..., 4} with eta to its pickup at 5 minus its own 3, and robot 2
     # on vertex 4. Robot 2 at 4 has no task, so eta is the distance to its own vertex.
     first, second = encoded[1], encoded[2]
+    # The last column is the distance column [A82], the uncapped distance to the target
+    # over DISTANCE_SCALE (robot 1 to its pickup at 5, robot 2 to its own vertex 4).
     expected_first = [
-        [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, -2.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 5 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 4 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 2 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, -2.0, 1.0, 0.0, 0.0, 1 / DISTANCE_SCALE],
+        [0.0] * 9,
     ]
     expected_second = [
-        [0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 2 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1 / DISTANCE_SCALE],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1 / DISTANCE_SCALE],
+        [0.0] * 9,
+        [0.0] * 9,
     ]
+    expected_first = np.asarray(expected_first, dtype=np.float32)
+    expected_second = np.asarray(expected_second, dtype=np.float32)
     np.testing.assert_array_equal(first.node_features, expected_first)
     assert first.node_mask.tolist() == [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
     assert first.edge_index.tolist() == [[0, 1], [1, 2], [2, 3], [3, 4]] + [[0, 0]] * 8

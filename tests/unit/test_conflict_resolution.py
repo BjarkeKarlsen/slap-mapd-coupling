@@ -112,11 +112,9 @@ def test_follow_move_into_already_vacated_vertex_succeeds():
     assert is_collision_free(before, result.fleet)
 
 
-def test_move_into_not_yet_processed_agents_vertex_is_blocked():
-    # Agent 1 wants to move onto agent 2's current vertex, but agent 2
-    # (lower priority) hasn't been processed yet -- unknown whether it
-    # will vacate, so the move is blocked (agent 1 waits) even though
-    # agent 2's own proposal happens to move it elsewhere.
+def test_a_robot_follows_a_later_robot_that_leaves():
+    # [A81]: agent 1 comes first in the order and wants agent 2's vertex. Agent 2 moves on, so
+    # agent 2 is handled first and agent 1 follows it in the same step, with no override.
     vertices = {i: Vertex(id=i) for i in (1, 2, 3)}
     edges = (Edge(source=1, target=2, cost=1.0), Edge(source=2, target=3, cost=1.0))
     graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
@@ -124,9 +122,102 @@ def test_move_into_not_yet_processed_agents_vertex_is_blocked():
     proposed = {1: _move(2), 2: _move(3)}
 
     result = resolve_conflicts(graph, before, proposed, priority=(1, 2))
-    assert result.fleet.locations() == {1: 1, 2: 3}
-    assert result.overridden == frozenset({1})
+    assert result.fleet.locations() == {1: 2, 2: 3}
+    assert result.overridden == frozenset()
     assert is_collision_free(before, result.fleet)
+
+
+def test_a_whole_line_moves_up_together():
+    vertices = {i: Vertex(id=i) for i in range(1, 6)}
+    edges = tuple(Edge(source=i, target=i + 1, cost=1.0) for i in range(1, 5))
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    before = _fleet({1: 1, 2: 2, 3: 3, 4: 4})
+    proposed = {aid: _move(aid + 1) for aid in (1, 2, 3, 4)}
+
+    result = resolve_conflicts(graph, before, proposed, priority=(1, 2, 3, 4))
+    assert result.fleet.locations() == {1: 2, 2: 3, 3: 4, 4: 5}
+    assert result.overridden == frozenset()
+
+
+def test_a_robot_behind_a_robot_that_is_stopped_waits():
+    # Agent 2 is stopped by agent 3, which takes vertex 9 first, so agent 1 behind it waits too.
+    vertices = {i: Vertex(id=i) for i in (1, 2, 3, 9)}
+    edges = (
+        Edge(source=1, target=2, cost=1.0),
+        Edge(source=2, target=9, cost=1.0),
+        Edge(source=3, target=9, cost=1.0),
+    )
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    before = _fleet({1: 1, 2: 2, 3: 3})
+    proposed = {1: _move(2), 2: _move(9), 3: _move(9)}
+
+    result = resolve_conflicts(graph, before, proposed, priority=(1, 3, 2))
+    assert result.fleet.locations() == {1: 1, 2: 2, 3: 9}
+    assert result.overridden == frozenset({1, 2})
+    assert is_collision_free(before, result.fleet)
+
+
+def test_the_priority_order_decides_who_takes_a_vertex_that_is_left():
+    # Agents 1 and 3 both want the vertex agent 2 leaves. Both wait for agent 2, and then agent
+    # 1, earlier in the order, takes it, although agent 3 comes right after agent 2.
+    vertices = {i: Vertex(id=i) for i in (1, 2, 3, 4)}
+    edges = (
+        Edge(source=1, target=2, cost=1.0),
+        Edge(source=3, target=2, cost=1.0),
+        Edge(source=2, target=4, cost=1.0),
+    )
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    before = _fleet({1: 1, 2: 2, 3: 3})
+    proposed = {1: _move(2), 2: _move(4), 3: _move(2)}
+
+    result = resolve_conflicts(graph, before, proposed, priority=(1, 2, 3))
+    assert result.fleet.locations() == {1: 2, 2: 4, 3: 3}
+    assert result.overridden == frozenset({3})
+
+
+def test_a_rotation_and_the_robots_behind_it_wait():
+    # Agents 1, 2, 3 each want the next one's vertex, a cycle, and agent 4 wants agent 1's.
+    vertices = {i: Vertex(id=i) for i in (1, 2, 3, 4)}
+    edges = (
+        Edge(source=1, target=2, cost=1.0),
+        Edge(source=2, target=3, cost=1.0),
+        Edge(source=3, target=1, cost=1.0),
+        Edge(source=4, target=1, cost=1.0),
+    )
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    before = _fleet({1: 1, 2: 2, 3: 3, 4: 4})
+    proposed = {1: _move(2), 2: _move(3), 3: _move(1), 4: _move(1)}
+
+    result = resolve_conflicts(graph, before, proposed, priority=(4, 3, 2, 1))
+    assert result.fleet.locations() == {1: 1, 2: 2, 3: 3, 4: 4}
+    assert result.overridden == frozenset({1, 2, 3, 4})
+
+
+def test_a_joint_action_that_passes_the_claim_mask_is_accepted_whole():
+    # Agents choose in priority order with move_blocked as the claim mask. Whatever they choose,
+    # conflict resolution overrides none of them.
+    vertices = {i: Vertex(id=i) for i in range(1, 7)}
+    edges = tuple(
+        Edge(source=a, target=b, cost=1.0)
+        for a in range(1, 7)
+        for b in range(1, 7)
+        if a != b and abs(a - b) <= 2
+    )
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    before_loc = {1: 1, 2: 3, 3: 5}
+    before = _fleet(before_loc)
+    priority = (2, 3, 1)
+    for wanted in ((3, 5, 2), (5, 4, 1), (2, 6, 3), (4, 6, 2)):
+        chosen: dict[int, int] = {}
+        proposed: dict[int, Action] = {}
+        for agent_id, target in zip(priority, wanted):
+            start = before_loc[agent_id]
+            ok = target != start and not move_blocked(agent_id, start, target, before_loc, chosen)
+            proposed[agent_id] = _move(target) if ok else _wait()
+            chosen[agent_id] = target if ok else start
+        result = resolve_conflicts(graph, before, proposed, priority)
+        assert result.overridden == frozenset()
+        assert is_collision_free(before, result.fleet)
 
 
 def test_operator_is_a_pure_function_of_inputs():
@@ -176,7 +267,7 @@ def test_three_agents_all_targeting_one_vertex_only_top_priority_moves():
     assert is_collision_free(before, result.fleet)
 
 
-def test_move_blocked_is_the_rule_resolve_conflicts_applies():
+def test_move_blocked_is_the_rule_of_the_claim_mask():
     before_loc = {1: 1, 2: 2, 3: 3}
     # vertex rule
     assert move_blocked(2, 2, 9, before_loc, {1: 9})

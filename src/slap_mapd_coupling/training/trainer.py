@@ -10,9 +10,9 @@ config first.
 Checkpoints are Tune's own (`tune.CheckpointConfig`). A run writes one every
 `CheckpointSettings.frequency` iterations and one at the end, keeps the `num_to_keep` best by
 `score_attribute` (and always the latest), and `TrainingRun.best_checkpoint` is the best one by
-that score. The score is the mean training return by default, which is the number PPO reports. It is
-not the evaluation result, so a high score is no promise of completed tasks (see the note on
-`deliver_reward` in examples/04_decentralised_training.py).
+that score. The score is the mean number of tasks completed per training episode by default.
+Either training return can rise while fewer tasks are done (training/callbacks.py::episode_metrics).
+It is not the evaluation result, which chooses the checkpoint to test on the validation seeds.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from slap_mapd_coupling.training.callbacks import (
     EPISODE_RETURN_KEY,
     TIMESTEPS_KEY,
+    TASKS_COMPLETED_KEY,
     TrainingProgressCallbacks,
     format_iteration,
     iteration_record,
@@ -36,7 +37,7 @@ from slap_mapd_coupling.training.callbacks import (
 from slap_mapd_coupling.training.config import DEFAULT_POLICY_ID
 
 BUDGET_METRIC = TIMESTEPS_KEY  # one environment step is one timestep (sec:method:training)
-DEFAULT_SCORE_ATTRIBUTE = EPISODE_RETURN_KEY
+DEFAULT_SCORE_ATTRIBUTE = TASKS_COMPLETED_KEY
 
 
 class CheckpointSettings(BaseModel):
@@ -52,7 +53,7 @@ class CheckpointSettings(BaseModel):
     `score_attribute` must be a top-level key of the training result. Tune ranks by a nested key
     such as "env_runners/episode_return_mean" only when it reads the best checkpoint back, and
     deletes by recency, so it would keep the newest checkpoints and not the best. The default is
-    the return that TrainingProgressCallbacks copies to the top level.
+    the mean number of tasks completed, which TrainingProgressCallbacks copies to the top level.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
