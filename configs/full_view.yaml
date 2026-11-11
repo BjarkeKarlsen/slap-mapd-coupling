@@ -8,7 +8,7 @@
 # See training/spec.py for what each section means.
 
 controller: full_view   # decentralised | centralised | section | full_view
-regime: fixed_only          # fixed_only | matched
+regime: fixed               # fixed | demand | congestion, the storage rule training runs under
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 

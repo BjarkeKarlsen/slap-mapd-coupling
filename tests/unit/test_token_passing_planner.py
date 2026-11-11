@@ -111,7 +111,7 @@ def test_it_never_needs_conflict_resolution_on_the_example_04_instance(tmp_path)
     spec.loader.exec_module(example)
     graph = example.build_instance()
     skus, capacities, counts = example.build_storage(graph)
-    config = example.build_config("fixed_only", seed=0).model_copy(
+    config = example.build_config("fixed", seed=0).model_copy(
         update={"controller": None, "planner": "token_passing"}
     )
     planner = TokenPassingPlanner()

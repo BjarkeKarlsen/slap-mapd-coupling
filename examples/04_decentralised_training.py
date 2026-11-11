@@ -22,10 +22,10 @@ for the decentralised arm, and the largest zone with its halo for the section
 arm. Pooling is "mean" for the centralised and section arms and "none" for the
 decentralised arm.
 
-Regimes (sec:method:training). "fixed_only" trains under F_fix. "matched" trains
-under the storage rule used at evaluation, EVALUATION_STORAGE_MODE. That rule is
-F_fix here, so the two regimes train identically until the online storage
-estimates of the demand and congestion rules exist. Evaluation samples a legal
+Regimes (sec:method:training). The regime is the storage rule a policy trains
+under, "fixed", "demand" or "congestion". Evaluation plays EVALUATION_STORAGE_MODE,
+which is F_fix here, since this demo cannot configure the online storage estimates
+of the demand and congestion rules. Evaluation samples a legal
 slot with the policy function's rule. Whether it should take the most likely
 slot instead is still open.
 
@@ -151,7 +151,7 @@ _SPEC = spec_for("decentralised")
 ILLUSTRATIVE_BUDGET_ENV_STEPS = _SPEC.ppo.training_budget_env_steps
 # Illustrative. The number of zones is a sweep parameter (tab:modelparams).
 NUM_ZONES = 3
-# The storage rule a policy is evaluated under. "matched" training uses it too.
+# The storage rule a policy is evaluated under.
 EVALUATION_STORAGE_MODE = "fixed"
 # Illustrative. The cap on the messages an agent hears. With FLEET_SIZE agents an agent hears at
 # most the FLEET_SIZE - 1 others, so this cap is exactly enough, and it follows the fleet size so a
@@ -210,14 +210,12 @@ def build_config(
     horizon: int = DEFAULT_HORIZON,
     communication: bool = False,
 ) -> ExperimentConfig:
-    """The configuration a run trains under. "fixed_only" trains under F_fix and
-    "matched" under the storage rule used at evaluation (sec:method:training).
-    The two differ only once EVALUATION_STORAGE_MODE is not "fixed", which needs the
-    online storage estimates of the demand and congestion rules. `communication` is the
-    thesis' conditional ablation (RQ5), decentralised arm only, off unless asked for."""
-    storage_mode = "fixed" if regime == "fixed_only" else EVALUATION_STORAGE_MODE
+    """The configuration a run trains under, with the storage rule of its regime
+    (sec:method:training). The demand and congestion rules need their online storage
+    estimates, which this demo does not configure. `communication` is the thesis'
+    conditional ablation (RQ5), decentralised arm only, off unless asked for."""
     return ExperimentConfig(
-        storage_mode=storage_mode,
+        storage_mode=regime,
         controller=controller,
         congestion_sensitive=False,
         communication=communication,
@@ -246,9 +244,11 @@ def evaluation_config(
     horizon: int = DEFAULT_HORIZON,
     communication: bool = False,
 ) -> ExperimentConfig:
-    """The configuration an episode is evaluated under, the "matched" one. It must carry
-    the `communication` the checkpoint was trained with."""
-    return build_config("matched", seed, controller, arrival_rate, horizon, communication)
+    """The configuration an episode is evaluated under, with EVALUATION_STORAGE_MODE. It must
+    carry the `communication` the checkpoint was trained with."""
+    return build_config(
+        EVALUATION_STORAGE_MODE, seed, controller, arrival_rate, horizon, communication
+    )
 
 
 def build_seed_split(training_seed: int, test_seed_count: int = 3) -> SeedSplitConfig:
@@ -400,7 +400,12 @@ def parse_args(
     argv: list[str] | None = None, controller: ControllerArchitecture = "decentralised"
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"Train and evaluate the {controller} controller.")
-    parser.add_argument("--regime", choices=["fixed_only", "matched"], default="fixed_only")
+    parser.add_argument(
+        "--regime",
+        choices=["fixed", "demand", "congestion"],
+        default="fixed",
+        help="the storage rule training runs under",
+    )
     parser.add_argument(
         "--budget-env-steps",
         type=int,

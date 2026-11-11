@@ -13,7 +13,7 @@
 # See training/spec.py for what each section means.
 
 controller: decentralised
-regime: fixed_only          # fixed_only | matched
+regime: fixed               # fixed | demand | congestion, the storage rule training runs under
 communication: false        # decentralised arm only
 evaluation_storage_mode: fixed
 

@@ -28,23 +28,31 @@ def _with(spec, **changes):
     return type(spec).model_validate(data)
 
 
-def test_matched_training_under_an_adaptive_rule_needs_the_section(spec):
+@pytest.mark.parametrize("regime", ["demand", "congestion"])
+def test_training_under_an_adaptive_rule_needs_the_section(spec, regime):
     with pytest.raises(ValidationError, match="storage_rule section"):
-        _with(spec, regime="matched", evaluation_storage_mode="demand")
+        _with(spec, regime=regime)
 
 
-def test_matched_congestion_needs_the_weight(spec):
+def test_training_under_congestion_needs_the_weight(spec):
     section = RULE.model_copy(update={"congestion_weight": None})
     with pytest.raises(ValidationError, match="congestion_weight"):
-        _with(spec, regime="matched", evaluation_storage_mode="congestion", storage_rule=section)
+        _with(spec, regime="congestion", storage_rule=section)
     # The demand rule does not use beta.
-    _with(spec, regime="matched", evaluation_storage_mode="demand", storage_rule=section)
+    _with(spec, regime="demand", storage_rule=section)
 
 
-def test_matched_fixed_and_fixed_only_need_no_section(spec):
+def test_training_under_fixed_needs_no_section(spec):
     assert spec.storage_rule is None
-    _with(spec, regime="matched", evaluation_storage_mode="fixed")
-    _with(spec, regime="fixed_only", evaluation_storage_mode="demand")
+    _with(spec, regime="fixed", evaluation_storage_mode="demand")
+
+
+def test_old_regime_names_still_load(spec):
+    # Runs trained before the regimes were named after their storage rule.
+    assert _with(spec, regime="fixed_only", evaluation_storage_mode="demand").regime == "fixed"
+    old = _with(spec, regime="matched", evaluation_storage_mode="congestion", storage_rule=RULE)
+    assert old.regime == "congestion"
+    assert _with(spec, regime="matched", evaluation_storage_mode="fixed").regime == "fixed"
 
 
 def test_the_section_has_no_defaults():
@@ -58,7 +66,7 @@ def test_the_section_has_no_defaults():
 def test_a_template_adaptive_rule_refuses_the_section_without_nu(spec):
     section = StorageRuleSettings(epoch_length=100)
     with pytest.raises(ValidationError, match="reassignment_cap"):
-        _with(spec, regime="matched", evaluation_storage_mode="demand", storage_rule=section)
+        _with(spec, regime="demand", storage_rule=section)
     with pytest.raises(ValueError, match="reassignment_cap"):
         build_experiment_config(_with(spec, storage_rule=section), storage_mode="demand")
 
@@ -74,9 +82,9 @@ def test_the_section_reaches_the_experiment_config_of_an_adaptive_mode(spec):
     assert congestion.congestion_weight == 3.0
 
 
-def test_the_matched_regime_builds_its_config_from_the_section(spec):
-    matched = _with(spec, regime="matched", evaluation_storage_mode="congestion", storage_rule=RULE)
-    config = build_experiment_config(matched)
+def test_the_congestion_regime_builds_its_config_from_the_section(spec):
+    congestion = _with(spec, regime="congestion", storage_rule=RULE)
+    config = build_experiment_config(congestion)
     assert config.storage_mode == "congestion" and config.congestion_weight == 3.0
 
 
@@ -101,7 +109,7 @@ def test_an_adaptive_mode_without_the_section_names_what_is_missing(spec):
 def test_every_medium_config_loads_and_builds_a_study(arm):
     spec = load_spec(ROOT / "configs" / "medium" / f"{arm}.yaml")
     assert spec.controller == arm
-    assert (spec.regime, spec.evaluation_storage_mode) == ("fixed_only", "fixed")
+    assert (spec.regime, spec.evaluation_storage_mode) == ("fixed", "fixed")
     assert (spec.train_seed_count, spec.validation_seed_count, spec.test_seed_count) == (100, 2, 6)
     assert spec.storage_rule == RULE
     study = build_study(spec)

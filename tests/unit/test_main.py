@@ -125,12 +125,12 @@ def test_train_relays_the_config_and_the_options_to_the_trainer(tmp_path, monkey
     )
     assert result.exit_code == 0, result.output
     assert calls["budget"] == 900
-    assert calls["name"] == "section_fixed_only"
+    assert calls["name"] == "section_fixed"
     assert calls["arm_label"] == "section"
     assert (calls["settings"].frequency, calls["settings"].num_to_keep) == (2, 4)
     assert calls["storage_path"] == tmp_path
     # The effective settings are kept beside the run, and the paths are printed for the campaign.
-    spec = json.loads((tmp_path / "section_fixed_only_spec.json").read_text())
+    spec = json.loads((tmp_path / "section_fixed_spec.json").read_text())
     assert spec["controller"] == "section" and spec["ppo"]["training_budget_env_steps"] == 900
     assert f"Checkpoint saved to {tmp_path / 'last'}" in result.output
     assert f"saved to {tmp_path / 'best'}" in result.output

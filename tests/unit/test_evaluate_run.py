@@ -33,10 +33,10 @@ def _run_dir(tmp_path: Path, num_checkpoints: int) -> Path:
     from slap_mapd_coupling.training.spec import load_spec
 
     run = tmp_path / "run"
-    trial = run / "decentralised_fixed_only" / "PPO_env_0"
+    trial = run / "decentralised_fixed" / "PPO_env_0"
     for index in range(num_checkpoints):
         (trial / f"checkpoint_{index:06d}").mkdir(parents=True)
-    (run / "decentralised_fixed_only_spec.json").write_text(
+    (run / "decentralised_fixed_spec.json").write_text(
         load_spec(CONFIG).model_dump_json(), encoding="utf-8"
     )
     return run

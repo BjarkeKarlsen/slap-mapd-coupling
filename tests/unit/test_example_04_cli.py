@@ -20,9 +20,9 @@ def example_04():
 
 
 def test_regime_is_read_with_a_space_or_an_equals_sign(example_04):
-    assert example_04.parse_args(["--regime", "matched"]).regime == "matched"
-    assert example_04.parse_args(["--regime=matched"]).regime == "matched"
-    assert example_04.parse_args([]).regime == "fixed_only"
+    assert example_04.parse_args(["--regime", "congestion"]).regime == "congestion"
+    assert example_04.parse_args(["--regime=demand"]).regime == "demand"
+    assert example_04.parse_args([]).regime == "fixed"
 
 
 def test_unknown_regime_is_rejected(example_04):
@@ -61,14 +61,15 @@ def test_hyperparameters_have_no_batch_size_and_no_rollout_length(example_04):
     assert "rollout_fragment_length" not in fields
 
 
-def test_matched_regime_trains_under_the_evaluation_storage_rule(example_04, monkeypatch):
-    # With the evaluation rule changed to one this demo cannot configure, "matched" must
-    # follow it and "fixed_only" must not.
-    assert example_04.build_config("matched", seed=0).storage_mode == "fixed"
-    monkeypatch.setattr(example_04, "EVALUATION_STORAGE_MODE", "demand")
-    assert example_04.build_config("fixed_only", seed=0).storage_mode == "fixed"
+def test_the_regime_is_the_storage_rule_training_runs_under(example_04, monkeypatch):
+    # The demand rule needs settings this demo does not configure, so training under it
+    # raises. Evaluation follows EVALUATION_STORAGE_MODE, whatever the regime.
+    assert example_04.build_config("fixed", seed=0).storage_mode == "fixed"
     with pytest.raises(ValueError, match="demand"):
-        example_04.build_config("matched", seed=0)
+        example_04.build_config("demand", seed=0)
+    monkeypatch.setattr(example_04, "EVALUATION_STORAGE_MODE", "demand")
+    with pytest.raises(ValueError, match="demand"):
+        example_04.evaluation_config(0, "decentralised")
 
 
 def test_evaluation_config_uses_the_evaluation_storage_rule_and_seed(example_04):
@@ -86,15 +87,15 @@ def test_arrival_rate_defaults_to_a_quarter_and_must_be_positive(example_04):
 
 
 def test_training_and_evaluation_configs_carry_the_arrival_rate(example_04):
-    assert example_04.build_config("fixed_only", seed=0).arrival_rate == 0.25
-    assert example_04.build_config("matched", seed=0, arrival_rate=0.15).arrival_rate == 0.15
+    assert example_04.build_config("fixed", seed=0).arrival_rate == 0.25
+    assert example_04.build_config("fixed", seed=0, arrival_rate=0.15).arrival_rate == 0.15
     assert example_04.evaluation_config(3, "section").arrival_rate == 0.25
     assert example_04.evaluation_config(3, "section", 0.15).arrival_rate == 0.15
 
 
 def test_the_wait_cost_is_one_value_for_the_graph_and_the_config(example_04):
     instance = example_04.build_generated_instance()
-    config = example_04.build_config("fixed_only", seed=0)
+    config = example_04.build_config("fixed", seed=0)
     assert config.wait_cost == example_04.WAIT_COST
     assert instance.graph.wait_cost == example_04.WAIT_COST
 
@@ -110,14 +111,14 @@ def test_horizon_defaults_to_630_and_must_be_positive(example_04):
 
 
 def test_training_and_evaluation_configs_share_the_horizon(example_04):
-    assert example_04.build_config("fixed_only", seed=0).horizon == 630
-    assert example_04.build_config("matched", seed=0, horizon=2000).horizon == 2000
+    assert example_04.build_config("fixed", seed=0).horizon == 630
+    assert example_04.build_config("fixed", seed=0, horizon=2000).horizon == 2000
     assert example_04.evaluation_config(3, "section").horizon == 630
     assert example_04.evaluation_config(3, "section", horizon=2000).horizon == 2000
     # one episode length for both, so the same seed gives the same config
     assert example_04.evaluation_config(
         0, "decentralised", horizon=2000
-    ) == example_04.build_config("matched", seed=0, horizon=2000)
+    ) == example_04.build_config("fixed", seed=0, horizon=2000)
 
 
 def test_communication_is_off_by_default_and_read_as_a_flag(example_04):
@@ -126,26 +127,26 @@ def test_communication_is_off_by_default_and_read_as_a_flag(example_04):
 
 
 def test_training_and_evaluation_configs_carry_communication(example_04):
-    assert example_04.build_config("fixed_only", seed=0).communication is False
-    assert example_04.build_config("matched", seed=0, communication=True).communication is True
+    assert example_04.build_config("fixed", seed=0).communication is False
+    assert example_04.build_config("fixed", seed=0, communication=True).communication is True
     assert example_04.evaluation_config(3, "decentralised").communication is False
     assert example_04.evaluation_config(3, "decentralised", communication=True).communication
     # one config for both, so the same seed gives the same config
     assert example_04.evaluation_config(
         0, "decentralised", communication=True
-    ) == example_04.build_config("matched", seed=0, communication=True)
+    ) == example_04.build_config("fixed", seed=0, communication=True)
 
 
 def test_communication_only_changes_the_communication_field(example_04):
-    off = example_04.build_config("fixed_only", seed=0)
-    on = example_04.build_config("fixed_only", seed=0, communication=True)
+    off = example_04.build_config("fixed", seed=0)
+    on = example_04.build_config("fixed", seed=0, communication=True)
     assert on == off.model_copy(update={"communication": True})
 
 
 def test_the_gnn_encoder_follows_the_communication_of_the_config(example_04):
     instance = example_04.build_generated_instance()
     for communication in (False, True):
-        config = example_04.build_config("fixed_only", seed=0, communication=communication)
+        config = example_04.build_config("fixed", seed=0, communication=communication)
         arm = example_04.build_arm(instance, "decentralised", config.observation_depth)
         assert example_04.build_gnn_config(config, arm).communication is communication
 
@@ -180,5 +181,5 @@ def test_the_entry_points_of_the_other_arms_reject_communication(
 
 def test_the_training_and_evaluation_configs_carry_the_keep_up_threshold(example_04):
     assert example_04.KEEP_UP_THRESHOLD == 0.8
-    assert example_04.build_config("fixed_only", seed=0).keep_up_threshold == 0.8
+    assert example_04.build_config("fixed", seed=0).keep_up_threshold == 0.8
     assert example_04.evaluation_config(3, "section").keep_up_threshold == 0.8
