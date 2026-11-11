@@ -54,6 +54,7 @@ def test_the_shaping_uses_the_potential_the_robot_sees_at_the_next_step():
     new_targets = 0
     for _ in range(300):
         before = _potentials(env)
+        active_before = active_tasks_by_agent(env.tasks, env.t)
         shaping_before = dict(env.log.return_shaping_by_agent)
         env.step(_towards_target(env))
         after = _potentials(env)
@@ -61,7 +62,16 @@ def test_the_shaping_uses_the_potential_the_robot_sees_at_the_next_step():
             paid = env.log.return_shaping_by_agent.get(agent_id, 0.0) - shaping_before.get(
                 agent_id, 0.0
             )
-            assert paid == pytest.approx(gamma * after[agent_id] - before[agent_id], abs=1e-9)
+            # [A90]: progress within the task served at t only, 0 for a free robot.
+            task_before = active_before.get(agent_id)
+            task_after = active_tasks_by_agent(env.tasks, env.t).get(agent_id)
+            if task_before is None:
+                expected = 0.0
+            elif task_after is not None and task_after.task_id == task_before.task_id:
+                expected = gamma * after[agent_id] - before[agent_id]
+            else:
+                expected = -before[agent_id]
+            assert paid == pytest.approx(expected, abs=1e-9)
         # Count the steps where a robot's target moved, a new task or a parking leaf, so the
         # test is known to cover the case [A79] is about.
         new_targets += sum(

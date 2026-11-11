@@ -7,8 +7,10 @@ R_i(t) = gamma*Phi_i(t+1) - Phi_i(t)
          - c_wait    * omega_i(t)
          - n_cng     * delta_i(t)
 
-Phi_i(t) = -eta_i(l_i(t),t), built from the distance label
-eta_i(v,t) = d_G(v, q_i(t)). The first term is
+Phi_i(t) is minus the distance left in the robot's task ([A89]): to the pickup vertex
+plus the trip on to the delivery vertex before pickup, and to the delivery vertex
+after. It does not jump at pickup, where the current target q_i(t) switches. The
+distance label eta_i(v,t) = d_G(v, q_i(t)) of the observation is unchanged. The first term is
 potential-based shaping (Ng, Harada & Russell 1999), which leaves the
 game's equilibria unchanged, also for a potential that changes whenever
 the current target switches (Devlin & Kudenko 2012).
@@ -59,9 +61,23 @@ def current_target(
 def potential(
     graph: WarehouseGraph, location: VertexId, task: Task | None, parking: VertexId | None = None
 ) -> float:
-    """Phi_i(t) = -eta_i(l_i(t),t) = -d_G(l_i(t), q_i(t)), from the distance
-    label."""
-    return -graph.distance(location, current_target(location, task, parking))
+    """Phi_i(t), minus the distance left in the robot's task ([A89]).
+
+    Before pickup it is the distance to the pickup vertex plus the trip from there to the
+    delivery vertex, and after pickup the distance to the delivery vertex. At the pickup both
+    give the same value, so the potential does not jump when the current target switches. A
+    robot with no task has its current target (its own vertex or its parking leaf) as before.
+
+    The distance label of the observation still points to the current target q_i(t)
+    (environment/observation.py). Only the reward uses the distance left."""
+    if task is None:
+        return -graph.distance(location, current_target(location, task, parking))
+    if task.pickup_time is None:
+        return -(
+            graph.distance(location, task.pickup_vertex)
+            + graph.distance(task.pickup_vertex, task.delivery_vertex)
+        )
+    return -graph.distance(location, task.delivery_vertex)
 
 
 @dataclass(frozen=True)
@@ -111,10 +127,20 @@ def reward_terms(
     arguments. `parking_now` and `parking_next` are the idle robot's parking leaf (D26) at t
     and at t+1, read after the parking update of t+1 ([A79]). Each is the target of its
     potential when the robot has no task at that time."""
-    phi_now = potential(graph, location_now, task_now, parking_now)
-    phi_next = potential(graph, location_next, task_next, parking_next)
+    # [A90]: progress is counted within the task the robot serves at t only. The step that
+    # finishes it ends at potential 0, a task handed out at t+1 starts counting on the next
+    # step from its own start, and a robot with no task gets no shaping. So no step ever pays
+    # for the distance of a new task, and finishing a task is never followed by a penalty.
+    # `parking_now` and `parking_next` are kept for the callers and no longer used here.
+    if task_now is None:
+        shaping = 0.0
+    else:
+        same_task = task_next is not None and task_next.task_id == task_now.task_id
+        phi_now = potential(graph, location_now, task_now)
+        phi_next = potential(graph, location_next, task_next) if same_task else 0.0
+        shaping = discount * phi_next - phi_now
     return RewardTerms(
-        shaping=discount * phi_next - phi_now,
+        shaping=shaping,
         delivery=deliver_reward * completed_task,
         override=-override_penalty * overridden,
         move=-move_cost * moved,

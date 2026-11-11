@@ -50,10 +50,23 @@ def test_potential_zero_for_free_agent_at_own_location():
     assert potential(graph, location=2, task=None) == 0.0
 
 
-def test_potential_is_negative_distance_to_goal():
+def test_potential_is_minus_the_distance_left_in_the_task():
+    # [A89]: before pickup the distance to the pickup plus the trip on to the delivery,
+    # after pickup the distance to the delivery.
     graph = _line_graph(5)
     task = _task(pickup=4, delivery=0)
-    assert potential(graph, location=0, task=task) == pytest.approx(-4.0)
+    assert potential(graph, location=0, task=task) == pytest.approx(-(4.0 + 4.0))
+    assert potential(graph, location=2, task=task.pick_up(t=2)) == pytest.approx(-2.0)
+
+
+def test_the_potential_does_not_jump_at_pickup():
+    # The current target switches from the pickup to the delivery vertex, but the distance
+    # left in the task is the same just before and just after the pickup.
+    graph = _line_graph(5)
+    task = _task(pickup=4, delivery=0)
+    before = potential(graph, location=4, task=task)
+    after = potential(graph, location=4, task=task.pick_up(t=3))
+    assert before == pytest.approx(after) == pytest.approx(-4.0)
 
 
 def test_reward_is_pure_shaping_with_no_other_terms():
@@ -78,8 +91,8 @@ def test_reward_is_pure_shaping_with_no_other_terms():
         wait_cost=1.0,
         congestion_reward_weight=1.0,
     )
-    phi_now = -4.0  # d_G(0, 4)
-    phi_next = -3.0  # d_G(1, 4)
+    phi_now = -8.0  # d_G(0, 4) + d_G(4, 0), the distance left in the task ([A89])
+    phi_next = -7.0  # d_G(1, 4) + d_G(4, 0)
     assert r == pytest.approx(0.9 * phi_next - phi_now)
 
 
