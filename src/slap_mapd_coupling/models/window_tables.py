@@ -58,10 +58,11 @@ from slap_mapd_coupling.models.local_subgraph_encoding import (
 )
 
 # The columns of the vertex features (gnn_encoder.py): storage, delivery, endpoint, transit,
-# eta, occupied, claimed, receiving. The role flags are stored once per window, in the order
-# role_flags returns them.
+# eta, occupied, claimed, receiving, distance. The role flags are stored once per window, in the
+# order role_flags returns them. The two distance features ([A82]) are stored together under
+# "eta", the relative label first.
 STATIC_COLUMNS = (0, 1, 2, 3, 7)
-ETA_COLUMN = 4
+ETA_COLUMNS = [4, 8]
 FLAG_COLUMNS = (5, 6)
 
 # The compact sample's keys for the robot's own key and its senders' keys. They are present
@@ -134,9 +135,7 @@ def pad_tables(tables: WindowTables, num_nodes: int, d_max: int) -> WindowTables
     """`tables` padded to `num_nodes` window vertices, so the tables of warehouses built with
     different caps line up. The padding is masked out, as a window below the cap always is."""
     if tables.move_target_index.shape[1] != d_max:
-        raise ValueError(
-            f"the tables have d_max {tables.move_target_index.shape[1]}, not {d_max}."
-        )
+        raise ValueError(f"the tables have d_max {tables.move_target_index.shape[1]}, not {d_max}.")
     extra = num_nodes - tables.node_mask.shape[1]
     if extra < 0:
         raise ValueError(f"the tables hold windows of {num_nodes + extra} vertices, over the cap.")
@@ -231,7 +230,7 @@ def compact_observation_space(
     )
     spaces: dict[str, gym.Space] = {
         "vertex": vertex,
-        "eta": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(num_nodes,), dtype=np.float32),
+        "eta": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(num_nodes, 2), dtype=np.float32),
         "flags": gym.spaces.Box(low=0, high=1, shape=(num_nodes, 2), dtype=np.uint8),
         "congestion": gym.spaces.Box(low=0.0, high=1.0, shape=(), dtype=np.float32),
     }
@@ -262,7 +261,7 @@ def compact_rllib_dict(
         raise ValueError("the encoded observation has no location, so it has no compact form.")
     observations: dict[str, Any] = {
         "vertex": np.int64(position[item.location]),
-        "eta": np.ascontiguousarray(item.node_features[:, ETA_COLUMN]),
+        "eta": np.ascontiguousarray(item.node_features[:, ETA_COLUMNS]),
         "flags": item.node_features[:, FLAG_COLUMNS].astype(np.uint8),
         "congestion": np.float32(item.congestion),
     }
@@ -335,7 +334,7 @@ class WindowLookup(nn.Module):
             (*static.shape[:-1], NODE_FEATURE_DIM), dtype=static.dtype, device=static.device
         )
         features[..., STATIC_COLUMNS] = static
-        features[..., ETA_COLUMN] = eta.to(static.dtype)
+        features[..., ETA_COLUMNS] = eta.to(static.dtype)
         features[..., FLAG_COLUMNS] = flags.to(static.dtype)
         return {
             "node_features": features,
@@ -404,7 +403,7 @@ class StoredWindowLookup(WindowLookup):
             # No context rows, when a minibatch holds all its senders. Any tables give the
             # empty views, so take the ones just read for the minibatch itself.
             return next(reversed(self._joined.values()))[0], vertex
-        seed_of =torch.div(vertex, VERTEX_KEY_STRIDE, rounding_mode="floor")
+        seed_of = torch.div(vertex, VERTEX_KEY_STRIDE, rounding_mode="floor")
         seeds = tuple(int(seed) for seed in torch.unique(seed_of).tolist())
         key = (seeds, str(device))
         if key not in self._joined:
@@ -414,9 +413,7 @@ class StoredWindowLookup(WindowLookup):
                 row_start.append(row_start[-1] + len(part["window_of"]))
                 window_start.append(window_start[-1] + len(part["node_mask"]))
             joined = {
-                k: torch.cat([part[k] for part in parts])
-                for k in parts[0]
-                if k != "window_of"
+                k: torch.cat([part[k] for part in parts]) for k in parts[0] if k != "window_of"
             }
             joined["window_of"] = torch.cat(
                 [part["window_of"] + start for part, start in zip(parts, window_start)]

@@ -88,6 +88,7 @@ def _own_vector(observation, vertex: int) -> torch.Tensor:
             float(f.occupied),
             float(f.claimed),
             float(f.receiving),
+            f.distance,
         ]
     )
 

@@ -39,9 +39,9 @@ def test_the_checkpoint_settings_become_tunes_checkpoint_config():
     assert config.checkpoint_at_end is True
 
 
-def test_the_default_score_is_the_episode_return_and_the_best_is_the_highest():
+def test_the_default_score_is_the_tasks_completed_and_the_best_is_the_highest():
     settings = CheckpointSettings()
-    assert settings.score_attribute == DEFAULT_SCORE_ATTRIBUTE == "episode_return_mean"
+    assert settings.score_attribute == DEFAULT_SCORE_ATTRIBUTE == "episode_tasks_completed_mean"
     assert settings.score_order == "max"
 
 
@@ -82,6 +82,16 @@ def test_the_return_is_copied_to_the_top_level_of_the_result():
     assert "episode_return_mean" not in empty
 
 
+def test_the_tasks_completed_are_copied_to_the_top_level_too():
+    callbacks = TrainingProgressCallbacks()
+    result = {"env_runners": {"episode_return_mean": 12.5, "episode_tasks_completed": 7.0}}
+    callbacks.on_train_result(result=result)
+    assert result["episode_tasks_completed_mean"] == 7.0
+    empty = {"env_runners": {"episode_tasks_completed": float("nan")}}
+    callbacks.on_train_result(result=empty)
+    assert "episode_tasks_completed_mean" not in empty
+
+
 def test_a_misspelt_checkpoint_setting_is_rejected():
     with pytest.raises(ValidationError):
         CheckpointSettings(every=3)  # type: ignore[call-arg]
@@ -102,15 +112,15 @@ def test_a_run_saves_periodic_checkpoints_and_returns_its_best(tmp_path):
         progress_path=progress,
     )
 
-    returns = [
-        json.loads(line)["episode_return_mean"] for line in progress.read_text().splitlines()
-    ]
-    assert len(returns) == 4
+    rows = [json.loads(line) for line in progress.read_text().splitlines()]
+    scores = [row["episode_tasks_completed"] for row in rows]
+    assert len(scores) == 4
     assert run.env_steps_sampled == 520
-    # The checkpoint of iteration i is checkpoint_<i - 1>. The best is the highest return, and
-    # it is kept along with the latest, so no more than two folders remain.
-    best_iteration = max(range(4), key=returns.__getitem__) + 1
-    assert run.best_checkpoint.name == f"checkpoint_{best_iteration - 1:06d}"
+    # The checkpoint of iteration i is checkpoint_<i - 1>. The best has the most tasks completed,
+    # the default score, and it is kept along with the latest, so no more than two folders
+    # remain. A short run often ties on tasks, so the test checks the score, not the index.
+    best_index = int(run.best_checkpoint.name.removeprefix("checkpoint_"))
+    assert scores[best_index] == max(scores)
     kept = sorted(path.name for path in run.trial_dir.glob("checkpoint_*"))
     assert len(kept) <= 3 and run.best_checkpoint.name in kept and run.checkpoint.name in kept
     # Both open as modules without a Ray cluster.

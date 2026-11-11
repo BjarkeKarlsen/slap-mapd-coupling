@@ -77,7 +77,7 @@ test_seed_count: 6
 checkpoint:
   frequency: 3
   num_to_keep: null
-  score_attribute: episode_return_mean
+  score_attribute: episode_tasks_completed_mean
   score_order: max
 warehouse_per_seed: true
 instance:

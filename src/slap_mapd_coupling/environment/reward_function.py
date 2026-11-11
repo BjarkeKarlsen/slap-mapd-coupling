@@ -7,8 +7,10 @@ R_i(t) = gamma*Phi_i(t+1) - Phi_i(t)
          - c_wait    * omega_i(t)
          - n_cng     * delta_i(t)
 
-Phi_i(t) = -eta_i(l_i(t),t), built from the distance label
-eta_i(v,t) = d_G(v, q_i(t)). The first term is
+Phi_i(t) is minus the distance left in the robot's task ([A89]): to the pickup vertex
+plus the trip on to the delivery vertex before pickup, and to the delivery vertex
+after. It does not jump at pickup, where the current target q_i(t) switches. The
+distance label eta_i(v,t) = d_G(v, q_i(t)) of the observation is unchanged. The first term is
 potential-based shaping (Ng, Harada & Russell 1999), which leaves the
 game's equilibria unchanged, also for a potential that changes whenever
 the current target switches (Devlin & Kudenko 2012).
@@ -26,9 +28,15 @@ Every move pays c_move, whether the agent serves a task or not. A move is a chan
 vertex between t and t+1, so a move that conflict resolution turned into a wait is not one.
 
 Free agent: the current target defines q_i(t) only for
-an agent serving a task. Here a free agent's target is its own vertex, so
-it gets no shaping signal while idle. This is an open thesis decision,
-see issue #102.
+an agent serving a task. Here a free agent's target is its own vertex, or its
+parking leaf when it was sent to one (D26), so it gets no shaping signal while
+idle and in nobody's way.
+
+[A79]: Phi_i(t+1) is the potential the robot sees at t+1, read after stage 1 and 2
+of t+1 (new tasks) and the parking update. So the task and the parking leaf of the
+two potentials are passed apart, and a new target is charged once, on the step it
+is handed out. The environment computes the reward after both
+(environment/multi_agent_env.py::step).
 """
 
 from __future__ import annotations
@@ -53,9 +61,23 @@ def current_target(
 def potential(
     graph: WarehouseGraph, location: VertexId, task: Task | None, parking: VertexId | None = None
 ) -> float:
-    """Phi_i(t) = -eta_i(l_i(t),t) = -d_G(l_i(t), q_i(t)), from the distance
-    label."""
-    return -graph.distance(location, current_target(location, task, parking))
+    """Phi_i(t), minus the distance left in the robot's task ([A89]).
+
+    Before pickup it is the distance to the pickup vertex plus the trip from there to the
+    delivery vertex, and after pickup the distance to the delivery vertex. At the pickup both
+    give the same value, so the potential does not jump when the current target switches. A
+    robot with no task has its current target (its own vertex or its parking leaf) as before.
+
+    The distance label of the observation still points to the current target q_i(t)
+    (environment/observation.py). Only the reward uses the distance left."""
+    if task is None:
+        return -graph.distance(location, current_target(location, task, parking))
+    if task.pickup_time is None:
+        return -(
+            graph.distance(location, task.pickup_vertex)
+            + graph.distance(task.pickup_vertex, task.delivery_vertex)
+        )
+    return -graph.distance(location, task.delivery_vertex)
 
 
 @dataclass(frozen=True)
@@ -98,15 +120,27 @@ def reward_terms(
     move_cost: float,
     wait_cost: float,
     congestion_reward_weight: float,
-    parking: VertexId | None = None,
+    parking_now: VertexId | None = None,
+    parking_next: VertexId | None = None,
 ) -> RewardTerms:
     """The six terms of R_i(t), the reward, separately. See `reward` for the
-    arguments. `parking` is the idle robot's parking leaf over the step (D26), the target of
-    both potentials when it has no task."""
-    phi_now = potential(graph, location_now, task_now, parking)
-    phi_next = potential(graph, location_next, task_next, parking)
+    arguments. `parking_now` and `parking_next` are the idle robot's parking leaf (D26) at t
+    and at t+1, read after the parking update of t+1 ([A79]). Each is the target of its
+    potential when the robot has no task at that time."""
+    # [A90]: progress is counted within the task the robot serves at t only. The step that
+    # finishes it ends at potential 0, a task handed out at t+1 starts counting on the next
+    # step from its own start, and a robot with no task gets no shaping. So no step ever pays
+    # for the distance of a new task, and finishing a task is never followed by a penalty.
+    # `parking_now` and `parking_next` are kept for the callers and no longer used here.
+    if task_now is None:
+        shaping = 0.0
+    else:
+        same_task = task_next is not None and task_next.task_id == task_now.task_id
+        phi_now = potential(graph, location_now, task_now)
+        phi_next = potential(graph, location_next, task_next) if same_task else 0.0
+        shaping = discount * phi_next - phi_now
     return RewardTerms(
-        shaping=discount * phi_next - phi_now,
+        shaping=shaping,
         delivery=deliver_reward * completed_task,
         override=-override_penalty * overridden,
         move=-move_cost * moved,
@@ -136,9 +170,10 @@ def reward(
 ) -> float:
     """R_i(t), the reward: the sum of the terms of `reward_terms`.
 
-    `task_now`/`task_next` are whichever task the agent is serving just
-    before / just after this timestep's transition -- None for a free
-    agent. `moved` is 1[a_i moves at t] and `move_cost` is c_move. `stood_still` is
+    `task_now`/`task_next` are whichever task the agent is serving at t and
+    at t+1 -- None for a free agent. `task_next` is read after the assignment
+    of t+1, so a task handed out then is already the agent's ([A79]).
+    `moved` is 1[a_i moves at t] and `move_cost` is c_move. `stood_still` is
     omega_i(t) and `wait_cost` is c_wait. `congestion` is
     delta_i(t), the congestion feature, computed upstream and only weighted here.
     """

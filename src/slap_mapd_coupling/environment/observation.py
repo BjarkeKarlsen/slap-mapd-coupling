@@ -33,6 +33,11 @@ from slap_mapd_coupling.core.graph import VertexId, VertexRole, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task, active_tasks_by_agent
 from slap_mapd_coupling.environment.reward_function import current_target
 
+# [A82]: the distance label divided by this one number, the same in every warehouse, so the
+# feature stays near 0 to 1 next to the 0/1 features (about 30 steps in fleet 8, over 50 in
+# fleet 64). As in van Knippenberg et al. (2021) the robot then sees how far its target is.
+DISTANCE_SCALE = 50.0
+
 
 @dataclass(frozen=True)
 class VertexFeatures:
@@ -49,6 +54,7 @@ class VertexFeatures:
     occupied: bool
     claimed: bool = False
     receiving: bool = False
+    distance: float = 0.0  # [A82] eta_i(v,t) / DISTANCE_SCALE, the distance label itself
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,7 @@ def build_observation(
             occupied=v in occupied_vertices,
             claimed=v in claimed_vertices,
             receiving=receiving,
+            distance=eta(graph, v, target) / DISTANCE_SCALE,
         )
 
     congestion = occupancy_fraction(fleet, field_of_view, excl={agent_id})

@@ -368,6 +368,7 @@ def encode_view(
             float(f.occupied),
             float(f.claimed),
             float(f.receiving),
+            f.distance,
         )
     if structure:
         node_mask, edge_index, edge_mask = window_structure(graph, selected, d_max, config)

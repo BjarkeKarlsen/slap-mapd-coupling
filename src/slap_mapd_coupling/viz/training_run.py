@@ -101,16 +101,27 @@ _MAX_RAW_POINTS = 60
 # ---------------------------------------------------------------------------
 
 
+# The reward terms other than shaping, which add up to the return without the shaping term.
+_UNSHAPED_TERMS = ("deliver", "override", "move", "wait", "congestion")
+
+
 def load_progress(path: Path) -> Progress:
-    """A progress log as one float array per key, with null or missing values as NaN."""
+    """A progress log as one float array per key, with null or missing values as NaN.
+
+    A log written before `return_unshaped` was logged gets it as the sum of its other terms,
+    when it has all of them, so an older run reads the same way as a new one."""
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     keys = sorted({key for row in rows for key in row})
-    return {
+    progress = {
         key: np.array(
             [np.nan if row.get(key) is None else float(row[key]) for row in rows], dtype=float
         )
         for key in keys
     }
+    parts = [f"return_{term}" for term in _UNSHAPED_TERMS]
+    if "return_unshaped" not in progress and all(key in progress for key in parts):
+        progress["return_unshaped"] = sum(progress[key] for key in parts)
+    return progress
 
 
 @dataclass(frozen=True)
@@ -343,11 +354,18 @@ def plot_training_progress(logs: dict[str, Progress], out: Path) -> Path | None:
     """Training progress of one or several arms, written to `out`. None when nothing can be drawn.
 
     One panel per measure with a line for every arm, and one panel per arm with the episode
-    return and its five terms. Lines of different measures in one panel differ in style.
+    return, its terms and the return without the shaping term. The tasks panel is the
+    training curve, since either return can rise while fewer tasks are done. Lines of different measures in one panel differ in style.
     """
     looks = _arm_looks(logs)
     measures = [  # title, [(key, line style, label)]
-        ("Episode return", [("episode_return_mean", "-", "episode return")]),
+        (
+            "Episode return",
+            [
+                ("episode_return_mean", "-", "episode return"),
+                ("return_unshaped", "--", "without shaping"),
+            ],
+        ),
         (
             "Overrides and standing still",
             [
@@ -396,6 +414,11 @@ def plot_training_progress(logs: dict[str, Progress], out: Path) -> Path | None:
             if _has(log.get("episode_return_mean")):
                 _draw_series(ax, x, log["episode_return_mean"], INK, "-", "s")
                 ax.plot([], [], color=INK, marker="s", lw=1.8, ms=4, label="episode return")
+            if _has(log.get("return_unshaped")):
+                _draw_series(ax, x, log["return_unshaped"], INK, "--", "D")
+                ax.plot(
+                    [], [], color=INK, ls="--", marker="D", lw=1.8, ms=4, label="without shaping"
+                )
             ax.axhline(0, color=MUTED, lw=0.8)
             ax.set_title(f"Return and its terms, {arm}", loc="left")
             ax.set_xlabel("training iteration")

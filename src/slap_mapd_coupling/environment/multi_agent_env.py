@@ -584,7 +584,8 @@ class WarehouseMAPDEnv:
         dict[AgentId | str, dict],
     ]:
         """Advance one timestep: stages 3 to 6, then stages 1 and 2 for the new t
-        unless the episode ends. Returns
+        unless the episode ends, then the reward, so that its potential at t+1 sees the
+        tasks and parking leaves of t+1 ([A79]). Returns
         (observations, rewards, terminated, truncated, infos), dict-keyed
         by agent id plus an "__all__" entry (RLlib/PettingZoo convention)
         signalling whether the whole episode is done.
@@ -594,6 +595,7 @@ class WarehouseMAPDEnv:
         """
         before_fleet = self.fleet
         congestion = self._congestion_by_agent  # delta_i(t), at the step the action is chosen in
+        parking_before = dict(self._parking)  # each idle robot's parking leaf at t (D26)
 
         # Stages 1 and 2 already ran for this t, at the end of reset() or of the
         # previous step. Under the task lifecycle a task assigned at self._t is
@@ -658,11 +660,6 @@ class WarehouseMAPDEnv:
                 self._update_storage(delta)
             clock = self._timed("storage_update", clock)
 
-        rewards = self._compute_rewards(
-            before_locations, active_by_agent, result.overridden, next_t, congestion
-        )
-        clock = self._timed("reward", clock)
-
         self._t = next_t
         episode_done = self._t >= self.config.horizon
         if not episode_done:
@@ -670,7 +667,19 @@ class WarehouseMAPDEnv:
             clock = self._timed("release_and_assign", clock)
             self._update_parking(proposed, result.overridden)
             self._record_crowding()
-            self._timed("crowding", clock)
+            clock = self._timed("crowding", clock)
+
+        # [A79]: the reward reads Phi_i(t+1) as the robot sees it at t+1, after the new
+        # tasks and parking leaves are handed out, so a new target is charged once.
+        rewards = self._compute_rewards(
+            before_locations,
+            active_by_agent,
+            result.overridden,
+            next_t,
+            congestion,
+            parking_before,
+        )
+        self._timed("reward", clock)
         observations = dict(self.fleet.locations())
         terminated: dict[AgentId | str, bool] = {aid: False for aid in self.fleet.agents}
         terminated["__all__"] = False
@@ -1334,9 +1343,12 @@ class WarehouseMAPDEnv:
         overridden: frozenset[AgentId],
         next_t: int,
         congestion: Mapping[AgentId, float],
+        parking_before: Mapping[AgentId, VertexId],
     ) -> dict[AgentId, float]:
         """R_i(t), the reward, for every robot. `congestion` holds delta_i(t) at the
-        step the action was chosen in. A planner run has no reward weights and gets zero. Every
+        step the action was chosen in, and `parking_before` each idle robot's parking leaf at t.
+        It runs after the assignment and the parking update of t+1, so the tasks and the
+        parking leaves of t+1 are those the robots see then ([A79]). A planner run has no reward weights and gets zero. Every
         other run also adds each robot's terms to the episode log."""
         if self.config.controller is None:
             return {aid: 0.0 for aid in self.fleet.agents}
@@ -1381,7 +1393,8 @@ class WarehouseMAPDEnv:
                 move_cost=self.config.move_cost,
                 wait_cost=self.config.wait_cost,
                 congestion_reward_weight=self.config.congestion_reward_weight,
-                parking=self._parking.get(agent_id),
+                parking_now=parking_before.get(agent_id),
+                parking_next=self._parking.get(agent_id),
             )
             self.log.record_reward_terms(agent_id, terms, was_overridden)
             rewards[agent_id] = terms.total

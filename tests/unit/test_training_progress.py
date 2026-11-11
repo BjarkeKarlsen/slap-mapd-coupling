@@ -118,8 +118,9 @@ def test_format_iteration_prints_the_return_only_when_it_is_a_finite_number():
     line = format_iteration(2, 5, {"env_runners": {**full, "episode_return_mean": 1.5}})
     assert line.startswith("  iter 2/5:")
     assert line == (
-        "  iter 2/5: episode_return_mean=1.5 tasks_completed=3 tasks_released=10 backlog=7 "
-        "steps_since_last_completion=120 standing_still_fraction=0.25"
+        "  iter 2/5: episode_return_mean=1.5 return_unshaped=0 tasks_completed=3 "
+        "tasks_released=10 backlog=7 steps_since_last_completion=120 "
+        "standing_still_fraction=0.25"
     )
     big = {**full, "tasks_released": 1234.5, "episode_return_mean": 1390.04}
     line = format_iteration(1, 1, {"env_runners": big})
@@ -180,6 +181,7 @@ _EPISODE_KEY_NAMES = (
     "return_move",
     "return_wait",
     "return_congestion",
+    "return_unshaped",
     "override_rate",
     "episode_tasks_completed",
     "episode_tasks_released",
@@ -360,6 +362,9 @@ def test_on_episode_end_logs_the_terms_that_add_up_to_the_episode_return(control
         episode_return, abs=1e-9
     )
     assert deliver >= 0.0 and override <= 0.0 and congestion <= 0.0
+    # The return without the shaping term is the episode return less the shaping term.
+    (unshaped,) = logger.values["return_unshaped"]
+    assert unshaped == pytest.approx(episode_return - shaping, abs=1e-9)
 
     log = env.core.log
     overrides = sum(log.overrides_by_agent.values())

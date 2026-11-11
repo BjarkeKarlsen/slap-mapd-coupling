@@ -112,7 +112,7 @@ test_seed_count: 6
 checkpoint:
   frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end
   num_to_keep: null         # keep every one, a checkpoint is chosen on validation seeds
-  score_attribute: episode_return_mean   # a top-level key of the result
+  score_attribute: episode_tasks_completed_mean   # a top-level key of the result
   score_order: max
 
 # Every seed plays its own generated warehouse (D27).

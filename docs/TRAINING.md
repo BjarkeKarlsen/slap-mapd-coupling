@@ -59,9 +59,14 @@ Checkpointing is Tune's own (`tune.CheckpointConfig`), set by `CheckpointSetting
   the end of the run, which is always written.
 - `num_to_keep` keeps that many checkpoints, the best by `score_attribute`, and always the latest.
   None keeps all of them.
-- `score_attribute` is `episode_return_mean` and `score_order` is `max`, so the best
-  checkpoint is the one with the highest training return. The score must be a top-level key of the
-  result, so `TrainingProgressCallbacks` copies `env_runners/episode_return_mean` there. Tune ranks
+- `score_attribute` is `episode_tasks_completed_mean` and `score_order` is `max`, so the best
+  checkpoint is the one that completed the most tasks per training episode. Neither return is a
+  good score. The shaping term pays (1 - gamma) times the distance to the target on every step, so
+  its plain sum grows while robots stand far from their targets. The return without it
+  (`return_unshaped`, logged and plotted) rises when robots swap waits for cheaper moves that lead
+  nowhere, as in the fleet 32 runs of 2026-11-04. The score must be a top-level key of the result,
+  so `TrainingProgressCallbacks` copies `env_runners/episode_tasks_completed` there, next to
+  `episode_return_mean`. Tune ranks
   by a nested key only when it reads the best one back and deletes by recency, which keeps the newest
   checkpoints and not the best, so `CheckpointSettings` rejects a name with a `/`.
 
