@@ -334,14 +334,14 @@ class TrainingSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     controller: ControllerArchitecture
-    regime: TrainingRegime = "fixed_only"
+    regime: TrainingRegime = "fixed"
     communication: bool = False
     arrival_rate: PositiveFloat
     horizon: PositiveInt
     # T_warm, the warm-up left out of the measures ([A66]), chosen by Welch's method. Training
     # episodes run the whole horizon either way. Whether they get the long horizon is step 10's.
     warmup: NonNegativeInt = 0
-    # The storage rule a policy is evaluated under, which "matched" training uses too.
+    # The default storage rule an evaluation plays.
     evaluation_storage_mode: StorageMode = "fixed"
     experiment: ExperimentSettings
     # The GeneratorParams without wait_cost and num_endpoints, which follow the experiment.
@@ -368,6 +368,20 @@ class TrainingSpec(BaseModel):
     validation_seed_count: PositiveInt
     test_seed_count: PositiveInt
     checkpoint: CheckpointSettings = CheckpointSettings()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _regime_from_old_names(cls, data: Any) -> Any:
+        """Runs trained before the regimes were named after their storage rule wrote
+        "fixed_only", which trained under F_fix, and "matched", which trained under
+        evaluation_storage_mode. This maps both to the rule, so their specs still load."""
+        if isinstance(data, dict) and data.get("regime") in ("fixed_only", "matched"):
+            data = dict(data)
+            if data["regime"] == "fixed_only":
+                data["regime"] = "fixed"
+            else:
+                data["regime"] = data.get("evaluation_storage_mode", "fixed")
+        return data
 
     def instance_settings(self) -> dict[str, Any]:
         """The GeneratorParams keys without wait_cost: the `instance` section as written, or
@@ -433,11 +447,11 @@ class TrainingSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _matched_training_has_its_storage_rule(self) -> "TrainingSpec":
-        """ "matched" trains under the evaluation storage rule, so that rule's settings must be
-        there at load time and not when the first episode is built."""
-        if self.regime == "matched":
-            check_storage_rule(self, self.evaluation_storage_mode)
+    def _training_storage_rule_has_its_settings(self) -> "TrainingSpec":
+        """Training under demand or congestion-aware storage needs that rule's settings, so
+        they must be there at load time and not when the first episode is built."""
+        if self.regime != "fixed":
+            check_storage_rule(self, self.regime)
         return self
 
 
@@ -887,9 +901,9 @@ def _num_sections(spec: TrainingSpec) -> int:
 
 
 def training_storage_mode(spec: TrainingSpec) -> StorageMode:
-    """The storage rule a run trains under. "fixed_only" trains under F_fix and "matched" under
-    the storage rule used at evaluation (sec:method:training)."""
-    return "fixed" if spec.regime == "fixed_only" else spec.evaluation_storage_mode
+    """The storage rule a run trains under, which is its regime. Each storage rule gets its own
+    policy, trained under the rule it is evaluated with (sec:method:training)."""
+    return spec.regime
 
 
 def check_storage_rule(spec: TrainingSpec, storage_mode: StorageMode) -> None:

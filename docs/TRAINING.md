@@ -183,6 +183,7 @@ come from this single-process, deterministic run and not from Tune.
 
 ## Regimes
 
-`fixed_only` trains under F_fix. `matched` trains under the storage rule used at evaluation.
-The two differ only once the online storage estimates of the demand and congestion rules
-exist, so the example shows the switch and the two regimes train alike until then.
+The regime is the storage rule a policy trains under, `fixed`, `demand` or `congestion`. Each
+storage rule gets its own policy, trained under the rule it is evaluated with. Specs written
+before this naming load with `fixed_only` read as `fixed` and `matched` read as their
+`evaluation_storage_mode`.

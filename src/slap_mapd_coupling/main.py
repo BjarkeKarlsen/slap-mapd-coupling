@@ -115,9 +115,9 @@ def simulate(
 @click.option("--controller", type=click.Choice(CONTROLLERS), default=None)
 @click.option(
     "--regime",
-    type=click.Choice(["fixed_only", "matched"]),
+    type=click.Choice(["fixed", "demand", "congestion"]),
     default=None,
-    help="Training regime (sec:method:training): F_fix only, or the evaluation storage rule.",
+    help="Training regime (sec:method:training), the storage rule training runs under.",
 )
 @click.option(
     "--communication/--no-communication",

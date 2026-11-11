@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from slap_mapd_coupling.instances.generator import GeneratorParams
 from slap_mapd_coupling.training.spec import (
+    StorageRuleSettings,
     build_experiment_config,
     build_storage,
     build_study,
@@ -70,7 +71,7 @@ def test_the_file_and_the_example_build_the_same_study(example_04, spec, control
     study = build_study(load_spec(ROOT / "configs" / f"{controller}.yaml"))
     instance = example_04.build_generated_instance()
     skus, capacities, counts = example_04.build_storage(instance.graph)
-    config = example_04.build_config("fixed_only", seed=0, controller=controller)
+    config = example_04.build_config("fixed", seed=0, controller=controller)
 
     assert study.instance == instance
     assert (study.skus, study.capacities, study.counts) == (skus, capacities, counts)
@@ -81,8 +82,17 @@ def test_the_file_and_the_example_build_the_same_study(example_04, spec, control
 
 
 def test_the_regime_decides_the_storage_mode_of_training(spec):
-    matched = override_spec(spec, regime="matched")
-    assert build_experiment_config(matched).storage_mode == spec.evaluation_storage_mode
+    # The evaluation storage rule does not decide it.
+    data = spec.model_dump()
+    data.update(
+        regime="congestion",
+        evaluation_storage_mode="demand",
+        storage_rule=StorageRuleSettings(
+            epoch_length=100, reassignment_cap=48, congestion_weight=3.0
+        ).model_dump(),
+    )
+    congestion = type(spec).model_validate(data)
+    assert build_experiment_config(congestion).storage_mode == "congestion"
     assert build_experiment_config(spec).storage_mode == "fixed"
 
 

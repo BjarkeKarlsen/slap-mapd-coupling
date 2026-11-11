@@ -5,7 +5,7 @@
 # split per seed ([A76]). Q = 10, 5 lines per order, the safety stock of the most popular rank.
 # arrival_rate is set again by the next load sweep (thesis-progress/results/E_load/README.md).
 controller: decentralised
-regime: fixed_only
+regime: fixed
 communication: false
 evaluation_storage_mode: fixed
 arrival_rate: 0.18

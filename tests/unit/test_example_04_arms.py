@@ -41,7 +41,7 @@ def test_the_instance_is_the_generated_one_with_its_aisle_index(example_04, inst
     [("decentralised", 33, "none"), ("centralised", 51, "mean"), ("section", 44, "mean")],
 )
 def test_the_cap_is_the_largest_window_of_the_arm(example_04, instance, controller, cap, pooling):
-    config = example_04.build_config("fixed_only", seed=0, controller=controller)
+    config = example_04.build_config("fixed", seed=0, controller=controller)
     arm = example_04.build_arm(instance, controller, config.observation_depth)
     assert (arm.encoding.max_local_nodes, arm.pooling) == (cap, pooling)
     # Every window fits, and one vertex less would truncate the largest.
@@ -52,7 +52,7 @@ def test_the_cap_is_the_largest_window_of_the_arm(example_04, instance, controll
 
 
 def test_only_the_section_arm_has_zones_and_they_follow_the_aisles(example_04, instance):
-    config = example_04.build_config("fixed_only", seed=0)
+    config = example_04.build_config("fixed", seed=0)
     assert example_04.build_arm(instance, "decentralised", 5).zones is None
     assert example_04.build_arm(instance, "centralised", 5).zones is None
     zones = example_04.build_arm(instance, "section", config.observation_depth).zones

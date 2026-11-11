@@ -146,7 +146,7 @@ def test_every_mode_of_the_arrival_model_takes_delta_and_the_stock_settings(mode
 
 
 def test_the_arrival_model_trains_under_its_own_rules_too():
-    spec = _arrival_spec(_medium(), regime="matched", evaluation_storage_mode="demand")
+    spec = _arrival_spec(_medium(), regime="demand")
     config = build_experiment_config(spec)
     assert (config.storage_mode, config.stock_model) == ("demand", "arrival")
 

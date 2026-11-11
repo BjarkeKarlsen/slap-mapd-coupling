@@ -6,9 +6,9 @@ Every PPO hyperparameter of tab:trainparams is TBD, so PPOHyperparameters
 has a required field for each and no defaults, the training budget included.
 `c_wait` is a parameter of the study, so it stays in ExperimentConfig.
 
-TrainingRegime names the two regimes of sec:method:training, training under
-F_fix only or under the storage rule used at evaluation. The caller picks
-the storage mode and records which regime a run is.
+TrainingRegime is the storage rule a policy trains under (sec:method:training).
+Each storage rule gets its own policy, trained under the rule it is evaluated
+with. The caller picks the storage mode and records which regime a run is.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from slap_mapd_coupling.training.env import (
 )
 from slap_mapd_coupling.training.learner import BATCH_ON_CPU, GNNPPOTorchLearner
 
-TrainingRegime = Literal["fixed_only", "matched"]  # sec:method:training
+TrainingRegime = Literal["fixed", "demand", "congestion"]  # sec:method:training
 DEFAULT_POLICY_ID = "shared_policy"  # full parameter sharing, sec:method:training
 _ENV_NAME = "warehouse_mapd_multi_agent_env"
 
