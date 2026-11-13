@@ -170,6 +170,7 @@ def evaluate_run(
     trace_seeds: int = 0,
     horizon: int | None = None,
     warmup: int | None = None,
+    test_seeds: int | None = None,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -186,8 +187,14 @@ def evaluate_run(
     warm-up of the Token Passing runs, while training and the choice keep the run's own.
 
     The first `trace_seeds` test seeds of each checkpoint and rule also write a per-step trace
-    to `out_dir/traces/`, for the viewer (viz/pygame_renderer.py)."""
+    to `out_dir/traces/`, for the viewer (viz/pygame_renderer.py).
+
+    `test_seeds` plays that many test seeds instead of the count the run was trained with, for
+    example 20 for a run that stored 6 ([A91]). The test seeds stay the same range, longer.
+    The validation seeds, and so the chosen checkpoint, do not change."""
     spec = load_run_spec(run_dir)
+    if test_seeds is not None:
+        spec = spec.model_copy(update={"test_seed_count": test_seeds})
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
         raise ValueError(f"{run_dir} holds no checkpoints.")

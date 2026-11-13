@@ -348,7 +348,16 @@ def resume(output):
     "run's. With --horizon 10000 --warmup 5000 the test seeds play as the Token Passing runs "
     "of the appendices did.",
 )
-def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup):
+@click.option(
+    "--test-seeds",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Number of test seeds to play. Default: the run's own count. The validation seeds, "
+    "and so the chosen checkpoint, do not change.",
+)
+def evaluate(
+    run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup, test_seeds
+):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with. Among those that keep up on every
     seed the one with the shortest pick service time is chosen ([A60]), and it and the last
@@ -366,7 +375,14 @@ def evaluate(run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon,
     out = Path(output) if output is not None else run / default_name
     try:
         result = evaluate_run(
-            run, out, list(storage_modes) or None, arrival_rate, trace_seeds, horizon, warmup
+            run,
+            out,
+            list(storage_modes) or None,
+            arrival_rate,
+            trace_seeds,
+            horizon,
+            warmup,
+            test_seeds,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error

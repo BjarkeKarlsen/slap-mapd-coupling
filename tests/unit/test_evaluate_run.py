@@ -408,3 +408,25 @@ def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episod
         (training_rate, training_rate)
     }
     assert {(rate, spec_rate) for is_test, rate, spec_rate in rates if is_test} == {(0.3, 0.3)}
+
+
+def test_more_test_seeds_play_a_longer_test_range_and_keep_the_validation(
+    tmp_path, fake_episodes, monkeypatch
+):
+    played = fake_episodes([3, 9, 5])
+    monkeypatch.setattr(
+        evaluate_run_module,
+        "build_study",
+        lambda spec: SimpleNamespace(
+            seed_split=SeedSplitConfig(
+                training_seed=0,
+                train_seed_count=5,
+                validation_seed_count=2,
+                test_seed_count=spec.test_seed_count,
+            )
+        ),
+    )
+    result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out", test_seeds=7)
+    test_seeds = sorted({row["seed"] for row in result.test_rows})
+    assert test_seeds == list(range(TEST_SEED_START, TEST_SEED_START + 7))
+    assert len(result.validation_rows) == 3 * 2
