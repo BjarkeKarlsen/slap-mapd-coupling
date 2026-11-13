@@ -54,7 +54,7 @@ def fake_episodes(monkeypatch):
     )
 
     def install(completed):
-        def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+        def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
             index = int(checkpoint.name.split("_")[-1])
             played.append((checkpoint.name, seed))
             return FakeMetrics(
@@ -177,7 +177,7 @@ def test_the_test_seeds_are_played_under_every_mode_and_summarised(
     fake_episodes([3, 9, 5])
     modes_played = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
         modes_played.append(storage_mode)
         if storage_mode is None:
             return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
@@ -256,7 +256,7 @@ def test_another_load_plays_the_test_seeds_but_the_choice_stays_at_the_training_
 ):
     rates = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
         rates.append((seed >= TEST_SEED_START, spec.arrival_rate))
         return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
 
@@ -282,7 +282,7 @@ def test_another_horizon_and_warmup_play_the_test_seeds_only(tmp_path, fake_epis
     while the checkpoint is still chosen on the run's own episodes."""
     played = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
         played.append((seed >= TEST_SEED_START, spec.horizon, spec.warmup))
         return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
 
@@ -332,7 +332,7 @@ def _arrival_metrics(seed, storage_mode, service_time):
 
 
 def _summary_of(tmp_path, monkeypatch, metrics, spec_path):
-    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
         if storage_mode is None:
             return FakeMetrics(seed=seed, num_completed_tasks=3, throughput=0.3)
         return metrics(seed, storage_mode, 10.0 if storage_mode == "fixed" else 8.0 + seed % 3)
@@ -396,7 +396,7 @@ def test_the_test_seeds_start_from_the_stock_of_their_load(tmp_path, fake_episod
     )
     rates = []
 
-    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None):
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
         rates.append((seed >= TEST_SEED_START, study.rate, spec.arrival_rate))
         return FakeMetrics(seed=seed, num_completed_tasks=1, throughput=0.1)
 

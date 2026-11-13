@@ -83,11 +83,13 @@ def play(
     seed: int,
     storage_mode: StorageMode | None = None,
     trace_path: Path | None = None,
+    device: str | None = None,
 ) -> RunMetrics:
     """One sampled episode of `checkpoint` on the episode seed `seed`, under `storage_mode` or,
     when that is None, the storage rule the run trained with. With a warehouse per seed the
     episode plays the warehouse of `seed` (D27). With `trace_path` it writes a per-step trace
-    there, with the drawing positions of the warehouse it played."""
+    there, with the drawing positions of the warehouse it played. `device`, such as "cuda",
+    runs the policy's forward pass there, as training's learner did on a GPU."""
     instance, skus, counts, capacities, zones = (
         study.instance, study.skus, study.counts, study.capacities, study.arm.zones
     )  # fmt: skip
@@ -104,7 +106,7 @@ def play(
         build_experiment_config(spec, seed, storage_mode),
         trace_path,
         positions=instance.positions,
-        policy=ModulePolicy(load_module(checkpoint)),
+        policy=ModulePolicy(load_module(checkpoint), device),
         encoding_config=study.arm.encoding,
         zones=zones,
         pooling=study.arm.pooling,
@@ -171,6 +173,7 @@ def evaluate_run(
     horizon: int | None = None,
     warmup: int | None = None,
     test_seeds: int | None = None,
+    device: str | None = None,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -191,7 +194,8 @@ def evaluate_run(
 
     `test_seeds` plays that many test seeds instead of the count the run was trained with, for
     example 20 for a run that stored 6 ([A91]). The test seeds stay the same range, longer.
-    The validation seeds, and so the chosen checkpoint, do not change."""
+    The validation seeds, and so the chosen checkpoint, do not change. `device`, such as
+    "cuda", runs every forward pass there."""
     spec = load_run_spec(run_dir)
     if test_seeds is not None:
         spec = spec.model_copy(update={"test_seed_count": test_seeds})
@@ -214,7 +218,7 @@ def evaluate_run(
     for checkpoint in checkpoints:
         episodes = []
         for seed in seeds.validation:
-            metrics = play(study, spec, checkpoint, seed)
+            metrics = play(study, spec, checkpoint, seed, device=device)
             episodes.append(metrics)
             row = {"checkpoint": checkpoint.name, **metrics.model_dump(mode="json")}
             validation_rows.append(row)
@@ -232,7 +236,7 @@ def evaluate_run(
                 if n < trace_seeds:
                     trace = out_dir / "traces" / f"{role}_{mode}_seed{seed}.jsonl"
                     trace.parent.mkdir(parents=True, exist_ok=True)
-                metrics = play(test_study, test_spec, checkpoint, seed, mode, trace)
+                metrics = play(test_study, test_spec, checkpoint, seed, mode, trace, device=device)
                 played.setdefault((role, mode), []).append(metrics)
                 row = {
                     "role": role,

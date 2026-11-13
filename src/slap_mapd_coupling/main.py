@@ -355,8 +355,14 @@ def resume(output):
     help="Number of test seeds to play. Default: the run's own count. The validation seeds, "
     "and so the chosen checkpoint, do not change.",
 )
+@click.option(
+    "--gpu",
+    is_flag=True,
+    default=False,
+    help="Run the policy's forward pass on the GPU (cuda). The episodes still run on the CPU.",
+)
 def evaluate(
-    run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup, test_seeds
+    run_dir, output, storage_modes, arrival_rate, trace_seeds, horizon, warmup, test_seeds, gpu
 ):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with. Among those that keep up on every
@@ -383,6 +389,7 @@ def evaluate(
             horizon,
             warmup,
             test_seeds,
+            "cuda" if gpu else None,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error

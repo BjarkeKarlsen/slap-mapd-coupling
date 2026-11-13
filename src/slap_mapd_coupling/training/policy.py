@@ -49,8 +49,11 @@ class ModulePolicy:
     which is the routing runtime of the episode log.
     """
 
-    def __init__(self, module: RLModule) -> None:
-        self._module = module
+    def __init__(self, module: RLModule, device: Optional[str] = None) -> None:
+        """`device`, such as "cuda", runs the forward pass there. None keeps the module where it
+        is, the CPU for a module loaded from a checkpoint."""
+        self._device = device
+        self._module = module if device is None else module.to(device)
         self._episode_seed: Optional[int] = None
         self._record_runtime: Optional[Callable[[float], None]] = None
 
@@ -72,10 +75,10 @@ class ModulePolicy:
         if not agent_ids:
             return {}
         # A fresh batch per call, since forward_inference can change it in place.
-        batch = _batch([observations[a] for a in agent_ids])
+        batch = _batch([observations[a] for a in agent_ids], self._device)
         with torch.no_grad():
             out = self._module.forward_inference(batch)
-        logits = out[Columns.ACTION_DIST_INPUTS].detach().numpy()
+        logits = out[Columns.ACTION_DIST_INPUTS].detach().cpu().numpy()
 
         slots: dict[str, int] = {}
         for row, agent_id in enumerate(agent_ids):
@@ -90,13 +93,13 @@ class ModulePolicy:
         return slots
 
 
-def _batch(rows: Sequence[Mapping[str, Any]]) -> dict:
-    """One batch with a row per robot, in the order given. Each row is the
-    {"action_mask", "observations"} dict the adapter returns."""
+def _batch(rows: Sequence[Mapping[str, Any]], device: Optional[str] = None) -> dict:
+    """One batch with a row per robot, in the order given, on `device` (None: the CPU). Each
+    row is the {"action_mask", "observations"} dict the adapter returns."""
 
     def stack(key: str, nested: bool) -> torch.Tensor:
         source = [row["observations"][key] if nested else row[key] for row in rows]
-        return torch.as_tensor(np.stack(source))
+        return torch.as_tensor(np.stack(source), device=device)
 
     return {
         Columns.OBS: {
