@@ -106,8 +106,8 @@ ppo:
   training_budget_env_steps: 500000
 
 train_seed_count: 250
-validation_seed_count: 2
-test_seed_count: 6
+validation_seed_count: 5
+test_seed_count: 20
 
 checkpoint:
   frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end

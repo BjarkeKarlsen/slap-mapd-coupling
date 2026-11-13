@@ -293,6 +293,30 @@ def longest_completion_gap(tasks: Sequence[Task], warmup: int, horizon: int) -> 
     return max(later - earlier for earlier, later in zip(marks, marks[1:]))
 
 
+def longest_two_agent_hold(tasks: Sequence[Task], warmup: int, horizon: int) -> int:
+    """The longest time two agents both held their current task at the same step, in steps, at
+    a step in [warmup, T] ([A91]). At each step it is the second longest hold of the tasks held
+    then, the hold counted from the task's assignment. A lock at a workstation keeps at least two
+    agents holding their tasks, so a long value flags one, and the threshold is applied in the
+    analysis. An agent with no task never counts: idle agents park on endpoints and do not block.
+    The second longest hold only grows while no held task finishes, so it peaks the step before
+    a task finishes or at T, and only those steps are checked."""
+    held = [
+        (task.assignment_time, task.finish_time if task.finish_time is not None else horizon)
+        for task in tasks
+        if task.assignment_time is not None
+    ]
+    ends = {min(end, horizon) - 1 for _, end in held} | {horizon - 1}
+    longest = 0
+    for t in ends:
+        if t < warmup:
+            continue
+        holds = sorted((t - start for start, end in held if start <= t < end), reverse=True)
+        if len(holds) >= 2:
+            longest = max(longest, holds[1])
+    return longest
+
+
 def robot_busy_share(
     tasks: Sequence[Task], num_agents: int, horizon: int, warmup: int = 0
 ) -> float:
@@ -456,6 +480,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     # the longest stretch in the window in which no task finished, the stall measure (D18).
     longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
     completion_gap = longest_completion_gap(env.tasks, warmup, horizon)
+    two_agent_hold = longest_two_agent_hold(env.tasks, warmup, horizon)
     throughput = num_completed / (horizon - warmup)  # Lambda_T over the window
 
     # Mean service time and its split, eq:meanservice / eq:split, over the completed picks.
@@ -612,6 +637,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         keeps_up_picks=keep_up_picks,
         keeps_up_putaways=keep_up_putaways,
         longest_stand_still=longest_stand_still,
+        longest_two_agent_hold=two_agent_hold,
         longest_completion_gap=completion_gap,
         stalled=None if config.stall_length is None else completion_gap > config.stall_length,
         num_waiting_tasks=num_waiting,

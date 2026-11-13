@@ -118,6 +118,10 @@ class RunMetrics(BaseModel):
     longest_stand_still: NonNegativeInt = 0
     # The longest stretch of steps in [T_warm, T] in which no robot finished a task (D18).
     longest_completion_gap: NonNegativeInt = 0
+    # The longest time two agents both held their current task at once, in [T_warm, T] ([A91]).
+    # A lock at a workstation keeps two or more agents holding theirs. The threshold for a lock
+    # is applied in the analysis.
+    longest_two_agent_hold: NonNegativeInt = 0
     # longest_completion_gap > the stall length, a jam the fleet may have caught up from. None
     # unless the stall length is configured, since tab:evalparams leaves it TBD.
     stalled: bool | None = None

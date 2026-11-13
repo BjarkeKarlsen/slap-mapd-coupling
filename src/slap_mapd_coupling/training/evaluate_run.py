@@ -114,6 +114,31 @@ def play(
     )
 
 
+def validate_checkpoint(
+    run_dir: Path,
+    checkpoint: Path,
+    study: Study,
+    spec: TrainingSpec,
+    seeds: Sequence[int],
+    device: str | None = None,
+) -> list[RunMetrics]:
+    """`checkpoint` on the validation seeds, under the rule and the episode length the run trained
+    with. The episodes are kept in RUN_DIR/validation/<checkpoint>.jsonl, written while training
+    goes on (trainer.ValidationLog) or here, and read back when they cover the same seeds, so a
+    checkpoint is validated once."""
+    path = run_dir / "validation" / f"{checkpoint.name}.jsonl"
+    if path.exists():
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        if [row["seed"] for row in rows] == list(seeds):
+            return [RunMetrics.model_validate(row) for row in rows]
+    episodes = [play(study, spec, checkpoint, seed, device=device) for seed in seeds]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(m.model_dump(mode="json")) + "\n" for m in episodes), encoding="utf-8"
+    )
+    return episodes
+
+
 def build_test_study(
     spec: TrainingSpec,
     study: Study,
@@ -216,10 +241,8 @@ def evaluate_run(
     validation_rows: list[dict] = []
     played_validation: list[list] = []
     for checkpoint in checkpoints:
-        episodes = []
-        for seed in seeds.validation:
-            metrics = play(study, spec, checkpoint, seed, device=device)
-            episodes.append(metrics)
+        episodes = validate_checkpoint(run_dir, checkpoint, study, spec, seeds.validation, device)
+        for metrics in episodes:
             row = {"checkpoint": checkpoint.name, **metrics.model_dump(mode="json")}
             validation_rows.append(row)
             _append(validation_path, row)
@@ -247,7 +270,52 @@ def evaluate_run(
                 test_rows.append(row)
                 _append(test_path, row)
     (out_dir / "summary.md").write_text(_summary(modes, played), encoding="utf-8")
+    (out_dir / "evaluation.json").write_text(
+        json.dumps(
+            _record(run_dir, spec, test_spec, seeds, checkpoints, chosen, last, modes, device),
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
     return RunEvaluation(chosen, last, validation_rows, test_rows)
+
+
+def _record(run_dir, spec, test_spec, seeds, checkpoints, chosen, last, modes, device) -> dict:
+    """What `evaluation.json` holds: the run, the policy tested and why, and how it was tested,
+    so a result can be traced back and made again."""
+    import datetime
+    import subprocess
+
+    commit = subprocess.run(
+        ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip() or None  # fmt: skip
+    frequency = spec.checkpoint.frequency
+    def iteration(checkpoint: Path) -> int:
+        return frequency * (int(checkpoint.name.split("_")[-1]) + 1)
+    return {
+        "run_dir": str(run_dir.resolve()),
+        "controller": spec.controller,
+        "communication": spec.communication,
+        "trained_under": spec.regime,
+        "num_agents": spec.experiment.num_agents,
+        "training_load": spec.arrival_rate,
+        "budget_env_steps": spec.ppo.training_budget_env_steps,
+        "checkpoint_every": frequency,
+        "rule": "[A60]: of the checkpoints that keep up on every validation seed, the one with "
+        "the shortest mean pick service time, else the highest throughput.",
+        "chosen": {"checkpoint": chosen.name, "iteration": iteration(chosen), "path": str(chosen)},
+        "last": {"checkpoint": last.name, "iteration": iteration(last), "path": str(last)},
+        "checkpoints_validated": len(checkpoints),
+        "validation": {"seeds": list(seeds.validation), "horizon": spec.horizon,
+                       "warmup": spec.warmup},
+        "test": {"seeds": list(seeds.test), "horizon": test_spec.horizon,
+                 "warmup": test_spec.warmup, "load": test_spec.arrival_rate,
+                 "storage_modes": list(modes)},
+        "device": device or "cpu",
+        "code_commit": commit,
+        "finished": datetime.datetime.now().isoformat(timespec="minutes"),
+    }
 
 
 # The gain in mean pick service time and the relative gain lead. The order completion time

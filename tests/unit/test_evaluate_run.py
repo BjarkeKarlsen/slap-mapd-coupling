@@ -430,3 +430,31 @@ def test_more_test_seeds_play_a_longer_test_range_and_keep_the_validation(
     test_seeds = sorted({row["seed"] for row in result.test_rows})
     assert test_seeds == list(range(TEST_SEED_START, TEST_SEED_START + 7))
     assert len(result.validation_rows) == 3 * 2
+
+
+def test_an_evaluation_goes_beside_the_training_runs(tmp_path):
+    from slap_mapd_coupling.main import default_output
+
+    run = tmp_path / "training" / "fleet_16" / "section" / "fixed"
+    run.mkdir(parents=True)
+    assert default_output(run, "evaluation_x") == (
+        tmp_path.resolve() / "evaluation" / "fleet_16" / "section" / "fixed" / "evaluation_x"
+    )
+    elsewhere = tmp_path / "run"
+    elsewhere.mkdir()
+    assert default_output(elsewhere, "evaluation_x") == elsewhere / "evaluation_x"
+
+
+def test_a_validated_checkpoint_is_read_back_and_not_played_again(
+    tmp_path, fake_episodes, monkeypatch
+):
+    run = _run_dir(tmp_path, 1)
+    checkpoint = checkpoints_of(run)[0]
+    row = RunMetrics.model_construct(seed=100000)
+    path = run / "validation" / f"{checkpoint.name}.jsonl"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"seed": 100000}) + "\n")
+    monkeypatch.setattr(RunMetrics, "model_validate", classmethod(lambda cls, data: row))
+    played = fake_episodes([1])
+    episodes = evaluate_run_module.validate_checkpoint(run, checkpoint, None, None, [100000])
+    assert episodes == [row] and played == []

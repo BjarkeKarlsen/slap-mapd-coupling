@@ -245,6 +245,7 @@ def train(
         settings=spec.checkpoint,
         storage_path=out,
         progress_path=out / f"{name}_training_progress.jsonl",
+        validate_in=out,
     )
     _report_run(run, spec, out)
 
@@ -378,7 +379,7 @@ def evaluate(
         for name, value in (("rate", arrival_rate), ("horizon", horizon), ("warmup", warmup))
         if value is not None
     )
-    out = Path(output) if output is not None else run / default_name
+    out = Path(output) if output is not None else default_output(run, default_name)
     try:
         result = evaluate_run(
             run,
@@ -406,6 +407,44 @@ def evaluate(
                 f"on {len(rows)} seeds"
             )
     click.echo(f"Rows written to {out}")
+
+
+def default_output(run, name):
+    """Where an evaluation goes when no --output is given: beside the training runs, in
+    evaluation/ in place of training/ (~/thesis_runs/evaluation/fleet_16/section/fixed/<name>), so
+    the results are apart from the runs. A run outside a training/ folder keeps it inside."""
+    from pathlib import Path
+
+    parts = run.resolve().parts
+    if "training" in parts:
+        i = len(parts) - 1 - parts[::-1].index("training")
+        return Path(*parts[:i], "evaluation", *parts[i + 1 :], name)
+    return run / name
+
+
+@cli.command()
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("checkpoint", type=click.Path(exists=True, file_okay=False))
+def validate(run_dir, checkpoint):
+    """Play CHECKPOINT of the run in RUN_DIR on the validation seeds, under the rule and episode
+    length it trained with, into RUN_DIR/validation/<checkpoint>.jsonl. Training calls it for
+    every checkpoint it saves. evaluate reads the rows back."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.config import split_seeds
+    from slap_mapd_coupling.training.evaluate_run import load_run_spec, validate_checkpoint
+    from slap_mapd_coupling.training.spec import build_study
+
+    run = Path(run_dir)
+    spec = load_run_spec(run)
+    study = build_study(spec)
+    episodes = validate_checkpoint(
+        run, Path(checkpoint), study, spec, split_seeds(study.seed_split).validation
+    )
+    click.echo(
+        f"{Path(checkpoint).name}: {len(episodes)} validation seeds, keep up "
+        f"{sum(bool(m.keeps_up) for m in episodes)}"
+    )
 
 
 @cli.command("prepare-warehouses")

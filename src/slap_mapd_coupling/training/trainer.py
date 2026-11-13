@@ -113,6 +113,58 @@ class ProgressLog(tune.Callback):
             self._progress_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
+class ValidationLog(tune.Callback):
+    """Plays every checkpoint on the validation seeds while training goes on, so the choice of
+    the checkpoint to test is ready when training ends (training and validation together, the
+    test apart). Each checkpoint is played by its own `slap-mapd validate` process, one at a
+    time and in the order they were saved, in a thread of the driver, so training does not wait
+    for it. It writes RUN_DIR/validation/<checkpoint>.jsonl. The end of the run waits for the
+    last one. `evaluate` plays any checkpoint this missed, such as those of a resumed run."""
+
+    def __init__(self, run_dir: Path) -> None:
+        self._run_dir = run_dir
+        self._queue: Any = None
+        self._thread: Any = None
+
+    def __getstate__(self) -> dict:
+        # Tune saves its callbacks with the run. A thread cannot be saved, so it starts again.
+        return {"_run_dir": self._run_dir, "_queue": None, "_thread": None}
+
+    def _start(self) -> None:
+        import queue
+        import threading
+
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._work, daemon=True)
+        self._thread.start()
+
+    def _work(self) -> None:
+        import os
+        import subprocess
+        import sys
+
+        log_dir = self._run_dir / "validation"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+        while (checkpoint := self._queue.get()) is not None:
+            with open(log_dir / "validate.log", "a", encoding="utf-8") as log:
+                subprocess.run(
+                    [sys.executable, "-m", "slap_mapd_coupling.main", "validate",
+                     str(self._run_dir), str(checkpoint)],
+                    stdout=log, stderr=subprocess.STDOUT, env=env, check=False,
+                )  # fmt: skip
+
+    def on_checkpoint(self, iteration, trials, trial, checkpoint, **info: Any) -> None:
+        if self._thread is None:
+            self._start()
+        self._queue.put(Path(checkpoint.path))
+
+    def on_experiment_end(self, trials, **info: Any) -> None:
+        if self._thread is not None:
+            self._queue.put(None)
+            self._thread.join()
+
+
 def checkpoint_config(settings: CheckpointSettings) -> tune.CheckpointConfig:
     """Tune's checkpoint configuration for `settings`. The checkpoint at the end of the run is
     always written, so a run that stops between two periodic checkpoints still has its last."""
@@ -134,13 +186,16 @@ def train(
     settings: CheckpointSettings | None = None,
     storage_path: Path | None = None,
     progress_path: Path | None = None,
+    validate_in: Path | None = None,
 ) -> TrainingRun:
     """Trains with Ray Tune, stops at the first iteration at or above the training budget in
     timesteps, and returns the checkpoint of the end of the run and the best one.
 
     `ppo_config` is the PPOConfig object, not `to_dict()`. `storage_path` is where Tune writes
     the run (Ray's default, ~/ray_results, when None). An iteration samples one episode per
-    runner, so the run overshoots the budget by up to one iteration's timesteps.
+    runner, so the run overshoots the budget by up to one iteration's timesteps. With
+    `validate_in`, the run folder holding the spec, every checkpoint is played on the validation
+    seeds as training goes on (ValidationLog).
     """
     settings = settings or CheckpointSettings()
     # An iteration samples one episode per runner, which is total_train_batch_size timesteps
@@ -162,7 +217,8 @@ def train(
             storage_path=str(storage_path.resolve()) if storage_path is not None else None,
             stop={BUDGET_METRIC: budget_env_steps},
             checkpoint_config=checkpoint_config(settings),
-            callbacks=[ProgressLog(expected_iterations, progress_path)],
+            callbacks=[ProgressLog(expected_iterations, progress_path)]
+            + ([ValidationLog(validate_in)] if validate_in is not None else []),
         ),
     ).fit()
     return _finished_run(results, settings)

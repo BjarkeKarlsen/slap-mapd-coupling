@@ -389,3 +389,21 @@ def test_a_template_run_has_no_order_measures():
     assert metrics.mean_order_completion is None
     assert metrics.num_completed_orders == 0
     assert metrics.mean_tasks_per_line is None
+
+
+def test_the_longest_two_agent_hold_is_the_second_longest_hold_at_one_step():
+    from types import SimpleNamespace
+
+    from slap_mapd_coupling.evaluation.evaluator import longest_two_agent_hold
+
+    def task(assigned, finished):
+        return SimpleNamespace(assignment_time=assigned, finish_time=finished)
+
+    # Two tasks held from 0 and 10, both still held at T = 100: at step 99 they have been held
+    # 99 and 89 steps, so the two-agent hold is 89. A task never assigned does not count.
+    tasks = [task(0, None), task(10, None), task(None, None)]
+    assert longest_two_agent_hold(tasks, warmup=0, horizon=100) == 89
+    # One agent alone holding a task for long is not a lock.
+    assert longest_two_agent_hold([task(0, None), task(90, 95)], warmup=0, horizon=100) == 4
+    # Steps before the warm-up are not measured.
+    assert longest_two_agent_hold([task(0, 20), task(5, 20)], warmup=50, horizon=100) == 0
