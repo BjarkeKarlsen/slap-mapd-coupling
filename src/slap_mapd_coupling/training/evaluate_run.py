@@ -199,6 +199,7 @@ def evaluate_run(
     warmup: int | None = None,
     test_seeds: int | None = None,
     device: str | None = None,
+    validation_seeds: int | None = None,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -219,11 +220,14 @@ def evaluate_run(
 
     `test_seeds` plays that many test seeds instead of the count the run was trained with, for
     example 20 for a run that stored 6 ([A91]). The test seeds stay the same range, longer.
-    The validation seeds, and so the chosen checkpoint, do not change. `device`, such as
+    The validation seeds, and so the chosen checkpoint, do not change. `validation_seeds` does the
+    same for the validation seeds, for example 5 for a run that stored 2. `device`, such as
     "cuda", runs every forward pass there."""
     spec = load_run_spec(run_dir)
     if test_seeds is not None:
         spec = spec.model_copy(update={"test_seed_count": test_seeds})
+    if validation_seeds is not None:
+        spec = spec.model_copy(update={"validation_seed_count": validation_seeds})
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
         raise ValueError(f"{run_dir} holds no checkpoints.")

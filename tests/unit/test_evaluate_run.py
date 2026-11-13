@@ -458,3 +458,25 @@ def test_a_validated_checkpoint_is_read_back_and_not_played_again(
     played = fake_episodes([1])
     episodes = evaluate_run_module.validate_checkpoint(run, checkpoint, None, None, [100000])
     assert episodes == [row] and played == []
+
+
+def test_more_validation_seeds_play_every_checkpoint_on_a_longer_range(
+    tmp_path, fake_episodes, monkeypatch
+):
+    played = fake_episodes([3, 9, 5])
+    monkeypatch.setattr(
+        evaluate_run_module,
+        "build_study",
+        lambda spec: SimpleNamespace(
+            seed_split=SeedSplitConfig(
+                training_seed=0,
+                train_seed_count=5,
+                validation_seed_count=spec.validation_seed_count,
+                test_seed_count=3,
+            )
+        ),
+    )
+    result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out", validation_seeds=5)
+    seeds = sorted({row["seed"] for row in result.validation_rows})
+    assert seeds == list(range(VALIDATION_SEED_START, VALIDATION_SEED_START + 5))
+    assert len(result.validation_rows) == 3 * 5
