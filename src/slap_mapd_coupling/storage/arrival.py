@@ -343,9 +343,12 @@ def _refill_scores(
     refill_units: int,
     extra: dict[VertexId, float] | None = None,
     sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
+    pick_extra: dict[VertexId, float] | None = None,
 ) -> Callable[[SkuId], list[VertexId]]:
     """Each SKU's shelves under the refill rule with robot put-away, by the leg-weighted
-    distance plus `extra` (the congestion term), ties by d^trip, then vertex id. With
+    distance plus `extra`, ties by d^trip, then vertex id. `pick_extra` ([A93]) is added to the
+    pick leg, so it is weighed by how often the SKU is picked, as every pick from the shelf meets
+    it. With
     `sku_delivery` ([A76], [A77]) a SKU's pick leg is the mean distance to the workstations of
     its own section, since an order picks any of them alike, and a SKU missing from it keeps
     the mean over every delivery vertex."""
@@ -356,6 +359,7 @@ def _refill_scores(
     putaway_leg = {v: receiving_distance(graph, v, receiving) for v in storage}
     trip = {v: trip_distance(graph, v, receiving, delivery) for v in storage}
     added = extra or {}
+    pick_added = pick_extra or {}
 
     targets = sku_delivery or {}
 
@@ -371,7 +375,9 @@ def _refill_scores(
         return sorted(
             storage,
             key=lambda v: (
-                leg_weighted_distance(picks, refills, own[v], putaway_leg[v])
+                leg_weighted_distance(
+                    picks, refills, own[v] + pick_added.get(v, 0.0), putaway_leg[v]
+                )
                 + added.get(v, 0.0),
                 trip[v],
                 v,
@@ -488,8 +494,13 @@ def putaway_congestion(
     refill_units: int | None = None,
     unit_estimate: DemandEstimate | None = None,
     sku_delivery: dict[SkuId, tuple[VertexId, ...]] | None = None,
+    shelf_standing_still: dict[VertexId, float] | None = None,
 ) -> PutAwayResult:
-    """The most demanded SKUs first, each into its shelves by the congestion-aware score."""
+    """The most demanded SKUs first, each into its shelves by the congestion-aware score
+    ([A93]) rho_hat_t(k) * (d^trip(k, v) + beta * omega_hat_t(v)), omega_hat_t(v) the steps the
+    picks from v stood still (`shelf_standing_still`, the environment's five-reading average).
+    The edge estimates mu_hat_t and w_hat_t are no longer read on the robot put-away paths. The
+    instant put-away path (no `trip`) still uses them and is not part of the thesis model."""
     if congestion_weight is None:
         raise ValueError(
             "the congestion put-away rule requires congestion_weight (beta); "
@@ -498,45 +509,36 @@ def putaway_congestion(
     storage = storage_vertices(graph)
     delivery = delivery_vertices(graph)
 
+    still = shelf_standing_still or {}
     if trip and refill_units is not None:
-        # The leg-weighted distance plus beta * the traffic over the trip.
-        trip_receiving = delivery if receiving is None else receiving
-        exposure = {
-            v: congestion_weight
-            * trip_exposure(
-                graph, v, trip_receiving, delivery, traversal_estimate, waiting_estimate
-            )
-            for v in storage
-        }
+        # The leg-weighted distance, the pick leg plus beta * omega_hat_t(v) [A93].
         order = _refill_scores(
             graph,
             receiving,
             demand_estimate,
             unit_estimate or {},
             refill_units,
-            exposure,
+            None,
             sku_delivery,
+            {v: congestion_weight * still.get(v, 0.0) for v in storage},
         )
         return _put_away(
             x_prev, amounts, _by_demand(x_prev, demand_estimate), order, whole=refill_units
         )
 
     if trip:
-        # The score rho_hat_t(k) * d^trip(v) + beta * the traffic over the trip. The trip of a
-        # shelf does not depend on the SKU, so both parts are worked out once per shelf.
+        # The score rho_hat_t(k) * (d^trip(v) + beta * omega_hat_t(v)) [A93]. The trip of a
+        # shelf does not depend on the SKU, so it is worked out once per shelf.
         trip_receiving = delivery if receiving is None else receiving
         weight = congestion_weight
         distance = {v: trip_distance(graph, v, trip_receiving, delivery) for v in storage}
-        exposure = {
-            v: trip_exposure(
-                graph, v, trip_receiving, delivery, traversal_estimate, waiting_estimate
-            )
-            for v in storage
-        }
 
         def trip_order(sku_id: SkuId) -> list[VertexId]:
             rho = demand_estimate.get(sku_id, 0.0)
-            return sorted(storage, key=lambda v: (rho * distance[v] + weight * exposure[v], v))
+            return sorted(
+                storage,
+                key=lambda v: (rho * (distance[v] + weight * still.get(v, 0.0)), distance[v], v),
+            )
 
         return _put_away(x_prev, amounts, _by_demand(x_prev, demand_estimate), trip_order)
 

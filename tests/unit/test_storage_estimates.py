@@ -523,3 +523,33 @@ def _counts(edges) -> dict[tuple[int, int], int]:
 
 def _per_step(counts: dict[tuple[int, int], int], delta: int) -> dict[tuple[int, int], float]:
     return {edge: n / delta for edge, n in counts.items()}
+
+
+def test_a_window_reads_the_mean_standing_still_of_the_picks_per_shelf():
+    """[A93]: each finished pick adds its steps stood still to the shelf it came from."""
+    from slap_mapd_coupling.environment.storage_estimates import WindowEstimator
+
+    estimator = WindowEstimator()
+    estimator.record_pick_standing_still(3, 4)
+    estimator.record_pick_standing_still(3, 8)
+    estimator.record_pick_standing_still(5, 0)
+    estimates = estimator.close_window(100)
+    assert estimates.standing_still == {3: 6.0, 5: 0.0}
+    assert estimator.close_window(100).standing_still == {}
+
+
+def test_the_shelf_standing_still_is_the_average_of_its_last_five_readings():
+    """[A93]: omega_hat is the plain average of a shelf's last five readings, a shelf with no
+    pick in a window keeps its average, and a shelf with no reading reads nothing."""
+    from slap_mapd_coupling.environment.storage_estimates import SHELF_READINGS, ShelfStandingStill
+
+    assert SHELF_READINGS == 5
+    still = ShelfStandingStill()
+    assert still.estimate() == {}
+    for value in (10.0, 20.0, 30.0, 40.0, 50.0):
+        still.update({1: value})
+    assert still.estimate() == {1: 30.0}
+    still.update({1: 60.0})  # the oldest reading, 10, drops out
+    assert still.estimate() == {1: 40.0}
+    still.update({2: 7.0})  # shelf 1 has no pick in this window and keeps its average
+    assert still.estimate() == {1: 40.0, 2: 7.0}

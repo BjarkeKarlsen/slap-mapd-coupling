@@ -111,7 +111,7 @@ from slap_mapd_coupling.core.tasks import Task, TaskId, active_tasks_by_agent
 from slap_mapd_coupling.environment.observation import local_subgraph, occupancy_fraction
 from slap_mapd_coupling.environment.reward_function import RewardTerms, reward_terms
 from slap_mapd_coupling.environment.spaces import action_for_slot
-from slap_mapd_coupling.environment.storage_estimates import WindowEstimator
+from slap_mapd_coupling.environment.storage_estimates import ShelfStandingStill, WindowEstimator
 from slap_mapd_coupling.resolution.conflict_resolution import (
     priority_permutation,
     resolve_conflicts,
@@ -545,6 +545,8 @@ class WarehouseMAPDEnv:
         # line, its units not yet delivered to the workstation and its units in all.
         self._open_orders: dict[int, list] = {}
         self._estimator = WindowEstimator()
+        # [A93]: omega_hat_t(v), the steps picks from each shelf stood still, last five readings.
+        self._shelf_still = ShelfStandingStill()
         self.last_proposed = {}
         self.last_overridden = frozenset()
         # An assigner that keeps state (Token Passing's committed paths) must not carry
@@ -727,6 +729,7 @@ class WarehouseMAPDEnv:
         Orders still waiting are served by stage 1 of the next step, not here."""
         assert self._putaway_rule is not None
         estimates = self._estimator.close_window(delta)
+        self._shelf_still.update(estimates.standing_still)
         robots = self.config.stock_putaway == "robots"
         # The arrivals count the stock on its way as stock, so it is not ordered again.
         given = self._shelf_and_transit() if robots else self.storage
@@ -768,6 +771,9 @@ class WarehouseMAPDEnv:
             options["trip"] = True
         if self.config.storage_mode == "random":
             options["rng"] = self._putaway_rng
+        if self.config.storage_mode == "congestion":
+            # [A93]: congestion-aware storage reads omega_hat_t, not mu_hat_t and w_hat_t.
+            options["shelf_standing_still"] = self._shelf_still.estimate()
         if refill_units is not None:
             options["refill_units"] = refill_units
             options["unit_estimate"] = estimates.units
@@ -1073,13 +1079,21 @@ class WarehouseMAPDEnv:
         }
         still_waiting: list[OrderLine] = []
         new_tasks: list[Task] = []
+        # [A93]: under congestion-aware storage a line ranks the holders by distance plus the
+        # steps picks from them have stood still. The other rules keep the nearest holder first.
+        still = (
+            self._shelf_still.estimate() if self.config.storage_mode == "congestion" else {}
+        )
         for line in self._waiting_orders:
             # The pickup rule: the holders nearest the delivery vertex first, ties by vertex id,
             # each giving one task for min(units still missing, units it holds).
             per_vertex = counts.get(line.sku, {})
             holders = sorted(
                 (v for v, count in per_vertex.items() if count > 0),
-                key=lambda v: (self.graph.distance(v, line.delivery_vertex), v),
+                key=lambda v: (
+                    self.graph.distance(v, line.delivery_vertex) + still.get(v, 0.0),
+                    v,
+                ),
             )
             missing = line.missing
             for pickup in holders:
@@ -1306,6 +1320,11 @@ class WarehouseMAPDEnv:
                     self._pick_up_units(task, next_t)
             if task.pickup_time is not None and location == task.delivery_vertex:
                 task = task.complete(next_t)
+                if task.kind == "pick":
+                    # [A93]: the steps this pick stood still, noted on the shelf it came from.
+                    self._estimator.record_pick_standing_still(
+                        task.pickup_vertex, self.log.blocked_ticks_by_task.get(task.task_id, 0)
+                    )
                 if task.kind == "putaway":
                     self._shelve(task, next_t)
                 elif task.kind == "pick" and self.config.shipping:

@@ -40,8 +40,10 @@ environment charges them at stage 5 (WarehouseMAPDEnv._record_wait).
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
+from slap_mapd_coupling.core.graph import VertexId
 from slap_mapd_coupling.core.storage_state import SkuId
 from slap_mapd_coupling.storage.base import DemandEstimate, EdgeKey, TrafficEstimate
 
@@ -57,6 +59,9 @@ class WindowEstimates:
     traversal: TrafficEstimate  # mu_hat_t(e), traversals per step
     waiting: TrafficEstimate  # w_hat_t(e), waits per step
     num_orders: int  # orders released in the window, summed over SKUs
+    # [A93]: per shelf, the mean steps the picks from it that finished in the window stood
+    # still, the reading ShelfStandingStill averages. A shelf with no finished pick has no entry.
+    standing_still: dict[VertexId, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,6 +73,8 @@ class WindowEstimator:
     units: dict[SkuId, int] = field(default_factory=dict)
     traversals: dict[EdgeKey, int] = field(default_factory=dict)
     waits: dict[EdgeKey, int] = field(default_factory=dict)
+    # [A93]: per shelf, [steps stood still, picks] of the picks from it finished in the window.
+    picks_still: dict[VertexId, list[int]] = field(default_factory=dict)
 
     def record_order(self, sku: SkuId, units: int = 1) -> None:
         """One order line for `units` units of `sku` was released."""
@@ -82,6 +89,13 @@ class WindowEstimator:
         """A robot serving a task stood still, waiting to enter `edge`."""
         self.waits[edge] = self.waits.get(edge, 0) + 1
 
+    def record_pick_standing_still(self, shelf: VertexId, steps: int) -> None:
+        """A pick from `shelf` finished, and its agent stood still `steps` steps while serving
+        it, the blocked part of its service time (eq:split) [A93]."""
+        total = self.picks_still.setdefault(shelf, [0, 0])
+        total[0] += steps
+        total[1] += 1
+
     def close_window(self, window_length: int) -> WindowEstimates:
         """The estimates of the window of `window_length` steps that ends now, and a
         fresh window. The counts are divided by the number of steps."""
@@ -93,9 +107,32 @@ class WindowEstimator:
             traversal={e: n / window_length for e, n in self.traversals.items()},
             waiting={e: n / window_length for e, n in self.waits.items()},
             num_orders=sum(self.orders.values()),
+            standing_still={v: steps / picks for v, (steps, picks) in self.picks_still.items()},
         )
+        self.picks_still = {}
         self.orders = {}
         self.units = {}
         self.traversals = {}
         self.waits = {}
         return estimates
+
+
+# [A93]: a shelf's standing still is the plain average of its last five readings.
+SHELF_READINGS = 5
+
+
+@dataclass
+class ShelfStandingStill:
+    """omega_hat_t(v) of [A93], the steps the picks from shelf v stood still, averaged over its
+    last SHELF_READINGS readings. A reading is the mean of one storage window, taken only when a
+    pick from the shelf finished in it, so a shelf with no pick keeps its average. A shelf with no
+    reading yet reads zero."""
+
+    readings: dict[VertexId, deque] = field(default_factory=dict)
+
+    def update(self, window: dict[VertexId, float]) -> None:
+        for shelf, value in window.items():
+            self.readings.setdefault(shelf, deque(maxlen=SHELF_READINGS)).append(value)
+
+    def estimate(self) -> dict[VertexId, float]:
+        return {shelf: sum(values) / len(values) for shelf, values in self.readings.items()}

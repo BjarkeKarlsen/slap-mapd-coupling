@@ -21,9 +21,7 @@ from slap_mapd_coupling.storage.arrival import (
     putaway_congestion,
     putaway_demand,
     trip_distance,
-    trip_exposure,
 )
-from slap_mapd_coupling.storage.congestion import congestion_exposure, nearest_delivery_point
 from slap_mapd_coupling.training.spec import build_experiment_config, build_study, load_spec
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -290,17 +288,25 @@ def test_the_demand_rule_puts_away_by_the_trip_under_robots(trip, shelf):
     assert result.storage.counts["tea"] == {shelf: 3}
 
 
-def test_the_congestion_score_counts_traffic_on_the_receiving_leg():
+def test_the_congestion_score_adds_the_shelf_standing_still_to_the_trip():
+    """[A93]: score = rho_hat * (d^trip + beta * omega_hat). B's trip is shorter by 2 than A's."""
     graph = _trip_graph()
-    # (1, 2) is on the receiving leg of both shelves and on the path from D to neither.
-    traffic, waits = {(1, 2): 1.0}, {(1, 2): 2.0}
-    assert trip_exposure(graph, 7, [0], [8], traffic, waits) == pytest.approx(2.0)
-    assert congestion_exposure(graph, 7, nearest_delivery_point(graph, 7, [8]), traffic, waits) == 0
-    # (3, 7) is on B's receiving leg only. With traffic there B loses to A, whose trip is
-    # longer by 2 but costs no traffic.
-    traffic, waits = {(3, 7): 1.0}, {(3, 7): 2.0}
     shelves = _empty_shelves()
+    # Picks from B stood still 3 steps, so beta * 3 = 6 > 2 and A wins.
     result = putaway_congestion(
-        shelves, graph, {"tea": 3}, {}, {"tea": 1.0}, traffic, waits, 2.0, receiving=[0], trip=True
+        shelves, graph, {"tea": 3}, {}, {"tea": 1.0}, {}, {}, 2.0, receiving=[0], trip=True,
+        shelf_standing_still={7: 3.0},
     )
     assert result.storage.counts["tea"] == {9: 3}
+    # Half a step of standing still costs 1 < 2, so B keeps its shorter trip.
+    result = putaway_congestion(
+        shelves, graph, {"tea": 3}, {}, {"tea": 1.0}, {}, {}, 2.0, receiving=[0], trip=True,
+        shelf_standing_still={7: 0.5},
+    )
+    assert result.storage.counts["tea"] == {7: 3}
+    # The edge estimates are not read any more: traffic on B's leg changes nothing.
+    result = putaway_congestion(
+        shelves, graph, {"tea": 3}, {}, {"tea": 1.0}, {(3, 7): 1.0}, {(3, 7): 2.0}, 2.0,
+        receiving=[0], trip=True,
+    )
+    assert result.storage.counts["tea"] == {7: 3}
