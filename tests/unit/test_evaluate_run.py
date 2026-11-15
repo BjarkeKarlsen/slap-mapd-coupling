@@ -480,3 +480,14 @@ def test_more_validation_seeds_play_every_checkpoint_on_a_longer_range(
     seeds = sorted({row["seed"] for row in result.validation_rows})
     assert seeds == list(range(VALIDATION_SEED_START, VALIDATION_SEED_START + 5))
     assert len(result.validation_rows) == 3 * 5
+
+
+def test_chosen_only_plays_the_test_seeds_with_the_chosen_checkpoint_only(tmp_path, fake_episodes):
+    played = fake_episodes([1, 3, 2])
+    result = evaluate_run(_run_dir(tmp_path, 3), tmp_path / "out", chosen_only=True)
+    assert {row["role"] for row in result.test_rows} == {"chosen"}
+    assert len(result.test_rows) == 3
+    # The validation still plays every checkpoint, so the choice is the same as without it.
+    assert result.chosen.name == "checkpoint_000001"
+    assert {name for name, _ in played} == {f"checkpoint_00000{i}" for i in range(3)}
+

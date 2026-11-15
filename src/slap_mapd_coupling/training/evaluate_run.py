@@ -278,6 +278,7 @@ def evaluate_run(
     device: str | None = None,
     validation_seeds: int | None = None,
     workers: int = 1,
+    chosen_only: bool = False,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -301,7 +302,9 @@ def evaluate_run(
     The validation seeds, and so the chosen checkpoint, do not change. `validation_seeds` does the
     same for the validation seeds, for example 5 for a run that stored 2. `device`, such as
     "cuda", runs every forward pass there. `workers` plays that many episodes at once, in
-    separate processes. The rows and the results are the same, in the same order."""
+    separate processes. The rows and the results are the same, in the same order.
+    `chosen_only` plays the test seeds with the chosen checkpoint only, not the last one as a
+    check, for a measurement such as the runtime that only the reported policy needs."""
     settings = (run_dir, test_seeds, validation_seeds, arrival_rate, horizon, warmup)
     spec = load_run_spec(run_dir)
     checkpoints = checkpoints_of(run_dir)
@@ -340,7 +343,8 @@ def evaluate_run(
     test_rows: list[dict] = []
     played: dict[tuple[str, str], list[RunMetrics]] = {}
     jobs, labels = [], []
-    for role, checkpoint in (("chosen", chosen), ("last", last)):
+    roles = (("chosen", chosen),) if chosen_only else (("chosen", chosen), ("last", last))
+    for role, checkpoint in roles:
         for mode in modes:
             for n, seed in enumerate(seeds.test):
                 trace = None
@@ -440,7 +444,7 @@ def _summary(modes: list[StorageMode], played: dict[tuple[str, str], list[RunMet
     if arrival:
         header = [line + extra for line, extra in zip(header, _ARRIVAL_HEADER)]
     lines += header
-    for role in ("chosen", "last"):
+    for role in dict.fromkeys(role for role, _ in played):
         for mode in adaptive:
             try:
                 result = compare_paired(played[(role, "fixed")], played[(role, mode)])

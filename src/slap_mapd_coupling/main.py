@@ -369,6 +369,13 @@ def resume(output):
     help="Run the policy's forward pass on the GPU (cuda). The episodes still run on the CPU.",
 )
 @click.option(
+    "--chosen-only",
+    is_flag=True,
+    default=False,
+    help="Play the test seeds with the chosen checkpoint only, not the last one as a check. For "
+    "the runtime measurement, which only the reported policy needs.",
+)
+@click.option(
     "--workers",
     type=click.IntRange(min=1),
     default=1,
@@ -387,6 +394,7 @@ def evaluate(
     validation_seeds,
     gpu,
     workers,
+    chosen_only,
 ):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with. Among those that keep up on every
@@ -416,6 +424,7 @@ def evaluate(
             "cuda" if gpu else None,
             validation_seeds,
             workers,
+            chosen_only,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
@@ -426,6 +435,8 @@ def evaluate(
                 for row in result.test_rows
                 if row["role"] == role and row["storage_mode"] == mode
             ]
+            if not rows:  # --chosen-only plays no last checkpoint
+                continue
             throughput = sum(row["throughput"] for row in rows) / len(rows)
             click.echo(
                 f"{role} {checkpoint.name} ({mode}): throughput {throughput:.3f} "
