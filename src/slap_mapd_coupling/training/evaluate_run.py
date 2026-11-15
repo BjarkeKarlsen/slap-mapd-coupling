@@ -114,6 +114,67 @@ def play(
     )
 
 
+# ------------------------------------------------------------------ playing episodes in parallel
+# The episodes of an evaluation do not depend on each other: each is fixed by its checkpoint, its
+# seed and its storage rule. With `workers` above 1 they are played in that many processes, one
+# episode at a time each, and the results come back in the order they were asked for, so the row
+# files and the summary are the same as when they are played one after another. Each process
+# builds the study from the run folder itself, rather than receiving it.
+
+_WORKER: dict[str, Any] = {}
+
+
+def _studies(run_dir, test_seeds, validation_seeds, arrival_rate, horizon, warmup):
+    """The spec and study the validation plays, and the spec and study the test plays."""
+    spec = load_run_spec(run_dir)
+    if test_seeds is not None:
+        spec = spec.model_copy(update={"test_seed_count": test_seeds})
+    if validation_seeds is not None:
+        spec = spec.model_copy(update={"validation_seed_count": validation_seeds})
+    study = build_study(spec)
+    test_spec, test_study = build_test_study(spec, study, arrival_rate, horizon, warmup)
+    return spec, study, test_spec, test_study
+
+
+def _start_worker(settings: tuple, device: str | None) -> None:
+    import torch
+
+    torch.set_num_threads(1)
+    spec, study, test_spec, test_study = _studies(*settings)
+    _WORKER.update(
+        validation=(study, spec), test=(test_study, test_spec), device=device
+    )
+
+
+def _play_job(job: tuple) -> RunMetrics:
+    """One episode in a worker: (which study, checkpoint, seed, storage rule, trace path)."""
+    which, checkpoint, seed, mode, trace = job
+    study, spec = _WORKER[which]
+    return play(study, spec, checkpoint, seed, mode, trace, device=_WORKER["device"])
+
+
+def _play_all(jobs, workers, settings, local, device):
+    """The metrics of every job, in the order of `jobs`, yielded as each one is ready in turn.
+    `local` maps "validation" and "test" to (study, spec) in this process, used when
+    `workers` is 1."""
+    if workers <= 1:
+        for which, checkpoint, seed, mode, trace in jobs:
+            study, spec = local[which]
+            yield play(study, spec, checkpoint, seed, mode, trace, device=device)
+        return
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    # spawn, not fork: the parent may hold Ray, torch and CUDA state that must not be copied.
+    with ProcessPoolExecutor(
+        max_workers=min(workers, len(jobs)) or 1,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_start_worker,
+        initargs=(settings, device),
+    ) as pool:
+        yield from pool.map(_play_job, jobs)
+
+
 def validate_checkpoint(
     run_dir: Path,
     checkpoint: Path,
@@ -126,17 +187,33 @@ def validate_checkpoint(
     with. The episodes are kept in RUN_DIR/validation/<checkpoint>.jsonl, written while training
     goes on (trainer.ValidationLog) or here, and read back when they cover the same seeds, so a
     checkpoint is validated once."""
+    stored = _stored_validation(run_dir, checkpoint, seeds)
+    if stored is not None:
+        return stored
+    episodes = [play(study, spec, checkpoint, seed, device=device) for seed in seeds]
+    _store_validation(run_dir, checkpoint, episodes)
+    return episodes
+
+
+def _stored_validation(
+    run_dir: Path, checkpoint: Path, seeds: Sequence[int]
+) -> list[RunMetrics] | None:
+    """The validation episodes of `checkpoint` kept in RUN_DIR/validation, when they cover
+    exactly `seeds`."""
     path = run_dir / "validation" / f"{checkpoint.name}.jsonl"
     if path.exists():
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         if [row["seed"] for row in rows] == list(seeds):
             return [RunMetrics.model_validate(row) for row in rows]
-    episodes = [play(study, spec, checkpoint, seed, device=device) for seed in seeds]
+    return None
+
+
+def _store_validation(run_dir: Path, checkpoint: Path, episodes: list[RunMetrics]) -> None:
+    path = run_dir / "validation" / f"{checkpoint.name}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(json.dumps(m.model_dump(mode="json")) + "\n" for m in episodes), encoding="utf-8"
     )
-    return episodes
 
 
 def build_test_study(
@@ -200,6 +277,7 @@ def evaluate_run(
     test_seeds: int | None = None,
     device: str | None = None,
     validation_seeds: int | None = None,
+    workers: int = 1,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -222,20 +300,18 @@ def evaluate_run(
     example 20 for a run that stored 6 ([A91]). The test seeds stay the same range, longer.
     The validation seeds, and so the chosen checkpoint, do not change. `validation_seeds` does the
     same for the validation seeds, for example 5 for a run that stored 2. `device`, such as
-    "cuda", runs every forward pass there."""
+    "cuda", runs every forward pass there. `workers` plays that many episodes at once, in
+    separate processes. The rows and the results are the same, in the same order."""
+    settings = (run_dir, test_seeds, validation_seeds, arrival_rate, horizon, warmup)
     spec = load_run_spec(run_dir)
-    if test_seeds is not None:
-        spec = spec.model_copy(update={"test_seed_count": test_seeds})
-    if validation_seeds is not None:
-        spec = spec.model_copy(update={"validation_seed_count": validation_seeds})
     checkpoints = checkpoints_of(run_dir)
     if not checkpoints:
         raise ValueError(f"{run_dir} holds no checkpoints.")
     modes = list(dict.fromkeys(storage_modes or [training_storage_mode(spec)]))
     for mode in modes:
         check_storage_rule(spec, mode)
-    study = build_study(spec)
-    test_spec, test_study = build_test_study(spec, study, arrival_rate, horizon, warmup)
+    spec, study, test_spec, test_study = _studies(*settings)
+    local = {"validation": (study, spec), "test": (test_study, test_spec)}
     seeds = split_seeds(study.seed_split)
     out_dir.mkdir(parents=True, exist_ok=True)
     validation_path, test_path = out_dir / "validation.jsonl", out_dir / "test.jsonl"
@@ -244,8 +320,15 @@ def evaluate_run(
 
     validation_rows: list[dict] = []
     played_validation: list[list] = []
+    stored = {c: _stored_validation(run_dir, c, seeds.validation) for c in checkpoints}
+    missing = [c for c in checkpoints if stored[c] is None]
+    jobs = [("validation", c, seed, None, None) for c in missing for seed in seeds.validation]
+    played_now = iter(_play_all(jobs, workers, settings, local, device))
+    for checkpoint in missing:
+        stored[checkpoint] = [next(played_now) for _ in seeds.validation]
+        _store_validation(run_dir, checkpoint, stored[checkpoint])
     for checkpoint in checkpoints:
-        episodes = validate_checkpoint(run_dir, checkpoint, study, spec, seeds.validation, device)
+        episodes = stored[checkpoint]
         for metrics in episodes:
             row = {"checkpoint": checkpoint.name, **metrics.model_dump(mode="json")}
             validation_rows.append(row)
@@ -256,6 +339,7 @@ def evaluate_run(
 
     test_rows: list[dict] = []
     played: dict[tuple[str, str], list[RunMetrics]] = {}
+    jobs, labels = [], []
     for role, checkpoint in (("chosen", chosen), ("last", last)):
         for mode in modes:
             for n, seed in enumerate(seeds.test):
@@ -263,16 +347,20 @@ def evaluate_run(
                 if n < trace_seeds:
                     trace = out_dir / "traces" / f"{role}_{mode}_seed{seed}.jsonl"
                     trace.parent.mkdir(parents=True, exist_ok=True)
-                metrics = play(test_study, test_spec, checkpoint, seed, mode, trace, device=device)
-                played.setdefault((role, mode), []).append(metrics)
-                row = {
-                    "role": role,
-                    "checkpoint": checkpoint.name,
-                    **metrics.model_dump(mode="json"),
-                    "storage_mode": mode,
-                }
-                test_rows.append(row)
-                _append(test_path, row)
+                jobs.append(("test", checkpoint, seed, mode, trace))
+                labels.append((role, checkpoint, mode))
+    for (role, checkpoint, mode), metrics in zip(
+        labels, _play_all(jobs, workers, settings, local, device)
+    ):
+        played.setdefault((role, mode), []).append(metrics)
+        row = {
+            "role": role,
+            "checkpoint": checkpoint.name,
+            **metrics.model_dump(mode="json"),
+            "storage_mode": mode,
+        }
+        test_rows.append(row)
+        _append(test_path, row)
     (out_dir / "summary.md").write_text(_summary(modes, played), encoding="utf-8")
     (out_dir / "evaluation.json").write_text(
         json.dumps(

@@ -368,6 +368,13 @@ def resume(output):
     default=False,
     help="Run the policy's forward pass on the GPU (cuda). The episodes still run on the CPU.",
 )
+@click.option(
+    "--workers",
+    type=click.IntRange(min=1),
+    default=1,
+    help="Episodes played at once, each in its own process (one core each). The rows and results "
+    "are the same as with 1, in the same order.",
+)
 def evaluate(
     run_dir,
     output,
@@ -379,6 +386,7 @@ def evaluate(
     test_seeds,
     validation_seeds,
     gpu,
+    workers,
 ):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with. Among those that keep up on every
@@ -407,6 +415,7 @@ def evaluate(
             test_seeds,
             "cuda" if gpu else None,
             validation_seeds,
+            workers,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
