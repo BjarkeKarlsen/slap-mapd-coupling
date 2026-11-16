@@ -480,3 +480,35 @@ def test_more_validation_seeds_play_every_checkpoint_on_a_longer_range(
     seeds = sorted({row["seed"] for row in result.validation_rows})
     assert seeds == list(range(VALIDATION_SEED_START, VALIDATION_SEED_START + 5))
     assert len(result.validation_rows) == 3 * 5
+
+
+def test_resume_plays_only_the_test_episodes_missing_from_test_jsonl(
+    tmp_path, fake_episodes, monkeypatch
+):
+    fake_episodes([3, 9, 5])
+    played = []
+
+    def play(study, spec, checkpoint, seed, storage_mode=None, trace=None, device=None):
+        if storage_mode is None:  # validation, stored in the run and read back on resume
+            return _real_metrics(seed, "fixed", 10.0 + int(checkpoint.name[-1]))
+        played.append((checkpoint.name, storage_mode, seed))
+        return _real_metrics(
+            seed, storage_mode, 10.0 if storage_mode == "fixed" else 8.0 + seed % 3
+        )
+
+    monkeypatch.setattr(evaluate_run_module, "play", play)
+    run = _run_dir(tmp_path, 3)
+    _spec_with_rule(run, epoch_length=100, reassignment_cap=48, congestion_weight=3.0)
+    out = tmp_path / "out"
+    full = evaluate_run(run, out, ["fixed", "demand"])
+    full_seeds = [row["seed"] for row in full.test_rows]
+    whole = (out / "test.jsonl").read_text()
+    summary = (out / "summary.md").read_text()
+    # A session that stopped two episodes short.
+    (out / "test.jsonl").write_text("".join(whole.splitlines(keepends=True)[:-2]))
+    played.clear()
+    resumed = evaluate_run(run, out, ["fixed", "demand"], resume=True)
+    assert played == [(full.last.name, "demand", seed) for seed in full_seeds[-2:]]
+    assert (out / "test.jsonl").read_text() == whole
+    assert (out / "summary.md").read_text() == summary
+    assert resumed.test_rows == full.test_rows

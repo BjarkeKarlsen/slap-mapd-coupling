@@ -375,6 +375,12 @@ def resume(output):
     help="Episodes played at once, each in its own process (one core each). The rows and results "
     "are the same as with 1, in the same order.",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Keep the test rows already in the output's test.jsonl and play only the missing "
+    "episodes, for example after a session ran out of time.",
+)
 def evaluate(
     run_dir,
     output,
@@ -387,6 +393,7 @@ def evaluate(
     validation_seeds,
     gpu,
     workers,
+    resume,
 ):
     """Evaluate the training run in RUN_DIR (the --output of train). Every checkpoint plays the
     validation seeds under the rule the run trained with. Among those that keep up on every
@@ -416,6 +423,7 @@ def evaluate(
             "cuda" if gpu else None,
             validation_seeds,
             workers,
+            resume=resume,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error

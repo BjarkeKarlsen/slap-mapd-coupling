@@ -278,6 +278,7 @@ def evaluate_run(
     device: str | None = None,
     validation_seeds: int | None = None,
     workers: int = 1,
+    resume: bool = False,
 ) -> RunEvaluation:
     """Chooses the checkpoint of the run in `run_dir` on the validation seeds
     (`choose_checkpoint`, [A60]) and plays it and
@@ -301,7 +302,12 @@ def evaluate_run(
     The validation seeds, and so the chosen checkpoint, do not change. `validation_seeds` does the
     same for the validation seeds, for example 5 for a run that stored 2. `device`, such as
     "cuda", runs every forward pass there. `workers` plays that many episodes at once, in
-    separate processes. The rows and the results are the same, in the same order."""
+    separate processes. The rows and the results are the same, in the same order.
+
+    `resume` keeps the test rows already in `out_dir/test.jsonl`, for example from a session
+    that ran out of time, and plays only the episodes missing from it. A row counts when its role,
+    checkpoint, storage rule and seed match an episode of this evaluation. Every episode is seeded
+    on its own, so the rows are the ones a full evaluation writes."""
     settings = (run_dir, test_seeds, validation_seeds, arrival_rate, horizon, warmup)
     spec = load_run_spec(run_dir)
     checkpoints = checkpoints_of(run_dir)
@@ -315,8 +321,15 @@ def evaluate_run(
     seeds = split_seeds(study.seed_split)
     out_dir.mkdir(parents=True, exist_ok=True)
     validation_path, test_path = out_dir / "validation.jsonl", out_dir / "test.jsonl"
+    kept: dict[tuple, dict] = {}
+    if resume and test_path.exists():
+        for line in test_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                kept[(row["role"], row["checkpoint"], row["storage_mode"], row["seed"])] = row
     for path in (validation_path, test_path):
-        path.write_text("", encoding="utf-8")
+        if not (path is test_path and kept):
+            path.write_text("", encoding="utf-8")
 
     validation_rows: list[dict] = []
     played_validation: list[list] = []
@@ -343,24 +356,32 @@ def evaluate_run(
     for role, checkpoint in (("chosen", chosen), ("last", last)):
         for mode in modes:
             for n, seed in enumerate(seeds.test):
+                if (role, checkpoint.name, mode, seed) in kept:
+                    labels.append((role, checkpoint, mode, seed))
+                    continue
                 trace = None
                 if n < trace_seeds:
                     trace = out_dir / "traces" / f"{role}_{mode}_seed{seed}.jsonl"
                     trace.parent.mkdir(parents=True, exist_ok=True)
                 jobs.append(("test", checkpoint, seed, mode, trace))
-                labels.append((role, checkpoint, mode))
-    for (role, checkpoint, mode), metrics in zip(
-        labels, _play_all(jobs, workers, settings, local, device)
-    ):
+                labels.append((role, checkpoint, mode, seed))
+    played_now = iter(_play_all(jobs, workers, settings, local, device))
+    fields = RunMetrics.model_fields
+    for role, checkpoint, mode, seed in labels:
+        row = kept.get((role, checkpoint.name, mode, seed))
+        if row is not None:
+            metrics = RunMetrics.model_validate({k: v for k, v in row.items() if k in fields})
+        else:
+            metrics = next(played_now)
+            row = {
+                "role": role,
+                "checkpoint": checkpoint.name,
+                **metrics.model_dump(mode="json"),
+                "storage_mode": mode,
+            }
+            _append(test_path, row)
         played.setdefault((role, mode), []).append(metrics)
-        row = {
-            "role": role,
-            "checkpoint": checkpoint.name,
-            **metrics.model_dump(mode="json"),
-            "storage_mode": mode,
-        }
         test_rows.append(row)
-        _append(test_path, row)
     (out_dir / "summary.md").write_text(_summary(modes, played), encoding="utf-8")
     (out_dir / "evaluation.json").write_text(
         json.dumps(
