@@ -214,9 +214,47 @@ def completed_share(num_completed: int, backlog: int) -> float | None:
     return num_completed / released if released else None
 
 
+def served_counts(
+    tasks: Sequence[Task], warmup: int, horizon: int, kinds: Collection[str] | None = None
+) -> tuple[int, int]:
+    """(tasks released in [warmup, T], tasks finished in [warmup, T] whenever released), the two
+    sides of served_share, over the tasks of `kinds` only when given."""
+    counted = [task for task in tasks if kinds is None or task.kind in kinds]
+    released = sum(1 for task in counted if warmup <= task.release_time <= horizon)
+    finished = sum(
+        1
+        for task in counted
+        if task.finish_time is not None and warmup <= task.finish_time <= horizon
+    )
+    return released, finished
+
+
+def _share(counts: tuple[int, int]) -> float | None:
+    released, finished = counts
+    return finished / released if released else None
+
+
+def served_keep_up_parts(
+    pick_counts: tuple[int, int],
+    putaway_counts: tuple[int, int],
+    keep_up_threshold: float | None,
+) -> tuple[bool | None, bool | None, bool | None]:
+    """The keep-up check of eq:throughput ([A96]): each kind passes when the tasks finished in
+    the window are at least f_up times the tasks released in it, |F_T| >= f_up |R_T|, with the
+    (released, finished) counts of served_counts. A kind with nothing released passes. Returns
+    (keeps up, picks pass, put-aways pass), all None unless f_up is set."""
+    if keep_up_threshold is None:
+        return None, None, None
+    picks, putaways = (
+        finished >= keep_up_threshold * released
+        for released, finished in (pick_counts, putaway_counts)
+    )
+    return picks and putaways, picks, putaways
+
+
 def keeps_up(num_completed: int, backlog: int, keep_up_threshold: float | None) -> bool | None:
-    """One part of the keep-up check, eq:throughput, for one kind of task:
-    |C_T| / T >= f_up (|C_T| + B_T) / T. Both sides are multiplied by T, so no rounding of the
+    """One part of the keep-up check as it was before [A96], for one kind of task, still used
+    for rows written before it (row_keeps_up): |C_T| / T >= f_up (|C_T| + B_T) / T. Both sides are multiplied by T, so no rounding of the
     division decides a run on the threshold. None unless f_up is set."""
     if keep_up_threshold is None:
         return None
@@ -230,7 +268,7 @@ def keep_up_parts(
     putaway_backlog: int,
     keep_up_threshold: float | None,
 ) -> tuple[bool | None, bool | None, bool | None]:
-    """The keep-up check of eq:throughput, applied to picks and to put-aways separately
+    """The keep-up check before [A96] (served_keep_up_parts now), applied to picks and to put-aways separately
     ([A59]): (keeps up, picks pass, put-aways pass). The run keeps up iff both parts pass. With
     no put-away released the put-away part passes. All three None unless f_up is set."""
     picks = keeps_up(completed_picks, pick_backlog, keep_up_threshold)
@@ -247,6 +285,14 @@ def row_keeps_up(row: Mapping[str, Any], keep_up_threshold: float | None) -> boo
     the put-aways of an arrival at T, which B_T leaves out, and on the 2026-10-22 sweep that
     turned 20 passing seeds into 1. A row without put-aways is a template row, checked over
     every task."""
+    if "served_share_picks" in row and keep_up_threshold is not None:
+        # A row written since [A96]: the shares of the work served, None for a kind with
+        # nothing released, which passes.
+        picks, putaways = (
+            row[key] is None or row[key] >= keep_up_threshold
+            for key in ("served_share_picks", "served_share_putaways")
+        )
+        return picks and putaways
     completed_putaways = row.get("num_completed_putaways", 0)
     if "putaway_backlog" in row:
         putaway_backlog = row["putaway_backlog"]
@@ -530,14 +576,12 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         and task.release_time < horizon
         and task.status(horizon) in ("waiting", "active")
     )
-    # The pick side is every completed task that is not a put-away, so the ship tasks count
-    # there, as their waiting ones do in backlog - putaway_backlog (step 12).
-    keep_up, keep_up_picks, keep_up_putaways = keep_up_parts(
-        num_completed - len(putaways),
-        backlog - putaway_backlog,
-        len(putaways),
-        putaway_backlog,
-        config.keep_up_threshold,
+    # The keep-up check, eq:throughput ([A96]): the share of the arriving work served in the
+    # window, picks (with the ship tasks, [A68]) and put-aways apart ([A59]).
+    pick_counts = served_counts(env.tasks, warmup, horizon, ("pick", "ship"))
+    putaway_counts = served_counts(env.tasks, warmup, horizon, ("putaway",))
+    keep_up, keep_up_picks, keep_up_putaways = served_keep_up_parts(
+        pick_counts, putaway_counts, config.keep_up_threshold
     )
 
     # The mean crowding: the mean of delta_i(t) over agents and
@@ -618,7 +662,15 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     total_runtime = sum(env.log.assignment_runtime_seconds) + sum(env.log.routing_runtime_seconds)
     mean_decision_runtime = total_runtime / horizon  # kappa_T, the mean runtime
 
+    released_in_window, finished_in_window = served_counts(env.tasks, warmup, horizon)
+
     return RunMetrics(
+        num_released_in_window=released_in_window,
+        num_finished_in_window=finished_in_window,
+        served_share=_share((released_in_window, finished_in_window)),
+        # Ship tasks count with the picks, since both serve orders ([A68]).
+        served_share_picks=_share(pick_counts),
+        served_share_putaways=_share(putaway_counts),
         storage_mode=config.storage_mode,
         controller=config.router_name,
         congestion_sensitive=config.congestion_sensitive,
