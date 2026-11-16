@@ -27,6 +27,7 @@ from slap_mapd_coupling.evaluation.evaluator import (
     robot_busy_share,
     row_keeps_up,
     run_episode,
+    served_keep_up_parts,
 )
 from slap_mapd_coupling.instances.generator import GeneratorParams, generate_warehouse_graph
 
@@ -407,3 +408,18 @@ def test_the_longest_two_agent_hold_is_the_second_longest_hold_at_one_step():
     assert longest_two_agent_hold([task(0, None), task(90, 95)], warmup=0, horizon=100) == 4
     # Steps before the warm-up are not measured.
     assert longest_two_agent_hold([task(0, 20), task(5, 20)], warmup=50, horizon=100) == 0
+
+
+def test_a_fleet_that_fell_behind_in_the_warm_up_passes_when_it_serves_what_arrives():
+    # [A96]. 900 picks released in the window and 600 finished in it, older ones among them:
+    # two thirds served, so the queue grows and the run fails. 760 of 900 passes at 0.8.
+    assert served_keep_up_parts((900, 600), (100, 100), 0.8) == (False, False, True)
+    assert served_keep_up_parts((900, 760), (100, 100), 0.8) == (True, True, True)
+    assert served_keep_up_parts((900, 760), (0, 0), 0.8) == (True, True, True)  # no put-away
+    assert served_keep_up_parts((900, 760), (100, 100), None) == (None, None, None)
+
+
+def test_a_saved_row_with_served_shares_is_checked_on_them():
+    row = dict(num_completed_tasks=0, backlog=1000, num_completed_putaways=0, putaway_backlog=0)
+    assert row_keeps_up({**row, "served_share_picks": 0.85, "served_share_putaways": None}, 0.8)
+    assert not row_keeps_up({**row, "served_share_picks": 0.6, "served_share_putaways": 1.0}, 0.8)
