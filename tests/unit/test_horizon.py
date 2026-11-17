@@ -15,6 +15,7 @@ from slap_mapd_coupling.evaluation.evaluator import (
     _to_run_metrics,
     backlog_slope,
     longest_completion_gap,
+    served_counts,
 )
 from slap_mapd_coupling.training.spec import (
     TrainingSpec,
@@ -87,6 +88,31 @@ def test_with_a_warm_up_only_the_tasks_released_after_it_count():
     assert _to_run_metrics(env, config.model_copy(update={"warmup": 0})).num_completed_tasks > (
         metrics.num_completed_tasks
     )
+
+
+def test_the_served_share_counts_every_task_finished_in_the_window_whenever_released():
+    # One task released before the window and finished in it, one released and finished in
+    # it, one released in it and still open: 2 finished of 2 released.
+    tasks = [
+        SimpleNamespace(release_time=10, finish_time=60, kind="pick"),
+        SimpleNamespace(release_time=55, finish_time=80, kind="putaway"),
+        SimpleNamespace(release_time=70, finish_time=None, kind="pick"),
+    ]
+    assert served_counts(tasks, 50, 100) == (2, 2)
+    assert served_counts(tasks, 0, 100) == (3, 2)
+    assert served_counts(tasks, 50, 100, ("pick",)) == (1, 1)
+    assert served_counts(tasks, 50, 100, ("putaway",)) == (1, 1)
+
+
+def test_a_run_with_a_warm_up_reports_its_served_share():
+    env, config = _episode(warmup=200)
+    metrics = _to_run_metrics(env, config)
+    released, finished = served_counts(env.tasks, 200, HORIZON)
+    assert (metrics.num_released_in_window, metrics.num_finished_in_window) == (released, finished)
+    assert metrics.served_share == finished / released
+    assert metrics.num_finished_in_window >= metrics.num_completed_tasks
+    picks = served_counts(env.tasks, 200, HORIZON, ("pick", "ship"))
+    assert metrics.served_share_picks == (picks[1] / picks[0] if picks[0] else None)
 
 
 def test_the_longest_gap_runs_from_the_window_start_between_finishes_to_the_end():

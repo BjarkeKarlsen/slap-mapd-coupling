@@ -106,11 +106,25 @@ class RunMetrics(BaseModel):
     # |C_T| / (|C_T| + B_T), the share of the released tasks that finished. None iff nothing
     # was released.
     completed_share: NonNegativeFloat | None = None
-    # The keep-up check, eq:throughput, applied to picks and to put-aways separately ([A59]).
-    # True iff both parts pass. None unless f_up is configured.
+    # The share of the arriving work the fleet serves in the measured window [T_warm, T]: the
+    # tasks finished in the window, whenever they were released, over the tasks released in it.
+    # 1 means the queue holds its size, below 1 it grows by the rest. completed_share counts only
+    # the tasks released in the window, so a run that enters the window with a queue scores near
+    # 0 there even while its agents finish older tasks. None iff no task was released in the
+    # window. Order lines waiting for stock are not tasks yet and are not counted.
+    num_released_in_window: NonNegativeInt = 0
+    num_finished_in_window: NonNegativeInt = 0
+    served_share: NonNegativeFloat | None = None
+    # The same for picks (with ship tasks) and for put-aways alone, as the keep-up check splits
+    # them ([A59]). None for a kind with no task released in the window.
+    served_share_picks: NonNegativeFloat | None = None
+    served_share_putaways: NonNegativeFloat | None = None
+    # The keep-up check, eq:throughput, applied to picks and to put-aways separately ([A59]):
+    # each served share at least f_up ([A96]). True iff both parts pass. None unless f_up is
+    # configured.
     keeps_up: bool | None = None
-    # Its two parts, |C^pick_T| >= f_up (|C^pick_T| + B^pick_T) and the same for put-aways. A
-    # run with no put-away released passes the put-away part.
+    # Its two parts, |F^pick_T| >= f_up |R^pick_T| and the same for put-aways. A kind with no
+    # task released in the window passes.
     keeps_up_picks: bool | None = None
     keeps_up_putaways: bool | None = None
     # The longest run of consecutive blocked ticks of any task, finished or still active at T. A
