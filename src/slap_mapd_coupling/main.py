@@ -127,6 +127,19 @@ def simulate(
 @click.option("--arrival-rate", type=float, default=None, help="Tasks released per step.")
 @click.option("--horizon", type=int, default=None, help="Episode length in steps.")
 @click.option(
+    "--validate/--no-validate",
+    default=True,
+    help="Play every checkpoint on the validation seeds while training goes on. With "
+    "--no-validate, `evaluate` validates them afterwards.",
+)
+@click.option(
+    "--init-checkpoint",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Start the policy from the weights of this earlier checkpoint (warm start), as a "
+    "new run with its own budget and episode length.",
+)
+@click.option(
     "--budget-env-steps", type=int, default=None, help="Training budget in environment steps."
 )
 @click.option(
@@ -183,6 +196,8 @@ def train(
     communication,
     arrival_rate,
     horizon,
+    validate,
+    init_checkpoint,
     budget_env_steps,
     seed,
     env_runners,
@@ -245,7 +260,8 @@ def train(
         settings=spec.checkpoint,
         storage_path=out,
         progress_path=out / f"{name}_training_progress.jsonl",
-        validate_in=out,
+        validate_in=out if validate else None,
+        init_checkpoint=Path(init_checkpoint) if init_checkpoint else None,
     )
     _report_run(run, spec, out)
 
