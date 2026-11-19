@@ -252,7 +252,8 @@ def resume(
     PPO settings come from the run's own saved state.
 
     With `override_resources` the run continues with the runners and the device of
-    `ppo_config` instead of its saved ones, for example on a CPU machine after it started on a GPU.
+    `ppo_config` instead of its saved ones, for example on a CPU machine after it started on a GPU,
+    or on a GPU after it started on a CPU.
     """
     settings = settings or CheckpointSettings()
     experiment = (storage_path / run_name).resolve()

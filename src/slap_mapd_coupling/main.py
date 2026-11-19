@@ -288,8 +288,16 @@ def _report_run(run, spec, out) -> None:
     is_flag=True,
     help="Continue on the CPU with --env-runners runners, for a run that started on a GPU.",
 )
-@click.option("--env-runners", default=3, type=int, help="Runners with --cpu (3, as train).")
-def resume(output, cpu, env_runners):
+@click.option(
+    "--gpu",
+    is_flag=True,
+    help="Continue with one GPU for the learner and --env-runners runners, for a run that "
+    "started on a CPU.",
+)
+@click.option(
+    "--env-runners", default=3, type=int, help="Runners with --cpu or --gpu (3, as train)."
+)
+def resume(output, cpu, gpu, env_runners):
     """Continue the training run in OUTPUT (the --output of train) from its latest checkpoint.
     It runs on to the budget the run started with, with the same runners and settings, and
     keeps writing the same progress file. The iterations after the checkpoint are trained
@@ -303,6 +311,8 @@ def resume(output, cpu, env_runners):
     )
     from slap_mapd_coupling.training.trainer import resume as resume_training
 
+    if cpu and gpu:
+        raise click.UsageError("Give --cpu or --gpu, not both.")
     out = Path(output)
     specs = sorted(out.glob("*_spec.json"))
     if len(specs) != 1:
@@ -312,13 +322,13 @@ def resume(output, cpu, env_runners):
     try:
         study = build_study(spec)
         run = resume_training(
-            build_study_ppo_config(spec, study, num_env_runners=env_runners)
-            if cpu
+            build_study_ppo_config(spec, study, num_env_runners=env_runners, use_gpu=gpu)
+            if cpu or gpu
             else build_study_ppo_config(spec, study),
             name,
             out,
             settings=spec.checkpoint,
-            override_resources=cpu,
+            override_resources=cpu or gpu,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
