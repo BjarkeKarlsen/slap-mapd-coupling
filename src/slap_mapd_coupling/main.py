@@ -283,7 +283,13 @@ def _report_run(run, spec, out) -> None:
 
 @cli.command()
 @click.argument("output", type=click.Path(exists=True, file_okay=False))
-def resume(output):
+@click.option(
+    "--cpu",
+    is_flag=True,
+    help="Continue on the CPU with --env-runners runners, for a run that started on a GPU.",
+)
+@click.option("--env-runners", default=3, type=int, help="Runners with --cpu (3, as train).")
+def resume(output, cpu, env_runners):
     """Continue the training run in OUTPUT (the --output of train) from its latest checkpoint.
     It runs on to the budget the run started with, with the same runners and settings, and
     keeps writing the same progress file. The iterations after the checkpoint are trained
@@ -304,11 +310,15 @@ def resume(output):
     spec = TrainingSpec.model_validate_json(specs[0].read_text(encoding="utf-8"))
     name = specs[0].name.removesuffix("_spec.json")
     try:
+        study = build_study(spec)
         run = resume_training(
-            build_study_ppo_config(spec, build_study(spec)),
+            build_study_ppo_config(spec, study, num_env_runners=env_runners)
+            if cpu
+            else build_study_ppo_config(spec, study),
             name,
             out,
             settings=spec.checkpoint,
+            override_resources=cpu,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error

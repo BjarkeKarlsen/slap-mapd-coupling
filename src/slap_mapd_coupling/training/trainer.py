@@ -240,6 +240,7 @@ def resume(
     storage_path: Path,
     *,
     settings: CheckpointSettings | None = None,
+    override_resources: bool = False,
 ) -> TrainingRun:
     """Continues the run `train` started as `run_name` under `storage_path`, from its latest
     checkpoint, after it was stopped before its budget. The budget, the checkpointing and the
@@ -249,15 +250,22 @@ def resume(
     `ppo_config` is built from the run's spec as for `train`. Building it registers the
     environment, which the restored run looks up by name. The runners and the rest of the
     PPO settings come from the run's own saved state.
+
+    With `override_resources` the run continues with the runners and the device of
+    `ppo_config` instead of its saved ones, for example on a CPU machine after it started on a GPU.
     """
     settings = settings or CheckpointSettings()
     experiment = (storage_path / run_name).resolve()
     if not tune.Tuner.can_restore(str(experiment)):
         raise ValueError(f"No run to continue in {experiment}.")
+    config = ppo_config.callbacks(TrainingProgressCallbacks)
+    trainable: Any = ppo_config.algo_class
+    if override_resources:
+        trainable = tune.with_resources(trainable, trainable.default_resource_request(config))
     results = tune.Tuner.restore(
         str(experiment),
-        ppo_config.algo_class,
-        param_space=ppo_config.callbacks(TrainingProgressCallbacks),  # type: ignore[arg-type]
+        trainable,
+        param_space=config,  # type: ignore[arg-type]
     ).fit()
     return _finished_run(results, settings)
 
