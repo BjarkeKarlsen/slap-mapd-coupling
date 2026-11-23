@@ -2,8 +2,10 @@
 
 One episode per (storage rule, arrival rate, test seed), Token Passing as the router, on the
 spec's instance, stock model and horizon. The test seeds are the first `--seeds` of the spec's
-seed split. Each episode is one JSON row of the RunMetrics fields in `OUT/load_sweep.jsonl`,
-written as soon as it ends, so a sweep started again skips the rows already there.
+seed split, from its training seeds unless `--seed-set test` takes them from its test seeds, the
+seeds a learned run is tested on, so Token Passing can be compared with it seed by seed. Each
+episode is one JSON row of the RunMetrics fields in `OUT/load_sweep.jsonl`, written as soon as it
+ends, so a sweep started again skips the rows already there.
 
     python scripts/load_sweep.py --config configs/fleet_8/centralised.yaml \\
         --rates-per-agent 0.025 0.05 0.075 0.1 --seeds 6 --out DIR
@@ -138,6 +140,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--rates-per-agent", type=float, nargs="+", help="arrival rates over the fleet size m"
     )
     parser.add_argument("--seeds", type=int, required=True, help="how many test seeds")
+    parser.add_argument(
+        "--seed-set",
+        choices=("train", "test"),
+        default="train",
+        help="which seeds of the spec's split to play, the test seeds match a learned run's test",
+    )
     parser.add_argument("--storage-modes", nargs="+", default=["fixed"], dest="modes")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--horizon", type=int, default=None, help="overrides the spec's T")
@@ -239,7 +247,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             except ValueError as error:
                 print(f"rate {rate} and above skipped, the study cannot be built: {error}")
                 break
-            seeds = split_seeds(study.seed_split).train[: args.seeds]
+            split = study.seed_split
+            if args.seed_set == "test":
+                # As evaluate_run's --test-seeds, the count asked for widens the spec's test seeds,
+                # so the learned runs' 20 test seeds can be played on a spec that lists 6.
+                split = split.model_copy(update={"test_seed_count": args.seeds})
+            seeds = getattr(split_seeds(split), args.seed_set)[: args.seeds]
             jobs = []
             for mode in args.modes:
                 for n, seed in enumerate(seeds):
