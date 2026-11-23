@@ -23,7 +23,7 @@ horizon: 2000
 experiment:
   num_agents: 32
   wait_cost: 0.2            # c_wait, one value for the graph and the reward, after van Knippenberg et al. (2021)
-  keep_up_threshold: 0.8    # f_up of eq:throughput
+  keep_up_threshold: 0.9    # f_up of eq:throughput
   observation_depth: 5      # d_obs
   discount: 0.99            # gamma
   # n_deliver is raised well above 1.0. A 5000-iteration run showed rising training return with
