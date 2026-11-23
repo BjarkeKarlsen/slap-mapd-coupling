@@ -180,6 +180,6 @@ def test_the_entry_points_of_the_other_arms_reject_communication(
 
 
 def test_the_training_and_evaluation_configs_carry_the_keep_up_threshold(example_04):
-    assert example_04.KEEP_UP_THRESHOLD == 0.8
-    assert example_04.build_config("fixed", seed=0).keep_up_threshold == 0.8
-    assert example_04.evaluation_config(3, "section").keep_up_threshold == 0.8
+    assert example_04.KEEP_UP_THRESHOLD == 0.9
+    assert example_04.build_config("fixed", seed=0).keep_up_threshold == 0.9
+    assert example_04.evaluation_config(3, "section").keep_up_threshold == 0.9

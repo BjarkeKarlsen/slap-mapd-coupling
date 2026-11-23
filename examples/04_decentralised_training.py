@@ -116,11 +116,12 @@ from slap_mapd_coupling.training.trainer import (
 FLEET_SIZE = 3
 
 
-# The keep-up threshold f_up of eq:throughput, 0.8 in tab:evalparams. A run keeps up if its
-# throughput reaches this share of the nominal arrival rate. Arrivals are random, so a healthy run
-# can finish a little under the nominal count, and a threshold of 0.9 failed healthy Token Passing
-# runs (2 of 6 seeds at 0.15 and 3 of 6 at 0.25) where 0.8 passed them all.
-KEEP_UP_THRESHOLD = 0.8
+# The keep-up threshold f_up of the keep-up check, 0.9 in the table of evaluation values. A run keeps up if its
+# served share, the work finished in the window over the work released in it ([A96]), reaches this
+# value for picks and for put-aways. A steady fleet serves about 1.0 (Token Passing's lowest test
+# seed 0.947), and 0.8 let runs pass whose queue kept growing, so 0.9 ([A111], was 0.8 from the
+# 630-step pilot of [A31]).
+KEEP_UP_THRESHOLD = 0.9
 # The wait cost c_wait, after van Knippenberg et al. (2021). One value, used by the
 # generated graph and by the experiment config, because it is one study parameter.
 WAIT_COST = 0.2
