@@ -296,6 +296,9 @@ class ExperimentSettings(BaseModel):
     num_agents: PositiveInt
     wait_cost: NonNegativeFloat
     keep_up_threshold: PositiveFloat
+    # The stall length in steps (app:cal:stall), 36 / arrival_rate in the fleet configs. None
+    # leaves RunMetrics.stalled unset, as in configs written before it.
+    stall_length: PositiveInt | None = None
     observation_depth: PositiveInt
     discount: PositiveFloat
     deliver_reward: NonNegativeFloat
@@ -957,6 +960,7 @@ def build_experiment_config(
         num_agents=experiment.num_agents,
         arrival_rate=spec.arrival_rate,
         keep_up_threshold=experiment.keep_up_threshold,
+        stall_length=experiment.stall_length,
         seed=experiment.seed if seed is None else seed,
         horizon=spec.horizon,
         warmup=spec.warmup,

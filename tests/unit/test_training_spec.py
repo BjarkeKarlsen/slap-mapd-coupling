@@ -182,3 +182,18 @@ def test_an_instance_section_is_built_as_written(spec):
         )
     )
     assert params.role_backbone
+
+
+def test_fleet_configs_set_the_stall_length_from_the_main_load():
+    """app:cal:stall: the stall length is 36 order lines' worth of arrivals at the main load, and
+    it reaches the ExperimentConfig the evaluator reads."""
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import build_experiment_config, load_spec
+
+    root = Path(__file__).resolve().parents[2] / "configs"
+    for m in (8, 16, 32, 64):
+        for controller in ("centralised", "decentralised", "section"):
+            spec = load_spec(root / f"fleet_{m}" / f"{controller}.yaml")
+            assert spec.experiment.stall_length == round(36 / spec.arrival_rate)
+            assert build_experiment_config(spec).stall_length == spec.experiment.stall_length

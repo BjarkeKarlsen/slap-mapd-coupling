@@ -96,8 +96,10 @@ class ExperimentConfig(BaseModel):
     observation_depth: PositiveInt
     # f_up in the keep-up check (tab:evalparams). RunMetrics.keeps_up stays unset without it.
     keep_up_threshold: PositiveFloat | None = Field(default=None, le=1.0)
-    # The stall length (tab:evalparams), TBD. An episode in which an agent holding a task stands
-    # still longer than this is a stall. None leaves RunMetrics.stalled unset.
+    # The stall length (tab:evalparams, app:cal:stall). An episode in which no agent finishes a
+    # task for longer than this after the warm-up is a stall (longest_completion_gap, model
+    # revision D18). The fleet configs set it to 36 / arrival_rate steps. None leaves
+    # RunMetrics.stalled unset.
     stall_length: PositiveInt | None = None
 
     # Reward and learning objective (tab:rlparams, sec:method:rl). Required for
