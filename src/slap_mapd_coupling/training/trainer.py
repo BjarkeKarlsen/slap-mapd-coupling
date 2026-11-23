@@ -267,6 +267,9 @@ def resume(
         str(experiment),
         trainable,
         param_space=config,  # type: ignore[arg-type]
+        # A run that crashed (Tune marks the trial errored) continues from its latest checkpoint
+        # too, instead of only reporting the old error again.
+        resume_errored=True,
     ).fit()
     return _finished_run(results, settings)
 
