@@ -54,9 +54,11 @@ from slap_mapd_coupling.core.tasks import Task
 from slap_mapd_coupling.environment.action_masking import to_action_mask
 from slap_mapd_coupling.environment.observation import (
     Observation,
-    build_observation,
+    WindowFeatures,
     communication_neighbours,
     local_subgraph,
+    step_state,
+    window_features,
 )
 from slap_mapd_coupling.environment.spaces import Mask, claim_mask, legality_mask, max_out_degree
 from slap_mapd_coupling.models.gnn_encoder import NODE_FEATURE_DIM, Pooling
@@ -332,34 +334,11 @@ def encode_view(
     (see check_windows). With `structure` off the arrays that depend only on
     the window (the masks and the edge list) are left empty, for the compact
     sample of models/window_tables.py, which keeps them in tables."""
-    move_targets = graph.out_neighbours(location)
-    if len(move_targets) + 1 > config.max_local_nodes:
-        raise ValueError(
-            f"vertex {location} and its {len(move_targets)} outgoing neighbours do not fit "
-            f"max_local_nodes={config.max_local_nodes}."
-        )
-    if location not in observation.features:
-        raise ValueError(f"vertex {location} is outside its own window.")
-    outside = [w for w in move_targets if w not in observation.features]
-    if outside:
-        raise ValueError(
-            f"the outgoing neighbours {outside} of vertex {location} are outside its field of "
-            "view or window, so their moves have no embedding. check_windows finds this for a "
-            "whole graph before the first step."
-        )
-    selected = list(observation.visible_vertices)
-    if len(selected) > config.max_local_nodes:
-        raise ValueError(
-            f"the window of vertex {location} has {len(selected)} vertices, more than "
-            f"max_local_nodes={config.max_local_nodes}. A window is never truncated, so raise "
-            "max_local_nodes. check_windows finds this for a whole graph before the first step."
-        )
-    index = {v: i for i, v in enumerate(selected)}
-
-    node_features = np.zeros((config.max_local_nodes, NODE_FEATURE_DIM), dtype=np.float32)
+    selected = observation.visible_vertices
+    rows = np.zeros((len(selected), NODE_FEATURE_DIM), dtype=np.float32)
     for i, v in enumerate(selected):
         f = observation.features[v]
-        node_features[i] = (
+        rows[i] = (
             float(f.storage),
             float(f.delivery),
             float(f.endpoint),
@@ -370,8 +349,61 @@ def encode_view(
             float(f.receiving),
             f.distance,
         )
+    index = {v: i for i, v in enumerate(selected)}
+    return _encode_rows(graph, location, selected, index, rows, d_max, config, structure)
+
+
+def _feature_rows(features: WindowFeatures) -> np.ndarray:
+    """The node feature rows of encode_view, in the same column order, from
+    the columns of window_features."""
+    rows = np.empty((len(features.window), NODE_FEATURE_DIM), dtype=np.float32)
+    rows[:, 0:4] = features.roles[:, 0:4]  # storage, delivery, endpoint, transit
+    rows[:, 4] = features.eta
+    rows[:, 5] = features.occupied
+    rows[:, 6] = features.claimed
+    rows[:, 7] = features.roles[:, 4]  # receiving
+    rows[:, 8] = features.distance
+    return rows
+
+
+def _encode_rows(
+    graph: WarehouseGraph,
+    location: VertexId,
+    selected: Sequence[VertexId],
+    index: Mapping[VertexId, int],
+    rows: np.ndarray,
+    d_max: int,
+    config: LocalSubgraphEncodingConfig,
+    structure: bool,
+) -> EncodedView:
+    """encode_view once the window's feature rows are built. `index` is the
+    position of each vertex of `selected`."""
+    move_targets = graph.out_neighbours(location)
+    if len(move_targets) + 1 > config.max_local_nodes:
+        raise ValueError(
+            f"vertex {location} and its {len(move_targets)} outgoing neighbours do not fit "
+            f"max_local_nodes={config.max_local_nodes}."
+        )
+    if location not in index:
+        raise ValueError(f"vertex {location} is outside its own window.")
+    outside = [w for w in move_targets if w not in index]
+    if outside:
+        raise ValueError(
+            f"the outgoing neighbours {outside} of vertex {location} are outside its field of "
+            "view or window, so their moves have no embedding. check_windows finds this for a "
+            "whole graph before the first step."
+        )
+    if len(selected) > config.max_local_nodes:
+        raise ValueError(
+            f"the window of vertex {location} has {len(selected)} vertices, more than "
+            f"max_local_nodes={config.max_local_nodes}. A window is never truncated, so raise "
+            "max_local_nodes. check_windows finds this for a whole graph before the first step."
+        )
+
+    node_features = np.zeros((config.max_local_nodes, NODE_FEATURE_DIM), dtype=np.float32)
+    node_features[: len(selected)] = rows
     if structure:
-        node_mask, edge_index, edge_mask = window_structure(graph, selected, d_max, config)
+        node_mask, edge_index, edge_mask = window_structure(graph, list(selected), d_max, config)
     else:
         node_mask = edge_index = edge_mask = _EMPTY
     move_target_index = slot_targets(graph, location, index, d_max)
@@ -433,12 +465,11 @@ def _move_senders(view: EncodedView, sender_views: Sequence[EncodedView]) -> dic
 
 
 def _pool_mask(
-    observation: Observation, pool: Collection[VertexId], max_local_nodes: int
+    index: Mapping[VertexId, int], pool: Collection[VertexId], max_local_nodes: int
 ) -> np.ndarray:
     """1.0 at the vertices of `pool`, in the order of the window, and 0.0
-    elsewhere. Raises ValueError if `pool` is empty or reaches outside the
-    window."""
-    index = {v: i for i, v in enumerate(observation.visible_vertices)}
+    elsewhere. `index` is the position of each vertex of the window. Raises
+    ValueError if `pool` is empty or reaches outside the window."""
     if not pool:
         raise ValueError("a robot pools over no vertex, so the pooled mean is undefined.")
     outside = sorted(v for v in pool if v not in index)
@@ -451,7 +482,7 @@ def _pool_mask(
 
 def _assemble(
     view: EncodedView,
-    observation: Observation,
+    congestion: float,
     mask: Mask,
     sender_views: Optional[Sequence[EncodedView]],
     config: LocalSubgraphEncodingConfig,
@@ -479,7 +510,7 @@ def _assemble(
         edge_index=view.edge_index,
         edge_mask=view.edge_mask,
         own_index=view.own_index,
-        congestion=observation.congestion,
+        congestion=congestion,
         action_mask=to_action_mask(mask),
         move_target_index=view.move_target_index,
         pool_mask=pool_mask,
@@ -507,7 +538,7 @@ def encode_observation(
     also fix which move slot each one stands on. None means communication
     is off and leaves the sender arrays out."""
     view = encode_view(graph, agent_location, observation, d_max, config)
-    return _assemble(view, observation, mask, sender_views, config)
+    return _assemble(view, observation.congestion, mask, sender_views, config)
 
 
 def encode_all_observations(
@@ -583,14 +614,17 @@ def encode_all_observations(
         missing = [agent_id for agent_id in agent_ids if agent_id not in pool_vertices]
         if missing:
             raise ValueError(f"pool_vertices has no pool for the robots {missing}.")
+    # window_features gives the numbers of build_observation, with what every robot shares
+    # worked out once for the step (environment/observation.py).
+    depth = experiment_config.observation_depth
+    state = step_state(graph, fleet, tasks, t)
     observations = {
-        agent_id: build_observation(
+        agent_id: window_features(
             graph,
             fleet,
-            tasks,
+            state,
             agent_id,
-            t,
-            experiment_config,
+            depth,
             window=None if windows is None else windows[agent_id],
             claimed=() if chosen is None or agent_id not in chosen else chosen[agent_id].values(),
             parking=None if parking is None else parking.get(agent_id),
@@ -598,10 +632,17 @@ def encode_all_observations(
         for agent_id in agent_ids
     }
     views = {
-        agent_id: encode_view(
-            graph, locations[agent_id], observations[agent_id], d_max, encoding_config, padded
+        agent_id: _encode_rows(
+            graph,
+            locations[agent_id],
+            features.window,
+            features.index,
+            _feature_rows(features),
+            d_max,
+            encoding_config,
+            padded,
         )
-        for agent_id in agent_ids
+        for agent_id, features in observations.items()
     }
 
     encoded: dict[AgentId, EncodedObservation] = {}
@@ -614,18 +655,16 @@ def encode_all_observations(
             sender_views = [views[j] for j in heard[: encoding_config.max_messages]]
         pool_mask: Optional[np.ndarray] = None
         if pooling != "none" and padded:
-            observation = observations[agent_id]
-            pool = (
-                observation.visible_vertices if pool_vertices is None else pool_vertices[agent_id]
-            )
-            pool_mask = _pool_mask(observation, pool, encoding_config.max_local_nodes)
+            features = observations[agent_id]
+            pool = features.window if pool_vertices is None else pool_vertices[agent_id]
+            pool_mask = _pool_mask(features.index, pool, encoding_config.max_local_nodes)
         mask = legality_mask(graph, locations[agent_id], d_max=d_max)
         if chosen is not None and agent_id in chosen:
             claim = claim_mask(graph, agent_id, locations, chosen[agent_id], d_max)
             mask = tuple(a + b for a, b in zip(mask, claim))
         encoded[agent_id] = _assemble(
             views[agent_id],
-            observations[agent_id],
+            observations[agent_id].congestion,
             mask,
             sender_views,
             encoding_config,

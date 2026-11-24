@@ -5,7 +5,7 @@ import pytest
 
 from slap_mapd_coupling.core.agents import AgentState, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
-from slap_mapd_coupling.core.graph import Edge, Vertex, WarehouseGraph
+from slap_mapd_coupling.core.graph import Edge, Vertex, VertexRole, WarehouseGraph
 from slap_mapd_coupling.core.tasks import Task
 from slap_mapd_coupling.environment.observation import (
     DISTANCE_SCALE,
@@ -818,3 +818,57 @@ def test_communication_needs_every_robot_to_act():
     fleet = _fleet({1: 0, 2: 1})
     with pytest.raises(ValueError, match="communication"):
         _encode_turn(fleet, acting=[1], communication=True)
+
+
+def _role_line_graph(n: int) -> WarehouseGraph:
+    """The line graph with a storage vertex at one end and a delivery and receiving vertex at
+    the other, so the role columns are not all transit."""
+    vertices = {i: Vertex(id=i) for i in range(n)}
+    vertices[0] = Vertex(id=0, role=VertexRole(storage=True))
+    vertices[n - 1] = Vertex(id=n - 1, role=VertexRole(delivery=True, receiving=True))
+    edges = tuple(
+        Edge(source=a, target=b, cost=1.0)
+        for i in range(n - 1)
+        for a, b in ((i, i + 1), (i + 1, i))
+    )
+    return WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+
+
+@pytest.mark.parametrize("whole_graph", [False, True])
+def test_encode_all_observations_gives_the_numbers_of_build_observation(whole_graph):
+    # encode_all_observations reads the features as columns (window_features). Every robot's
+    # rows must equal those of build_observation and encode_view, with a task far enough away
+    # that the relative label is capped, a parking target, claims and wide windows.
+    graph = _role_line_graph(12)
+    fleet = _fleet({1: 5, 2: 3, 3: 8, 4: 9})
+    task = Task(task_id=1, release_time=0, pickup_vertex=11, delivery_vertex=0, sku="sku-1").assign(
+        agent_id=1, t=0
+    )
+    config = _config(observation_depth=2, num_agents=4)
+    encoding_config = LocalSubgraphEncodingConfig(max_local_nodes=12, max_messages=1)
+    d_max = max_out_degree(graph)
+    everything = tuple(range(12))
+    windows = {aid: everything for aid in (1, 2, 3, 4)} if whole_graph else None
+    chosen = {1: {}, 2: {1: 4}, 3: {1: 4, 2: 2}, 4: {1: 4, 2: 2, 3: 7}}
+    parking = {2: 0}
+
+    encoded = encode_all_observations(
+        graph, fleet, [task], 0, config, encoding_config, d_max,
+        windows=windows, chosen=chosen, parking=parking,
+    )
+
+    for aid, location in fleet.locations().items():
+        observation = build_observation(
+            graph, fleet, [task], aid, 0, config,
+            window=None if windows is None else windows[aid],
+            claimed=chosen[aid].values(),
+            parking=parking.get(aid),
+        )
+        view = encode_view(graph, location, observation, d_max, encoding_config)
+        np.testing.assert_array_equal(encoded[aid].node_features, view.node_features)
+        np.testing.assert_array_equal(encoded[aid].move_target_index, view.move_target_index)
+        assert encoded[aid].own_index == view.own_index
+        assert encoded[aid].congestion == observation.congestion
+    # the far task caps the relative label of robot 1 at d_obs on the whole-graph window
+    if whole_graph:
+        assert encoded[1].node_features[:12, 4].min() == -2.0

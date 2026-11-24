@@ -420,6 +420,7 @@ def _to_plot_position(cell: GridCell) -> Position:
 # Vertices per agent (sec:impl:instances), the sizes van Knippenberg et al. (2021) use for 32
 # and 64 agents.
 VERTICES_PER_AGENT = 16
+STORAGE_PER_AGENT = 5   # slots per agent of the fleet configs ([A77]), used by v2_stacked_shape
 # One warehouse per fleet size, the same in every run (app:instances).
 FLEET_INSTANCE_SEED = 42
 
@@ -1410,8 +1411,12 @@ def v2_stacked_shape(num_agents: int, rack_rows: int) -> tuple[int, int]:
     """The aisle count and the number of blocks of `rack_rows` rows of the fleet's warehouse
     with stacked blocks. Of the shapes that hold 16 m walkable vertices, the most nearly square,
     with the inner segments filled by a share in ``_V2_UPPER_FILL`` where one exists. Ties go to
-    fewer aisles."""
+    fewer aisles. The left wall, one cell per rack row and one at each end, must hold the m/2
+    docks, so from 128 agents the warehouse grows taller than square (more blocks and cross
+    lanes), and its rack faces must hold the workstations, slots and parking vertices. 8 to 64
+    agents keep their square shape (scaling thought experiment, 2026-11-24)."""
     num_walkable = VERTICES_PER_AGENT * num_agents
+    num_docks = num_agents // 2
     preferred: list[tuple[int, int, int]] = []
     feasible: list[tuple[int, int, int]] = []
     for num_aisles in range(3, num_walkable):
@@ -1429,6 +1434,8 @@ def v2_stacked_shape(num_agents: int, rack_rows: int) -> tuple[int, int]:
                 break
             if inner > high:
                 continue
+            if num_blocks * rack_rows + 2 < num_docks:
+                continue
             depth = num_blocks * rack_rows + num_blocks + 2
             candidate = (abs(width - depth), num_aisles, num_blocks)
             feasible.append(candidate)
@@ -1441,8 +1448,39 @@ def v2_stacked_shape(num_agents: int, rack_rows: int) -> tuple[int, int]:
             f"No stacked graph v2 shape holds {num_walkable} walkable vertices for "
             f"{num_agents} agents in blocks of {rack_rows} rack rows."
         )
-    _, num_aisles, num_blocks = min(shapes)
-    return num_aisles, num_blocks
+    # The most nearly square shape whose rack faces hold the m/2 workstations, the 5 m slots and
+    # the m parking vertices. From 8 to 64 agents the first shape builds, so nothing changes
+    # there. Each check builds the warehouse once (seconds at 64, minutes at 256 agents).
+    for _, num_aisles, num_blocks in sorted(shapes):
+        if _v2_stacked_shape_builds(num_agents, rack_rows, num_aisles, num_blocks):
+            return num_aisles, num_blocks
+    raise InstanceGenerationError(
+        f"No stacked graph v2 shape for {num_agents} agents leaves enough rack faces for its "
+        "workstations, slots and parking vertices."
+    )
+
+
+def _v2_stacked_shape_builds(
+    num_agents: int, rack_rows: int, num_aisles: int, num_blocks: int
+) -> bool:
+    """Whether the fleet's warehouse of this shape builds with its workstations, 5 m slots and
+    m parking vertices on the rack faces, at the seed ``FLEET_INSTANCE_SEED``."""
+    settings = {
+        **fleet_defaults(num_agents),
+        "num_aisles": num_aisles,
+        "rack_rows": rack_rows,
+        "num_blocks": num_blocks,
+        "lower_block": "irregular",
+        "station_placement": "rack_faces",
+        "workstations_per_section": 4,
+        "dock_placement": "left_wall",
+        "num_storage_vertices": STORAGE_PER_AGENT * num_agents,
+    }
+    try:
+        generate_instance(GeneratorParams(**settings, wait_cost=0.0))
+    except InstanceGenerationError:
+        return False
+    return True
 
 
 def _v2_shape(num_agents: int) -> tuple[int, int]:

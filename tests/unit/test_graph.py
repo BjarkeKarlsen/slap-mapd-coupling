@@ -104,3 +104,27 @@ def test_within_is_the_field_of_view_worked_out_once():
             )
             assert graph.within(v, depth) == expected
             assert graph.within(v, depth) is graph.within(v, depth)
+
+
+def test_distance_table_holds_the_distances_and_window_rows_are_kept():
+    """Every entry of distance_table() is distance(v, w), NaN where distance raises, and
+    window_rows gives each vertex's table row and window position, kept per window."""
+    import math
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import build_instance, load_spec
+
+    root = Path(__file__).resolve().parents[2]
+    graph = build_instance(load_spec(root / "configs" / "fleet_8" / "decentralised.yaml")).graph
+    table, row = graph.distance_table(), graph.vertex_rows()
+    for v in graph.vertices:
+        for w in graph.vertices:
+            try:
+                assert table[row[v], row[w]] == graph.distance(v, w)
+            except KeyError:
+                assert math.isnan(table[row[v], row[w]])
+    window = graph.within(next(iter(row)), 3.0)
+    rows, index = graph.window_rows(window)
+    assert rows.tolist() == [row[v] for v in window]
+    assert index == {v: i for i, v in enumerate(window)}
+    assert graph.window_rows(window)[0] is rows

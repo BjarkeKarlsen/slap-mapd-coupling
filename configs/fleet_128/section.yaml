@@ -1,0 +1,140 @@
+# The 128-agent warehouse of the scaling thought experiment (step time only). The three files of
+# configs/fleet_128 differ only in `controller`. See training/spec.py for what each section means.
+#
+# Built for the scaling test only (step time, author 2026-11-24). Appendix E stops at 64 agents,
+# so no Token Passing run found a capacity here. Everything else is configs/fleet_64 scaled with the
+# fleet by the [A77] rules. The aisles and blocks are v2_stacked_shape(128, 4) of the generator, the
+# rule that also gives 6/2, 7/4, 10/6 and 15/8 at 8 to 64 agents, with the left wall holding
+# the m/2 docks and the rack faces holding the workstations, slots and parking vertices, so the
+# warehouse grows taller than square here. Not a training run.
+
+controller: section
+regime: fixed               # fixed | demand | congestion, the storage rule training runs under
+communication: false        # decentralised arm only
+evaluation_storage_mode: fixed
+
+# The load continues the growth of 32 and 64 agents, 0.3/32 = 0.6/64 = 0.009375 per agent (author
+# 2026-11-24), not a capacity found by Token Passing.
+arrival_rate: 1.2
+horizon: 2000
+
+experiment:
+  num_agents: 128
+  wait_cost: 0.2            # c_wait, one value for the graph and the reward, after van Knippenberg et al. (2021)
+  keep_up_threshold: 0.8    # f_up of eq:throughput
+  observation_depth: 5      # d_obs
+  discount: 0.99            # gamma
+  # n_deliver is raised well above 1.0. A 5000-iteration run showed rising training return with
+  # zero evaluation completions, consistent with the per-step shaping term outweighing a small
+  # completion bonus.
+  deliver_reward: 10.0
+  override_penalty: 0.5
+  move_cost: 0.1            # c_move, after van Knippenberg et al. (2021)
+  congestion_reward_weight: 0.1
+  congestion_sensitive: false
+  idle_parking: true        # D26, an idle robot in the way goes to the nearest free parking leaf
+  seed: 0
+
+# SKUs of three sizes (unit capacities 0.5, 1 and 2 cycle over them), 2.5 per agent ([A77]), a
+# multiple of 20 so the rotation moves a whole number of SKUs. The start is random ([A75], D22):
+# every SKU alone on a shelf drawn at random for the seed, so the start carries no demand
+# information. The names are for reading a run, the first is the most popular at t = 0.
+storage:
+  # sku_names left out, the SKUs are named sku_000, sku_001 and so on.
+  unit_capacities: [0.5, 1.0, 2.0]
+  initial_placement: random_slots
+  num_skus: 320
+  seed: 0
+
+# SKU popularity is Zipf with the given skew, and every 200 steps the ranking rotates by 5 % of
+# the SKUs, so it turns once every 4000 steps whatever the number of SKUs (Appendix F).
+demand:
+  skew: 1.0
+  rotation_period: 200
+  rotation_share: 0.05
+
+# Delta, the arrival period of every storage rule, and beta of the congestion rule, used by
+# `slap-mapd evaluate --storage-modes`. Both kept by the Token Passing runs (Appendix G).
+storage_rule:
+  epoch_length: 100
+  congestion_weight: 1.0
+
+# The arrival stock model. Stock is replaced a refill of Q units at a time, once Q units of a SKU
+# have been ordered since its last refill, and each refill is one put-away to one shelf. Every SKU
+# keeps the safety stock of the most popular rank, since the rotation takes every SKU to the top
+# ([A75]). Lines ask for 1 to 5 units and an order has 5 lines on average ([A46]). The stock
+# arrives at the receiving vertices and robots carry it to its shelves. An order ships from its
+# workstation to a dock drawn at random. Each SKU belongs to a section of 20 SKUs, served by 4
+# neighbouring workstations, a random split per seed ([A76], [A77]).
+arrival:
+  rule: refill
+  refill_units: 10          # Q, put-aways about a fifth of the trips ([A77])
+  service_level: 0.99
+  units_per_line: [1, 5]
+  receiving: receiving
+  putaway: robots
+  # The cold-stock measure: a SKU outside the top 10 of the current ranking is cold, and the
+  # prime shelves are the nearest ones the starting placement gives the top 10. Evaluation only.
+  cold_stock_top_k: 10
+  shipping: true
+  dock_choice: random
+  lines_per_order:
+    distribution: shifted_poisson
+    mean: 5.0
+  safety_stock: top_rank
+  sku_sections: true
+
+arm:
+  num_zones: 3              # section arm only, a sweep parameter (tab:modelparams)
+  # max_messages defaults to num_agents - 1, so no sender is dropped. Communication only.
+
+model:
+  num_rounds: 2
+  hidden_width: 32
+  head_hidden_width: 32
+
+ppo:
+  lr: 0.0003
+  clip_param: 0.2
+  gae_lambda: 0.95
+  minibatch_size: 128
+  num_epochs: 5
+  entropy_coeff: 0.02
+  vf_loss_coeff: 1.0
+  training_budget_env_steps: 500000
+
+train_seed_count: 250
+validation_seed_count: 5
+test_seed_count: 20
+
+checkpoint:
+  frequency: 3              # iterations between checkpoints, 0 keeps only the one at the end
+  num_to_keep: null         # keep every one, a checkpoint is chosen on validation seeds
+  score_attribute: episode_tasks_completed_mean   # a top-level key of the result
+  score_order: max
+
+# Every seed plays its own generated warehouse (D27).
+warehouse_per_seed: true
+
+# Graph v2 scaled with the fleet ([A62], [A77]): 16 walkable vertices, 5 shelves, half a
+# workstation and half a dock per agent, and one parking vertex per agent (num_endpoints follows
+# experiment.num_agents). Workstations stand on rack faces, 4 neighbouring ones per section, and
+# the docks on the left wall.
+instance:
+  layout: v2
+  num_aisles: 16
+  rack_rows: 4
+  links_per_aisle_pair: 1
+  num_transit_vertices: 2048
+  one_way_fraction: 0.0
+  default_edge_cost: 1.0
+  random_edge_costs: false
+  num_delivery_vertices: 64
+  num_receiving_vertices: 64
+  seed: 42
+  station_placement: rack_faces
+  workstations_per_section: 4
+  lower_block: irregular
+  num_blocks: 16
+  dock_placement: left_wall
+  num_storage_vertices: 640

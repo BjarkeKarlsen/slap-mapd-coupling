@@ -20,12 +20,21 @@ The distance feature is the relative distance label (sec:method:model):
 the vertex's distance label eta_i(v,t) minus that of the robot's own
 vertex, capped at plus or minus d_obs. The reward's potential still uses
 eta_i itself (environment/reward_function.py).
+
+build_observation gives one robot's observation as one object per vertex, which
+reads like the definition. A step asks for every robot's observation, and for
+the centralised router each window is the whole warehouse, so the encoder uses
+`window_features` instead. It returns the same numbers as columns over the
+window, read from the graph's distance table, with what every robot shares
+worked out once per step (`step_state`). Tests check that the two agree.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Collection, Sequence
+from typing import Collection, Mapping, Sequence
+
+import numpy as np
 
 from slap_mapd_coupling.core.agents import AgentId, FleetState
 from slap_mapd_coupling.core.experiment_config import ExperimentConfig
@@ -141,7 +150,10 @@ def build_observation(
     visible vertices, in the order given. None means the field of view.
     The congestion feature is always taken over the field of view.
     `claimed` is V_{<i}(t), empty for the decentralised router."""
-    if config.observation_depth is None:
+    # Read once, since config is a pydantic model and the loop below visits every vertex of
+    # the window, the whole warehouse for the centralised router.
+    depth = config.observation_depth
+    if depth is None:
         raise ValueError(
             "build_observation requires config.observation_depth (d_obs); "
             "ExperimentConfig already enforces this for controller='decentralised'."
@@ -152,7 +164,7 @@ def build_observation(
     location = locations[agent_id]
     target = current_target(location, active_by_agent.get(agent_id), parking)
 
-    field_of_view = local_subgraph(graph, location, config.observation_depth)
+    field_of_view = local_subgraph(graph, location, depth)
     visible = field_of_view if window is None else tuple(window)
     if len(set(visible)) != len(visible):
         raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
@@ -162,18 +174,115 @@ def build_observation(
     features = {}
     for v in visible:
         storage, delivery, endpoint, transit, receiving = role_flags(graph.vertices[v].role)
+        vertex_eta = eta(graph, v, target)
         features[v] = VertexFeatures(
             storage,
             delivery,
             endpoint,
             transit,
-            eta=relative_eta(own_eta, eta(graph, v, target), config.observation_depth),
+            eta=relative_eta(own_eta, vertex_eta, depth),
             occupied=v in occupied_vertices,
             claimed=v in claimed_vertices,
             receiving=receiving,
-            distance=eta(graph, v, target) / DISTANCE_SCALE,
+            distance=vertex_eta / DISTANCE_SCALE,
         )
 
     congestion = occupancy_fraction(fleet, field_of_view, excl={agent_id})
 
     return Observation(visible_vertices=visible, features=features, congestion=congestion)
+
+
+@dataclass(frozen=True)
+class StepState:
+    """What every robot's observation at one timestep shares, worked out once
+    per step: where the robots stand, each robot's active task, how many
+    robots stand on each vertex, and the multi-hot role of each vertex. The
+    last two are indexed by the rows of graph.distance_table()."""
+
+    locations: Mapping[AgentId, VertexId]
+    active: Mapping[AgentId, Task]
+    occupants: np.ndarray  # [|V|] int, robots standing on each vertex
+    roles: np.ndarray  # [|V|, 5] bool, role_flags of each vertex
+
+
+def _role_table(graph: WarehouseGraph) -> np.ndarray:
+    """role_flags of every vertex, one row per row of graph.distance_table()."""
+    table = np.array(
+        [role_flags(vertex.role) for vertex in graph.vertices.values()], dtype=bool
+    ).reshape(len(graph.vertices), 5)
+    table.flags.writeable = False
+    return table
+
+
+def step_state(graph: WarehouseGraph, fleet: FleetState, tasks: Sequence[Task], t: int) -> StepState:
+    """The StepState of timestep t."""
+    row = graph.vertex_rows()
+    locations = fleet.locations()
+    occupants = np.zeros(len(row), dtype=np.int64)
+    for v in locations.values():
+        occupants[row[v]] += 1
+    roles = graph.cached("observation.role_flags", lambda: _role_table(graph))
+    return StepState(locations, active_tasks_by_agent(tasks, t), occupants, roles)
+
+
+@dataclass(frozen=True)
+class WindowFeatures:
+    """The vertex features of build_observation as columns, one entry per
+    vertex of the window in the window's order, with the congestion feature."""
+
+    window: tuple[VertexId, ...]
+    index: Mapping[VertexId, int]  # the position of each vertex in the window
+    roles: np.ndarray  # [n, 5] bool: storage, delivery, endpoint, transit, receiving
+    eta: np.ndarray  # [n] float, the relative distance label
+    occupied: np.ndarray  # [n] bool
+    claimed: np.ndarray  # [n] bool
+    distance: np.ndarray  # [n] float, eta_i(v,t) / DISTANCE_SCALE
+    congestion: float
+
+
+def window_features(
+    graph: WarehouseGraph,
+    fleet: FleetState,
+    state: StepState,
+    agent_id: AgentId,
+    depth: int,
+    window: Sequence[VertexId] | None = None,
+    claimed: Collection[VertexId] = (),
+    parking: VertexId | None = None,
+) -> WindowFeatures:
+    """The features build_observation gives agent_id, the same numbers, as
+    columns. `depth` is d_obs. The arguments mean what they mean there."""
+    location = state.locations[agent_id]
+    target = current_target(location, state.active.get(agent_id), parking)
+    field_of_view = local_subgraph(graph, location, depth)
+    visible = field_of_view if window is None else tuple(window)
+    rows, index = graph.window_rows(visible)
+    if len(index) != len(visible):
+        raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
+
+    row = graph.vertex_rows()
+    table = graph.distance_table()
+    own_row = row[location]
+    labels = table[rows, row[target]]  # eta_i(v,t) on every vertex of the window
+    own_eta = table[own_row, row[target]]
+    if np.isnan(own_eta) or np.isnan(labels).any():
+        raise KeyError(f"a vertex of the window of agent {agent_id} cannot reach {target}.")
+    # relative_eta and the occupied set of build_observation, over the whole window at once.
+    relative = np.minimum(depth, np.maximum(-depth, labels - own_eta))
+    occupied = (state.occupants[rows] - (rows == own_row)) > 0
+    claimed_column = np.zeros(len(visible), dtype=bool)
+    for v in claimed:
+        position = index.get(v)
+        if position is not None:
+            claimed_column[position] = True
+
+    return WindowFeatures(
+        window=visible,
+        index=index,
+        roles=state.roles[rows],
+        eta=relative,
+        occupied=occupied,
+        claimed=claimed_column,
+        distance=labels / DISTANCE_SCALE,
+        congestion=occupancy_fraction(fleet, field_of_view, excl={agent_id}),
+    )
