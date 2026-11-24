@@ -187,6 +187,7 @@ def train(
     storage_path: Path | None = None,
     progress_path: Path | None = None,
     validate_in: Path | None = None,
+    init_checkpoint: Path | None = None,
 ) -> TrainingRun:
     """Trains with Ray Tune, stops at the first iteration at or above the training budget in
     timesteps, and returns the checkpoint of the end of the run and the best one.
@@ -196,8 +197,17 @@ def train(
     runner, so the run overshoots the budget by up to one iteration's timesteps. With
     `validate_in`, the run folder holding the spec, every checkpoint is played on the validation
     seeds as training goes on (ValidationLog).
+
+    With `init_checkpoint` the policy starts from the weights of that earlier checkpoint
+    (warm start) instead of random ones. It is a new run with its own budget, episode length
+    and progress file. The optimiser state is not carried over.
     """
     settings = settings or CheckpointSettings()
+    callbacks_class = (
+        TrainingProgressCallbacks
+        if init_checkpoint is None
+        else warm_start_callbacks(init_checkpoint)
+    )
     # An iteration samples one episode per runner, which is total_train_batch_size timesteps
     # (the horizon per runner), so this is the number of iterations.
     expected_iterations = math.ceil(budget_env_steps / ppo_config.total_train_batch_size)
@@ -211,7 +221,7 @@ def train(
         # still named PPO_*.
         ppo_config.algo_class,
         # The PPOConfig object itself, as Tune's docs show, though the stub says dict.
-        param_space=ppo_config.callbacks(TrainingProgressCallbacks),  # type: ignore[arg-type]
+        param_space=ppo_config.callbacks(callbacks_class),  # type: ignore[arg-type]
         run_config=tune.RunConfig(
             name=run_name,
             storage_path=str(storage_path.resolve()) if storage_path is not None else None,
@@ -230,6 +240,7 @@ def resume(
     storage_path: Path,
     *,
     settings: CheckpointSettings | None = None,
+    override_resources: bool = False,
 ) -> TrainingRun:
     """Continues the run `train` started as `run_name` under `storage_path`, from its latest
     checkpoint, after it was stopped before its budget. The budget, the checkpointing and the
@@ -239,15 +250,26 @@ def resume(
     `ppo_config` is built from the run's spec as for `train`. Building it registers the
     environment, which the restored run looks up by name. The runners and the rest of the
     PPO settings come from the run's own saved state.
+
+    With `override_resources` the run continues with the runners and the device of
+    `ppo_config` instead of its saved ones, for example on a CPU machine after it started on a GPU,
+    or on a GPU after it started on a CPU.
     """
     settings = settings or CheckpointSettings()
     experiment = (storage_path / run_name).resolve()
     if not tune.Tuner.can_restore(str(experiment)):
         raise ValueError(f"No run to continue in {experiment}.")
+    config = ppo_config.callbacks(TrainingProgressCallbacks)
+    trainable: Any = ppo_config.algo_class
+    if override_resources:
+        trainable = tune.with_resources(trainable, trainable.default_resource_request(config))
     results = tune.Tuner.restore(
         str(experiment),
-        ppo_config.algo_class,
-        param_space=ppo_config.callbacks(TrainingProgressCallbacks),  # type: ignore[arg-type]
+        trainable,
+        param_space=config,  # type: ignore[arg-type]
+        # A run that crashed (Tune marks the trial errored) continues from its latest checkpoint
+        # too, instead of only reporting the old error again.
+        resume_errored=True,
     ).fit()
     return _finished_run(results, settings)
 
@@ -275,3 +297,30 @@ def load_module(checkpoint: Path, policy_id: str = DEFAULT_POLICY_ID):
 
     path = checkpoint / COMPONENT_LEARNER_GROUP / COMPONENT_LEARNER / COMPONENT_RL_MODULE
     return RLModule.from_checkpoint(str(path.resolve() / policy_id))
+
+
+def warm_start_callbacks(checkpoint: Path) -> type:
+    """TrainingProgressCallbacks that, when the algorithm is built, load the shared policy's
+    weights from `checkpoint` (an Algorithm checkpoint directory) into the learner and send
+    them to the runners, so the first episodes already play the earlier policy."""
+    module_path = str(
+        checkpoint.resolve() / "learner_group" / "learner" / "rl_module" / DEFAULT_POLICY_ID
+    )
+    if not Path(module_path).is_dir():
+        raise ValueError(f"No {DEFAULT_POLICY_ID} module in {checkpoint}.")
+
+    class WarmStartCallbacks(TrainingProgressCallbacks):
+        def on_algorithm_init(self, *, algorithm: Any, **kwargs: Any) -> None:
+            super().on_algorithm_init(algorithm=algorithm, **kwargs)
+            from ray.rllib.core.rl_module.rl_module import RLModule
+
+            state = RLModule.from_checkpoint(module_path).get_state()
+            algorithm.learner_group.foreach_learner(
+                lambda learner: learner.module[DEFAULT_POLICY_ID].set_state(state)
+            )
+            algorithm.env_runner_group.sync_weights(
+                from_worker_or_learner_group=algorithm.learner_group, inference_only=True
+            )
+            print(f"=== Warm start: weights of {DEFAULT_POLICY_ID} from {checkpoint} ===")
+
+    return WarmStartCallbacks

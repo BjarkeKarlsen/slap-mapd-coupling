@@ -127,6 +127,19 @@ def simulate(
 @click.option("--arrival-rate", type=float, default=None, help="Tasks released per step.")
 @click.option("--horizon", type=int, default=None, help="Episode length in steps.")
 @click.option(
+    "--validate/--no-validate",
+    default=True,
+    help="Play every checkpoint on the validation seeds while training goes on. With "
+    "--no-validate, `evaluate` validates them afterwards.",
+)
+@click.option(
+    "--init-checkpoint",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Start the policy from the weights of this earlier checkpoint (warm start), as a "
+    "new run with its own budget and episode length.",
+)
+@click.option(
     "--budget-env-steps", type=int, default=None, help="Training budget in environment steps."
 )
 @click.option(
@@ -183,6 +196,8 @@ def train(
     communication,
     arrival_rate,
     horizon,
+    validate,
+    init_checkpoint,
     budget_env_steps,
     seed,
     env_runners,
@@ -245,7 +260,8 @@ def train(
         settings=spec.checkpoint,
         storage_path=out,
         progress_path=out / f"{name}_training_progress.jsonl",
-        validate_in=out,
+        validate_in=out if validate else None,
+        init_checkpoint=Path(init_checkpoint) if init_checkpoint else None,
     )
     _report_run(run, spec, out)
 
@@ -267,7 +283,21 @@ def _report_run(run, spec, out) -> None:
 
 @cli.command()
 @click.argument("output", type=click.Path(exists=True, file_okay=False))
-def resume(output):
+@click.option(
+    "--cpu",
+    is_flag=True,
+    help="Continue on the CPU with --env-runners runners, for a run that started on a GPU.",
+)
+@click.option(
+    "--gpu",
+    is_flag=True,
+    help="Continue with one GPU for the learner and --env-runners runners, for a run that "
+    "started on a CPU.",
+)
+@click.option(
+    "--env-runners", default=3, type=int, help="Runners with --cpu or --gpu (3, as train)."
+)
+def resume(output, cpu, gpu, env_runners):
     """Continue the training run in OUTPUT (the --output of train) from its latest checkpoint.
     It runs on to the budget the run started with, with the same runners and settings, and
     keeps writing the same progress file. The iterations after the checkpoint are trained
@@ -281,6 +311,8 @@ def resume(output):
     )
     from slap_mapd_coupling.training.trainer import resume as resume_training
 
+    if cpu and gpu:
+        raise click.UsageError("Give --cpu or --gpu, not both.")
     out = Path(output)
     specs = sorted(out.glob("*_spec.json"))
     if len(specs) != 1:
@@ -288,11 +320,15 @@ def resume(output):
     spec = TrainingSpec.model_validate_json(specs[0].read_text(encoding="utf-8"))
     name = specs[0].name.removesuffix("_spec.json")
     try:
+        study = build_study(spec)
         run = resume_training(
-            build_study_ppo_config(spec, build_study(spec)),
+            build_study_ppo_config(spec, study, num_env_runners=env_runners, use_gpu=gpu)
+            if cpu or gpu
+            else build_study_ppo_config(spec, study),
             name,
             out,
             settings=spec.checkpoint,
+            override_resources=cpu or gpu,
         )
     except ValueError as error:
         raise click.UsageError(str(error)) from error
