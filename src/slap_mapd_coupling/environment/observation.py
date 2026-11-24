@@ -214,7 +214,9 @@ def _role_table(graph: WarehouseGraph) -> np.ndarray:
     return table
 
 
-def step_state(graph: WarehouseGraph, fleet: FleetState, tasks: Sequence[Task], t: int) -> StepState:
+def step_state(
+    graph: WarehouseGraph, fleet: FleetState, tasks: Sequence[Task], t: int
+) -> StepState:
     """The StepState of timestep t."""
     row = graph.vertex_rows()
     locations = fleet.locations()
