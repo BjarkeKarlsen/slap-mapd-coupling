@@ -314,7 +314,8 @@ class WarehouseGraph(BaseModel):
                 )
             table.flags.writeable = False
             self._table = table
-        return self._table
+        found: np.ndarray = self._table
+        return found
 
     def cached(self, name: str, build: Callable[[], Any]) -> Any:
         """build(), worked out on the first call with this name and kept, for a table another

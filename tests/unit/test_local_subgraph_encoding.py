@@ -853,13 +853,26 @@ def test_encode_all_observations_gives_the_numbers_of_build_observation(whole_gr
     parking = {2: 0}
 
     encoded = encode_all_observations(
-        graph, fleet, [task], 0, config, encoding_config, d_max,
-        windows=windows, chosen=chosen, parking=parking,
+        graph,
+        fleet,
+        [task],
+        0,
+        config,
+        encoding_config,
+        d_max,
+        windows=windows,
+        chosen=chosen,
+        parking=parking,
     )
 
     for aid, location in fleet.locations().items():
         observation = build_observation(
-            graph, fleet, [task], aid, 0, config,
+            graph,
+            fleet,
+            [task],
+            aid,
+            0,
+            config,
             window=None if windows is None else windows[aid],
             claimed=chosen[aid].values(),
             parking=parking.get(aid),
