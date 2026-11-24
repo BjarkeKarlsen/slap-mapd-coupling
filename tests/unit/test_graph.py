@@ -128,3 +128,67 @@ def test_distance_table_holds_the_distances_and_window_rows_are_kept():
     assert rows.tolist() == [row[v] for v in window]
     assert index == {v: i for i, v in enumerate(window)}
     assert graph.window_rows(window)[0] is rows
+
+
+def _python_dijkstra(graph: WarehouseGraph) -> dict[tuple[int, int], float]:
+    """The all-pairs distances as the graph computed them before scipy: Dijkstra in Python from
+    every movable vertex, one entry per reachable pair."""
+    import heapq
+
+    distances: dict[tuple[int, int], float] = {}
+    out: dict[int, list[Edge]] = {v: [] for v in graph.vertices}
+    for edge in graph.edges:
+        out[edge.source].append(edge)
+    for source, vertex in graph.vertices.items():
+        if not vertex.role.movable:
+            continue
+        best = {source: 0.0}
+        frontier = [(0.0, source)]
+        while frontier:
+            d, current = heapq.heappop(frontier)
+            if d > best.get(current, float("inf")):
+                continue
+            for edge in out[current]:
+                candidate = d + edge.cost
+                if candidate < best.get(edge.target, float("inf")):
+                    best[edge.target] = candidate
+                    heapq.heappush(frontier, (candidate, edge.target))
+        distances.update({(source, target): value for target, value in best.items()})
+    return distances
+
+
+@pytest.mark.parametrize("fleet", [8, 16, 32, 64])
+def test_the_distance_table_equals_dijkstra_in_python_on_the_fleet_warehouses(fleet):
+    """The table scipy fills holds exactly the distances of the Python Dijkstra it replaced, and
+    distance raises KeyError for every pair that has none, on the warehouse of every fleet."""
+    import math
+    from pathlib import Path
+
+    from slap_mapd_coupling.training.spec import build_instance, load_spec
+
+    root = Path(__file__).resolve().parents[2]
+    config = root / "configs" / f"fleet_{fleet}" / "centralised.yaml"
+    graph = build_instance(load_spec(config)).graph
+    expected = _python_dijkstra(graph)
+    table, row = graph.distance_table(), graph.vertex_rows()
+    found = {
+        (v, w): table[row[v], row[w]]
+        for v in graph.vertices
+        for w in graph.vertices
+        if not math.isnan(table[row[v], row[w]])
+    }
+    assert found == expected
+    for v, w in expected:
+        assert graph.distance(v, w) == expected[(v, w)]
+
+
+def test_distance_raises_for_a_pair_without_a_path_and_an_unknown_vertex():
+    vertices = {1: Vertex(id=1), 2: Vertex(id=2), 3: Vertex(id=3)}
+    edges = (Edge(source=1, target=2, cost=1.0), Edge(source=2, target=1, cost=1.0))
+    graph = WarehouseGraph(vertices=vertices, edges=edges, wait_cost=0.0)
+    assert graph.distance(1, 2) == 1.0
+    assert type(graph.distance(1, 2)) is float
+    with pytest.raises(KeyError):
+        graph.distance(1, 3)
+    with pytest.raises(KeyError):
+        graph.distance(1, 99)
