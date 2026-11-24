@@ -24,6 +24,7 @@ from slap_mapd_coupling.storage.arrival import (
     refill_amounts,
 )
 from slap_mapd_coupling.training.spec import (
+    StockSizing,
     TrainingSpec,
     build_experiment_config,
     build_study,
@@ -342,3 +343,22 @@ def test_the_rule_settings_are_checked():
     config = build_experiment_config(_spec(), 0, "fixed")
     assert (config.stock_rule, config.refill_units, config.service_level) == ("refill", Q, 0.99)
     assert (config.stock_margin, config.stock_floor) == (None, None)
+
+
+def test_sections_with_the_top_rank_stock_skip_the_per_rank_simulation(monkeypatch):
+    # With SKU sections the top rank's safety stock comes from section_top_quantile, so the
+    # per-rank simulation is not run at all. The stock is Q plus that quantile for every SKU.
+    import slap_mapd_coupling.training.spec as spec_module
+
+    sizing = StockSizing(
+        0.6, 100, None, 3.0, Q, 0.99, None, (1, 5), safety_stock="top_rank", sections=3
+    )
+    skus = [f"sku-{i}" for i in range(30)]
+    expected = Q + spec_module.section_top_quantile(len(skus), sizing, 0.0)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the per-rank simulation ran although its result is not read")
+
+    monkeypatch.setattr(spec_module, "period_demand_quantiles", never)
+    stock = refill_starting_stock(skus, None, sizing)
+    assert set(stock.values()) == {expected}

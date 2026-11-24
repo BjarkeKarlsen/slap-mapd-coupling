@@ -160,15 +160,20 @@ def _play_timestep(env, policy, observations):
 
 
 class _CountingModule:
-    """Wraps an RLModule and records the batch size of every forward_inference call."""
+    """Wraps an RLModule and records the batch size of every forward pass. ModulePolicy sets
+    evaluation mode once and calls _forward_inference, past RLlib's per-call wrapper."""
 
     def __init__(self, module):
         self._module = module
         self.batch_sizes: list[int] = []
 
-    def forward_inference(self, batch):
+    def eval(self):
+        self._module.eval()
+        return self
+
+    def _forward_inference(self, batch):
         self.batch_sizes.append(batch[Columns.OBS]["action_mask"].shape[0])
-        return self._module.forward_inference(batch)
+        return self._module._forward_inference(batch)
 
 
 def _alone(observations, agent_id):
