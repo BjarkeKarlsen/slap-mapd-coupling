@@ -3,7 +3,9 @@
 from __future__ import annotations
 from collections import deque
 import heapq
-from typing import Literal
+from typing import Any, Callable, Literal, Mapping
+
+import numpy as np
 
 from pydantic import (
     BaseModel,
@@ -118,6 +120,14 @@ class WarehouseGraph(BaseModel):
     _paths: dict[
         tuple[VertexId, VertexId], tuple[tuple[VertexId, VertexId], ...]
     ] = PrivateAttr(default_factory=dict)
+    # distance_table() and window_rows(window), filled on first use.
+    _row: dict[VertexId, int] = PrivateAttr(default_factory=dict)
+    _table: Any = PrivateAttr(default=None)
+    _window_rows: dict[
+        tuple[VertexId, ...], tuple[np.ndarray, dict[VertexId, int]]
+    ] = PrivateAttr(default_factory=dict)
+    # cached(name, build): tables other modules derive from the graph alone.
+    _derived: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
     def _edges_reference_known_movable_vertices(self) -> "WarehouseGraph":
@@ -282,3 +292,49 @@ class WarehouseGraph(BaseModel):
         instances/validation.py, not something this method should mask.
         """
         return self._dist[(v, w)]
+
+    def vertex_rows(self) -> Mapping[VertexId, int]:
+        """The row of each vertex in distance_table(), in the order of `vertices`."""
+        if not self._row:
+            self._row = {v: i for i, v in enumerate(self.vertices)}
+        return self._row
+
+    def distance_table(self) -> np.ndarray:
+        """d_G as an array: entry [vertex_rows()[v], vertex_rows()[w]] is distance(v, w), the
+        same number. NaN where distance raises KeyError. Built on first use from the same
+        shortest paths, so the observation can read a whole window's distance labels at once
+        (models/local_subgraph_encoding.py). About 40 MB at 128 agents."""
+        if self._table is None:
+            row = self.vertex_rows()
+            table = np.full((len(row), len(row)), np.nan)
+            pairs = np.array([(row[v], row[w]) for v, w in self._dist], dtype=np.int64)
+            if len(pairs):
+                table[pairs[:, 0], pairs[:, 1]] = np.fromiter(
+                    self._dist.values(), dtype=np.float64, count=len(self._dist)
+                )
+            table.flags.writeable = False
+            self._table = table
+        return self._table
+
+    def cached(self, name: str, build: Callable[[], Any]) -> Any:
+        """build(), worked out on the first call with this name and kept, for a table another
+        module derives from the graph alone. The graph never changes, so neither does the
+        table."""
+        if name not in self._derived:
+            self._derived[name] = build()
+        return self._derived[name]
+
+    def window_rows(
+        self, window: tuple[VertexId, ...]
+    ) -> tuple[np.ndarray, Mapping[VertexId, int]]:
+        """For a window (a tuple of vertices), the row of each of its vertices in
+        distance_table() and the position of each vertex in the window. Worked out once per
+        window, since the robots' windows are fixed per vertex and asked for on every step."""
+        found = self._window_rows.get(window)
+        if found is None:
+            row = self.vertex_rows()
+            rows = np.fromiter((row[v] for v in window), dtype=np.int64, count=len(window))
+            rows.flags.writeable = False
+            found = (rows, {v: i for i, v in enumerate(window)})
+            self._window_rows[window] = found
+        return found
