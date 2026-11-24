@@ -6,6 +6,8 @@ import heapq
 from typing import Any, Callable, Literal, Mapping
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from pydantic import (
     BaseModel,
@@ -112,17 +114,20 @@ class WarehouseGraph(BaseModel):
     wait_cost: NonNegativeFloat  # c_wait >= 0, a scalar study parameter (not per-vertex)
 
     _out: dict[VertexId, tuple[Edge, ...]] = PrivateAttr(default_factory=dict)
+    # out_neighbours(v), the targets of _out[v], built once.
+    _targets: dict[VertexId, tuple[VertexId, ...]] = PrivateAttr(default_factory=dict)
     _legal_actions: dict[VertexId, tuple[Action, ...]] = PrivateAttr(default_factory=dict)
-    _dist: dict[tuple[VertexId, VertexId], float] = PrivateAttr(default_factory=dict)
     # within(v, depth), filled on first use. The graph never changes, so neither does the set.
     _within: dict[tuple[VertexId, float], tuple[VertexId, ...]] = PrivateAttr(default_factory=dict)
     # shortest_path_edges(v, w), filled on first use, for the same reason.
     _paths: dict[
         tuple[VertexId, VertexId], tuple[tuple[VertexId, VertexId], ...]
     ] = PrivateAttr(default_factory=dict)
-    # distance_table() and window_rows(window), filled on first use.
+    # The row of each vertex in the distance table, and d_G itself as that table (see
+    # distance_table). Both are filled when the graph is built.
     _row: dict[VertexId, int] = PrivateAttr(default_factory=dict)
     _table: Any = PrivateAttr(default=None)
+    # window_rows(window), filled on first use.
     _window_rows: dict[
         tuple[VertexId, ...], tuple[np.ndarray, dict[VertexId, int]]
     ] = PrivateAttr(default_factory=dict)
@@ -191,53 +196,88 @@ class WarehouseGraph(BaseModel):
             out[edge.source].append(edge)
         # Outgoing edges in increasing target number, so slot k is the k-th smallest neighbour.
         self._out = {v: tuple(sorted(items, key=lambda e: e.target)) for v, items in out.items()}
+        self._targets = {v: tuple(e.target for e in items) for v, items in self._out.items()}
         self._legal_actions = {
             v: (Action(kind="wait"),) + tuple(Action(kind="move", target=e.target) for e in items)
             for v, items in self._out.items()
         }
-        self._dist = self._all_pairs_shortest_paths()
+        self._row = {v: i for i, v in enumerate(self.vertices)}
+        self._table = self._all_pairs_shortest_paths()
 
-    def _all_pairs_shortest_paths(self) -> dict[tuple[VertexId, VertexId], float]:
-        # Dijkstra from each source in V_mov, O(|V_mov| * (|E| + |V_mov| log |V_mov|)) time.
-        # D_G moves only over V_mov, so we can ignore any edges touching non-movable vertices.
-        distances: dict[tuple[VertexId, VertexId], float] = {}
-        movable = [v for v, item in self.vertices.items() if item.role.movable]
-        for source in movable:
-            best = {source: 0.0}
-            frontier = [(0.0, source)]
-            while frontier:
-                distance, current = heapq.heappop(frontier)
-                if distance > best.get(current, float("inf")):
-                    continue
-                for edge in self._out.get(current, ()):
-                    candidate = distance + edge.cost
-                    if candidate < best.get(edge.target, float("inf")):
-                        best[edge.target] = candidate
-                        heapq.heappush(frontier, (candidate, edge.target))
-            distances.update({(source, target): value for target, value in best.items()})
-        return distances
+    def _all_pairs_shortest_paths(self) -> np.ndarray:
+        # Dijkstra from each source in V_mov, run by scipy in C. One table of |V| x |V| numbers
+        # (about 40 MB at 128 agents) instead of a Python entry per pair, which took about 1 GB.
+        # Edges only join movable vertices (checked above), so D_G moves only over V_mov. A
+        # non-movable source keeps a row of NaN, as does a pair with no path.
+        row = self._row
+        n = len(row)
+        cost: dict[tuple[int, int], float] = {}
+        for edge in self.edges:
+            if edge.source not in row or edge.target not in row:
+                continue  # the validator rejects an edge to an unknown vertex, with its own error
+            pair = (row[edge.source], row[edge.target])
+            cost[pair] = min(edge.cost, cost.get(pair, float("inf")))
+        sources = np.array(
+            [row[v] for v, item in self.vertices.items() if item.role.movable], dtype=np.int64
+        )
+        table = np.full((n, n), np.nan)
+        if len(sources):
+            pairs = np.array(list(cost), dtype=np.int64).reshape(-1, 2)
+            weights = csr_matrix(
+                (np.array(list(cost.values()), dtype=np.float64), (pairs[:, 0], pairs[:, 1])),
+                shape=(n, n),
+            )
+            found = dijkstra(weights, directed=True, indices=sources)
+            found[np.isinf(found)] = np.nan
+            table[sources] = found
+        table.flags.writeable = False
+        return table
+
+    def __eq__(self, other: object) -> bool:
+        """Equal when the vertices, edges and wait cost are. pydantic would also compare the
+        private attributes, which are derived from these or filled on use, and the distance
+        table is an array, which has no single truth value."""
+        if not isinstance(other, WarehouseGraph):
+            return NotImplemented
+        return (self.vertices, self.edges, self.wait_cost) == (
+            other.vertices,
+            other.edges,
+            other.wait_cost,
+        )
+
+    __hash__ = None  # type: ignore[assignment]  # a dict field, so never hashable (as before)
+
+    def _kept(self) -> dict[str, Any]:
+        """The private attributes, read past pydantic's attribute lookup, which cost about
+        1.5 us a read. The methods below run every step, so they read through this."""
+        private = self.__pydantic_private__
+        assert private is not None
+        return private
 
     def out_neighbours(self, v: VertexId) -> tuple[VertexId, ...]:
         """N+(v) in the action set, ordered by increasing vertex number."""
-        return tuple(e.target for e in self._out.get(v, ()))
+        targets: dict[VertexId, tuple[VertexId, ...]] = self._kept()["_targets"]
+        return targets.get(v, ())
 
     def legal_actions(self, v: VertexId) -> tuple[Action, ...]:
         """U(v) in the action set: wait, then one move per N+(v) in increasing vertex number."""
-        return self._legal_actions[v]
+        actions: dict[VertexId, tuple[Action, ...]] = self._kept()["_legal_actions"]
+        return actions[v]
 
     def within(self, v: VertexId, depth: float) -> tuple[VertexId, ...]:
         """The movable vertices w with d_G(v, w) <= depth, in vertex order. Worked out once per
         (v, depth) and kept, since the environment asks for every robot's field of view on every
         timestep (environment/observation.py::local_subgraph)."""
         key = (v, depth)
-        found = self._within.get(key)
+        kept: dict[tuple[VertexId, float], tuple[VertexId, ...]] = self._kept()["_within"]
+        found = kept.get(key)
         if found is None:
             found = tuple(
                 w
                 for w, vertex in self.vertices.items()
                 if vertex.role.movable and self.distance(v, w) <= depth
             )
-            self._within[key] = found
+            kept[key] = found
         return found
 
     def shortest_path_edges(
@@ -251,7 +291,9 @@ class WarehouseGraph(BaseModel):
         Raises KeyError if target is unreachable from source, as distance does.
         """
         key = (source, target)
-        found = self._paths.get(key)
+        paths: dict[tuple[VertexId, VertexId], tuple[tuple[VertexId, VertexId], ...]]
+        paths = self._kept()["_paths"]
+        found = paths.get(key)
         if found is not None:
             return found
         if source == target:
@@ -291,38 +333,36 @@ class WarehouseGraph(BaseModel):
         unreachable: finiteness is an instance precondition checked by
         instances/validation.py, not something this method should mask.
         """
-        return self._dist[(v, w)]
+        # The simulator, the storage rules and the assignment call this millions of times.
+        private = self._kept()
+        row = private["_row"]
+        if v not in row or w not in row:
+            raise KeyError((v, w))
+        found: float = private["_table"].item(row[v], row[w])
+        if found != found:  # NaN, no path
+            raise KeyError((v, w))
+        return found
 
     def vertex_rows(self) -> Mapping[VertexId, int]:
         """The row of each vertex in distance_table(), in the order of `vertices`."""
-        if not self._row:
-            self._row = {v: i for i, v in enumerate(self.vertices)}
-        return self._row
+        row: dict[VertexId, int] = self._kept()["_row"]
+        return row
 
     def distance_table(self) -> np.ndarray:
         """d_G as an array: entry [vertex_rows()[v], vertex_rows()[w]] is distance(v, w), the
-        same number. NaN where distance raises KeyError. Built on first use from the same
-        shortest paths, so the observation can read a whole window's distance labels at once
-        (models/local_subgraph_encoding.py). About 40 MB at 128 agents."""
-        if self._table is None:
-            row = self.vertex_rows()
-            table = np.full((len(row), len(row)), np.nan)
-            pairs = np.array([(row[v], row[w]) for v, w in self._dist], dtype=np.int64)
-            if len(pairs):
-                table[pairs[:, 0], pairs[:, 1]] = np.fromiter(
-                    self._dist.values(), dtype=np.float64, count=len(self._dist)
-                )
-            table.flags.writeable = False
-            self._table = table
-        return self._table
+        same number. NaN where distance raises KeyError. The observation reads a whole window's
+        distance labels from it at once (models/local_subgraph_encoding.py)."""
+        found: np.ndarray = self._kept()["_table"]
+        return found
 
     def cached(self, name: str, build: Callable[[], Any]) -> Any:
         """build(), worked out on the first call with this name and kept, for a table another
         module derives from the graph alone. The graph never changes, so neither does the
         table."""
-        if name not in self._derived:
-            self._derived[name] = build()
-        return self._derived[name]
+        derived = self._kept()["_derived"]
+        if name not in derived:
+            derived[name] = build()
+        return derived[name]
 
     def window_rows(
         self, window: tuple[VertexId, ...]
@@ -330,11 +370,13 @@ class WarehouseGraph(BaseModel):
         """For a window (a tuple of vertices), the row of each of its vertices in
         distance_table() and the position of each vertex in the window. Worked out once per
         window, since the robots' windows are fixed per vertex and asked for on every step."""
-        found = self._window_rows.get(window)
+        kept: dict[tuple[VertexId, ...], tuple[np.ndarray, dict[VertexId, int]]]
+        kept = self._kept()["_window_rows"]
+        found = kept.get(window)
         if found is None:
             row = self.vertex_rows()
             rows = np.fromiter((row[v] for v in window), dtype=np.int64, count=len(window))
             rows.flags.writeable = False
             found = (rows, {v: i for i, v in enumerate(window)})
-            self._window_rows[window] = found
+            kept[window] = found
         return found
