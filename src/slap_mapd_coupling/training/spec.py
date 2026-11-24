@@ -821,29 +821,37 @@ def refill_starting_stock(
         None,  # at t = 0 no rotation has happened yet
         None,
     )
-    quantiles = period_demand_quantiles(
-        len(ranked),
-        0.0 if demand is None else demand.skew,
-        sizing.arrival_rate,
-        sizing.epoch_length,
-        sizing.service_level,
-        sizing.lines_per_order,
-        sizing.units_per_line,
-    )
+    skew = 0.0 if demand is None else demand.skew
+
+    def quantiles() -> list[int]:
+        # Simulated only where it is read: with sections the top rank's quantile comes from
+        # section_top_quantile, and the per-rank simulation (about 400 000 draws in Python at
+        # 64 agents) would be thrown away.
+        return period_demand_quantiles(
+            len(ranked),
+            skew,
+            sizing.arrival_rate,
+            sizing.epoch_length,
+            sizing.service_level,
+            sizing.lines_per_order,
+            sizing.units_per_line,
+        )
+
     if sizing.safety_stock == "top_rank":
         # [A75]: every SKU gets the safety stock of the most popular rank. With sections
         # ([A76]) the most popular SKU of a section takes the largest share of that section's
         # lines when the rest of its section is the least popular SKUs.
         if sizing.sections:
-            top = section_top_quantile(
-                len(ranked), sizing, 0.0 if demand is None else demand.skew
-            )
+            top = section_top_quantile(len(ranked), sizing, skew)
         else:
-            top = quantiles[0]
+            top = quantiles()[0]
         return {sku_id: sizing.refill_units + top for sku_id in ranked}
-    return {sku_id: sizing.refill_units + quantiles[rank] for rank, sku_id in enumerate(ranked)}
+    per_rank = quantiles()
+    return {sku_id: sizing.refill_units + per_rank[rank] for rank, sku_id in enumerate(ranked)}
 
 
+# Kept per process like period_demand_quantiles, since a study builds a warehouse per seed.
+@functools.lru_cache(maxsize=64)
 def section_top_quantile(num_skus: int, sizing: StockSizing, skew: float) -> int:
     """The service-level quantile of one period's units of the most popular SKU with SKU
     sections ([A76]), simulated like `period_demand_quantiles`. Orders reach one section with

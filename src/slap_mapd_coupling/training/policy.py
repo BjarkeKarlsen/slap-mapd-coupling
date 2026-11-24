@@ -54,6 +54,11 @@ class ModulePolicy:
         is, the CPU for a module loaded from a checkpoint."""
         self._device = device
         self._module = module if device is None else module.to(device)
+        # Evaluation mode once, here. RLlib's forward_inference sets it on every call and puts
+        # the old mode back after, which walks every layer of the network twice a call (about
+        # 5 % of a centralised step on the CPU). This policy only ever infers, so __call__ runs
+        # the same _forward_inference directly.
+        self._module.eval()  # type: ignore[union-attr]  # a TorchRLModule at run time
         self._episode_seed: Optional[int] = None
         self._record_runtime: Optional[Callable[[float], None]] = None
 
@@ -77,7 +82,7 @@ class ModulePolicy:
         # A fresh batch per call, since forward_inference can change it in place.
         batch = _batch([observations[a] for a in agent_ids], self._device)
         with torch.no_grad():
-            out = self._module.forward_inference(batch)
+            out = self._module._forward_inference(batch)
         logits = out[Columns.ACTION_DIST_INPUTS].detach().cpu().numpy()
 
         slots: dict[str, int] = {}
