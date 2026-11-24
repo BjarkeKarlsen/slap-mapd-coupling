@@ -141,7 +141,10 @@ def build_observation(
     visible vertices, in the order given. None means the field of view.
     The congestion feature is always taken over the field of view.
     `claimed` is V_{<i}(t), empty for the decentralised router."""
-    if config.observation_depth is None:
+    # Read once, since config is a pydantic model and the loop below visits every vertex of
+    # the window, the whole warehouse for the centralised router.
+    depth = config.observation_depth
+    if depth is None:
         raise ValueError(
             "build_observation requires config.observation_depth (d_obs); "
             "ExperimentConfig already enforces this for controller='decentralised'."
@@ -152,7 +155,7 @@ def build_observation(
     location = locations[agent_id]
     target = current_target(location, active_by_agent.get(agent_id), parking)
 
-    field_of_view = local_subgraph(graph, location, config.observation_depth)
+    field_of_view = local_subgraph(graph, location, depth)
     visible = field_of_view if window is None else tuple(window)
     if len(set(visible)) != len(visible):
         raise ValueError(f"the window of agent {agent_id} lists a vertex more than once")
@@ -162,16 +165,17 @@ def build_observation(
     features = {}
     for v in visible:
         storage, delivery, endpoint, transit, receiving = role_flags(graph.vertices[v].role)
+        vertex_eta = eta(graph, v, target)
         features[v] = VertexFeatures(
             storage,
             delivery,
             endpoint,
             transit,
-            eta=relative_eta(own_eta, eta(graph, v, target), config.observation_depth),
+            eta=relative_eta(own_eta, vertex_eta, depth),
             occupied=v in occupied_vertices,
             claimed=v in claimed_vertices,
             receiving=receiving,
-            distance=eta(graph, v, target) / DISTANCE_SCALE,
+            distance=vertex_eta / DISTANCE_SCALE,
         )
 
     congestion = occupancy_fraction(fleet, field_of_view, excl={agent_id})
