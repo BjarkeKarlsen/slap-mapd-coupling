@@ -110,6 +110,10 @@ class ExperimentConfig(BaseModel):
     override_penalty: NonNegativeFloat | None = None  # n_blocked, reward
     move_cost: NonNegativeFloat | None = None  # c_move, reward
     congestion_reward_weight: NonNegativeFloat | None = None  # n_cng, reward
+    # n_fleet, the fleet reward test (eq:fleetreward). Every robot also gets this share of the
+    # delivery bonus of each task the fleet finishes, divided by the fleet size. 0 leaves the
+    # reward as it was, and every config keeps it at 0.
+    fleet_reward_weight: NonNegativeFloat = 0.0
 
     # The order distribution P_ord (sec:pf:tasks). Without a skew the SKU of an order is drawn
     # uniformly among the SKUs in stock. With one it is drawn by popularity, the SKU at rank r
