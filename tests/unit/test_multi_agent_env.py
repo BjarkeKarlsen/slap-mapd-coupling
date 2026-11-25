@@ -460,3 +460,25 @@ def test_the_log_keeps_the_longest_run_of_blocked_ticks_per_task():
     log.record_blocked_tick(2)
     assert log.blocked_ticks_by_task == {1: 9, 2: 1}
     assert log.longest_blocked_run_by_task == {1: 5, 2: 1}
+
+
+def test_the_pair_stand_still_is_the_shorter_run_of_two_neighbours_standing_still():
+    """Two agents on neighbouring vertices that both stood still: the pair has been stuck as
+    long as the shorter of their runs. An agent that moved, or stands away from the others,
+    makes no pair."""
+    from types import SimpleNamespace
+
+    from slap_mapd_coupling.environment.multi_agent_env import EpisodeLog, WarehouseMAPDEnv
+
+    edges = {1: (2,), 2: (1, 3), 3: (2,), 9: ()}  # a line 1-2-3, and 9 apart
+    log = EpisodeLog()
+    log.blocked_run_by_task.update({"a": 300, "b": 250, "d": 400})  # "c" moved this step
+    fake = SimpleNamespace(log=log, graph=SimpleNamespace(out_neighbours=lambda v: edges[v]))
+    tasks = {agent: SimpleNamespace(task_id=agent) for agent in ("a", "b", "c", "d")}
+
+    def pair(locations):
+        return WarehouseMAPDEnv._pair_stand_still(fake, tasks, locations)  # type: ignore[arg-type]
+
+    assert pair({"a": 1, "b": 2, "c": 3, "d": 9}) == 250  # a and b side by side
+    assert pair({"a": 1, "b": 3, "c": 2, "d": 9}) == 0  # the agent between them moved
+    assert pair({"a": 1, "b": 9, "c": 3, "d": 2}) == 300  # a and d, d stood still longer

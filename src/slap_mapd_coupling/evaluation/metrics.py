@@ -136,6 +136,10 @@ class RunMetrics(BaseModel):
     # A lock at a workstation keeps two or more agents holding theirs. The threshold for a lock
     # is applied in the analysis.
     longest_two_agent_hold: NonNegativeInt = 0
+    # The longest time two agents on neighbouring vertices both stood still in a row, each
+    # holding its task, at a step in [T_warm, T]. Two agents stuck side by side, the lock
+    # measure. The threshold for a lock is applied in the analysis.
+    longest_pair_stand_still: NonNegativeInt = 0
     # longest_completion_gap > the stall length, a jam the fleet may have caught up from. None
     # unless the stall length is configured, since tab:evalparams leaves it TBD.
     stalled: bool | None = None

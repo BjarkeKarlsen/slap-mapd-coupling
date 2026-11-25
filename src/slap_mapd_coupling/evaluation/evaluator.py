@@ -527,6 +527,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     longest_stand_still = max(env.log.longest_blocked_run_by_task.values(), default=0)
     completion_gap = longest_completion_gap(env.tasks, warmup, horizon)
     two_agent_hold = longest_two_agent_hold(env.tasks, warmup, horizon)
+    pair_stand_still = max(env.log.pair_stand_still_by_t[warmup:horizon], default=0)
     throughput = num_completed / (horizon - warmup)  # Lambda_T over the window
 
     # Mean service time and its split, eq:meanservice / eq:split, over the completed picks.
@@ -690,6 +691,7 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         keeps_up_putaways=keep_up_putaways,
         longest_stand_still=longest_stand_still,
         longest_two_agent_hold=two_agent_hold,
+        longest_pair_stand_still=pair_stand_still,
         longest_completion_gap=completion_gap,
         stalled=None if config.stall_length is None else completion_gap > config.stall_length,
         num_waiting_tasks=num_waiting,
