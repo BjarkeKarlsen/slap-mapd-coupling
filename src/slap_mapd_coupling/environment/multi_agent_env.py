@@ -1409,6 +1409,7 @@ class WarehouseMAPDEnv:
         after_locations = self.fleet.locations()
         after_tasks_by_agent = active_tasks_by_agent(self.tasks, next_t)
         rewards: dict[AgentId, float] = {}
+        num_completed = 0
         for agent_id in self.fleet.agents:
             task_now = active_by_agent.get(agent_id)
             task_next = after_tasks_by_agent.get(agent_id)
@@ -1445,6 +1446,18 @@ class WarehouseMAPDEnv:
             )
             self.log.record_reward_terms(agent_id, terms, was_overridden)
             rewards[agent_id] = terms.total
+            num_completed += completed
+        if self.config.fleet_reward_weight > 0:
+            # eq:fleetreward: every robot gets the mean over the fleet of the delivery bonuses of
+            # this step, weighted by n_fleet, so on average a robot earns as much from the
+            # fleet's deliveries as from its own (the fleet reward test).
+            bonus = (
+                self.config.fleet_reward_weight
+                * self.config.deliver_reward
+                * num_completed
+                / len(self.fleet.agents)
+            )
+            rewards = {agent_id: value + bonus for agent_id, value in rewards.items()}
         return rewards
 
 

@@ -390,6 +390,26 @@ def test_every_arm_gets_a_reward_when_a_robot_delivers(controller):
     assert delivered_reward > 50.0  # the delivery bonus, less at most the other terms
 
 
+def test_the_fleet_reward_adds_the_mean_delivery_bonus_to_every_robot():
+    """eq:fleetreward: with n_fleet = 1 every robot gets n_deliver times the tasks the fleet
+    finished this step, divided by the fleet size, on top of its own reward. The reward does
+    not change what the planner does, so both runs see the same steps."""
+    shared = _env(_graph(), _decentralised_config(horizon=60, fleet_reward_weight=1.0))
+    own = _env(_graph(), _decentralised_config(horizon=60))
+    shared.reset()
+    own.reset()
+    finished_steps = 0
+    for _ in range(60):
+        _, with_fleet, *_ = _step(shared)
+        _, without_fleet, *_ = _step(own)
+        finished = sum(task.finish_time == own.t for task in own.tasks)
+        finished_steps += finished > 0
+        bonus = own.config.deliver_reward * finished / len(own.fleet.agents)
+        for agent_id, value in without_fleet.items():
+            assert with_fleet[agent_id] == pytest.approx(value + bonus)
+    assert finished_steps > 0  # the fixture does deliver within the horizon
+
+
 def test_only_a_realised_move_pays_the_move_cost():
     """A robot that moves pays c_move. One that chose to wait, or whose move conflict
     resolution turned into a wait, pays nothing for moving."""

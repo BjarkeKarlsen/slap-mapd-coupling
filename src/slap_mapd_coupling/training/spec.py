@@ -305,6 +305,7 @@ class ExperimentSettings(BaseModel):
     override_penalty: NonNegativeFloat
     move_cost: NonNegativeFloat
     congestion_reward_weight: NonNegativeFloat
+    fleet_reward_weight: NonNegativeFloat = 0.0  # n_fleet, the fleet reward test, off by default
     congestion_sensitive: bool = False
     # D26: an idle robot in the way gets the nearest free parking leaf as its target.
     idle_parking: bool = False
@@ -979,6 +980,7 @@ def build_experiment_config(
         override_penalty=experiment.override_penalty,
         move_cost=experiment.move_cost,
         congestion_reward_weight=experiment.congestion_reward_weight,
+        fleet_reward_weight=experiment.fleet_reward_weight,
         demand_skew=None if demand is None else demand.skew,
         demand_rotation_period=None if demand is None else demand.rotation_period,
         demand_rotation_shift=None if demand is None else demand.rotation_shift,
