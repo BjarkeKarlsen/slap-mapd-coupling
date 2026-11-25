@@ -230,6 +230,10 @@ class EpisodeLog:
     # count. A tick in which the task's agent moves ends the run.
     blocked_run_by_task: dict[TaskId, int] = field(default_factory=dict)
     longest_blocked_run_by_task: dict[TaskId, int] = field(default_factory=dict)
+    # Entry t is for the step from t to t + 1: the longest time two agents on neighbouring
+    # vertices have both stood still in a row, each holding the same task throughout, the lock
+    # measure. 0 when no such pair stood still at that step.
+    pair_stand_still_by_t: list[int] = field(default_factory=list)
     assignment_runtime_seconds: list[float] = field(default_factory=list)  # sec:impl:cost
     routing_runtime_seconds: list[float] = field(default_factory=list)  # set by whoever acts
     # sum_i delta_i(t) at every timestep t = 0..T-1 (the mean crowding), for
@@ -648,6 +652,9 @@ class WarehouseMAPDEnv:
                 self._record_wait(realised_locations[agent_id], tasks_by_id[task.task_id])
             else:
                 self.log.record_moving_tick(task.task_id)
+        self.log.pair_stand_still_by_t.append(
+            self._pair_stand_still(active_by_agent, realised_locations)
+        )
 
         self.log.backlog_by_t.append(self._backlog(next_t))
         clock = self._timed("apply_and_lifecycle", clock)
@@ -1280,6 +1287,27 @@ class WarehouseMAPDEnv:
             )
             self._next_task_id += 1
         return new_tasks
+
+    def _pair_stand_still(
+        self, active_by_agent: Mapping[AgentId, Task], locations: Mapping[AgentId, VertexId]
+    ) -> int:
+        """The longest time two agents on neighbouring vertices have both stood still in a row
+        at this step, each holding its task. Both stood still the whole time, so they stood on
+        the same two vertices throughout, and the shorter of the two runs is how long the pair
+        has been stuck side by side. 0 when no such pair stands still now."""
+        runs = self.log.blocked_run_by_task
+        still: dict[VertexId, int] = {}
+        for agent_id, task in active_by_agent.items():
+            run = runs.get(task.task_id, 0)
+            if run:
+                still[locations[agent_id]] = run
+        longest = 0
+        for v, run in still.items():
+            for w in self.graph.out_neighbours(v):
+                other = still.get(w)
+                if other is not None:
+                    longest = max(longest, min(run, other))
+        return longest
 
     def _record_wait(self, at: VertexId, task: Task) -> None:
         """Charges one wait of the robot standing at `at` while serving `task` to the edge
