@@ -540,9 +540,11 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
     mean_wait: float | None = None
     mean_travel: float | None = None
     mean_blocked: float | None = None
+    mean_blocked_overridden: float | None = None
+    mean_blocked_chosen: float | None = None
     mean_service_time: float | None = None
     if num_picks:
-        waits, travels, blocks = [], [], []
+        waits, travels, blocks, forced = [], [], [], []
         for task in picks:
             # by construction: a completed task was assigned first (core/tasks.py)
             assert task.finish_time is not None and task.assignment_time is not None
@@ -550,9 +552,14 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
             waits.append(task.assignment_time - task.release_time)
             travels.append(task.finish_time - task.assignment_time - blocked)
             blocks.append(blocked)
+            forced.append(env.log.overridden_blocked_ticks_by_task.get(task.task_id, 0))
         mean_wait = sum(waits) / num_picks
         mean_travel = sum(travels) / num_picks
         mean_blocked = sum(blocks) / num_picks  # W_T, eq:waiting
+        # The blocked time split into the waits conflict resolution forced and those the
+        # agent chose. The two add up to mean_blocked.
+        mean_blocked_overridden = sum(forced) / num_picks
+        mean_blocked_chosen = (sum(blocks) - sum(forced)) / num_picks  # whole ticks, never < 0
         mean_service_time = (sum(waits) + sum(travels) + sum(blocks)) / num_picks
 
     # B_t is logged before stage 1 and stage 6 release tasks at t, so the put-aways of an
@@ -703,6 +710,8 @@ def _to_run_metrics(env: WarehouseMAPDEnv, config: ExperimentConfig) -> RunMetri
         mean_wait_for_agent=mean_wait,
         mean_travel_time=mean_travel,
         mean_blocked_time=mean_blocked,
+        mean_blocked_overridden_time=mean_blocked_overridden,
+        mean_blocked_chosen_time=mean_blocked_chosen,
         mean_crowding=mean_crowding,
         robot_busy_share=robot_busy_share(env.tasks, config.num_agents, horizon, warmup),
         **endpoint_wait_metrics(getattr(env.assigner, "endpoint_wait", None), picks, putaways),

@@ -117,6 +117,15 @@ def test_service_time_splits_into_three_parts_that_add_up():
     assert abs(parts - metrics.mean_service_time) < 1e-9
 
 
+def test_blocked_time_splits_into_overridden_and_chosen_waits():
+    metrics = _run(_graph(), _config(horizon=40, arrival_rate=1.0))
+    assert metrics.mean_blocked_time is not None
+    assert metrics.mean_blocked_overridden_time is not None
+    assert metrics.mean_blocked_chosen_time is not None
+    parts = metrics.mean_blocked_overridden_time + metrics.mean_blocked_chosen_time
+    assert abs(parts - metrics.mean_blocked_time) < 1e-9
+
+
 def test_keeps_up_is_unset_without_a_threshold():
     metrics = _run(_graph(), _config(horizon=30))
     assert metrics.keeps_up is None

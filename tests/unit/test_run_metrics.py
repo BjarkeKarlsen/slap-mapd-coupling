@@ -71,6 +71,31 @@ def test_parts_must_add_up_to_service_time():
         RunMetrics(**_with_service_time(mean_blocked_time=2.0))
 
 
+def test_blocked_split_that_adds_up_is_accepted():
+    metrics = RunMetrics(
+        **_with_service_time(mean_blocked_overridden_time=0.25, mean_blocked_chosen_time=0.75)
+    )
+    assert metrics.mean_blocked_overridden_time == 0.25
+
+
+def test_blocked_split_must_add_up_to_blocked_time():
+    with pytest.raises(ValidationError):
+        RunMetrics(
+            **_with_service_time(mean_blocked_overridden_time=0.5, mean_blocked_chosen_time=0.75)
+        )
+
+
+def test_blocked_split_parts_come_together():
+    with pytest.raises(ValidationError):
+        RunMetrics(**_with_service_time(mean_blocked_overridden_time=1.0))
+
+
+def test_a_row_from_before_the_blocked_split_still_reads():
+    metrics = RunMetrics(**_with_service_time())
+    assert metrics.mean_blocked_overridden_time is None
+    assert metrics.mean_blocked_chosen_time is None
+
+
 def test_crowding_is_a_fraction():
     with pytest.raises(ValidationError):
         RunMetrics(**_base(mean_crowding=1.5))

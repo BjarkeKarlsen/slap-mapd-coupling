@@ -482,6 +482,16 @@ def test_the_log_keeps_the_longest_run_of_blocked_ticks_per_task():
     assert log.longest_blocked_run_by_task == {1: 5, 2: 1}
 
 
+def test_the_log_keeps_the_overridden_part_of_the_blocked_ticks():
+    log = EpisodeLog()
+    log.record_blocked_tick(1)
+    log.record_blocked_tick(1, overridden=True)
+    log.record_blocked_tick(1, overridden=True)
+    log.record_blocked_tick(2)
+    assert log.blocked_ticks_by_task == {1: 3, 2: 1}  # the total is as before
+    assert log.overridden_blocked_ticks_by_task == {1: 2}
+
+
 def test_the_pair_stand_still_is_the_shorter_run_of_two_neighbours_standing_still():
     """Two agents on neighbouring vertices that both stood still: the pair has been stuck as
     long as the shorter of their runs. An agent that moved, or stands away from the others,
