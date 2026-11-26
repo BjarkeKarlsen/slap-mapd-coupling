@@ -184,6 +184,12 @@ class RunMetrics(BaseModel):
     mean_wait_for_agent: NonNegativeFloat | None = None  # mean of t_assigned - t_released
     mean_travel_time: NonNegativeFloat | None = None  # mean of zeta_j^travel
     mean_blocked_time: NonNegativeFloat | None = None  # W_T, eq:waiting
+    # W_T split by why the agent stood still: a move that conflict resolution turned into a
+    # wait, and a wait the agent chose. Over the completed picks, adding up to
+    # mean_blocked_time. None in a row written before the split existed, and None iff
+    # mean_blocked_time is None in a row written after.
+    mean_blocked_overridden_time: NonNegativeFloat | None = None
+    mean_blocked_chosen_time: NonNegativeFloat | None = None
     # Arrival stock model only: the mean over completed picks of the steps their order waited
     # for a unit of its SKU. A task keeps its order's release time, so this wait is part of
     # mean_wait_for_agent. None under the template model, and None iff no pick completed.
@@ -307,6 +313,23 @@ class RunMetrics(BaseModel):
             )
         if self.total_service_time_finished > self.total_service_time:
             raise ValueError("total_service_time_finished cannot exceed total_service_time.")
+        return self
+
+    @model_validator(mode="after")
+    def _blocked_split_adds_up(self) -> "RunMetrics":
+        overridden, chosen = self.mean_blocked_overridden_time, self.mean_blocked_chosen_time
+        if (overridden is None) != (chosen is None):
+            raise ValueError("the two parts of the blocked time are set together or not at all.")
+        if overridden is None:
+            return self  # a row from before the split, or no pick completed
+        if self.mean_blocked_time is None:
+            raise ValueError("the parts of the blocked time need mean_blocked_time.")
+        assert chosen is not None
+        if abs(overridden + chosen - self.mean_blocked_time) > _SPLIT_TOLERANCE:
+            raise ValueError(
+                f"overridden + chosen = {overridden + chosen} must equal mean_blocked_time = "
+                f"{self.mean_blocked_time}."
+            )
         return self
 
     @model_validator(mode="after")

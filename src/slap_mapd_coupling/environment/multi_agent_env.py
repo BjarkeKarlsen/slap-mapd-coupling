@@ -226,6 +226,10 @@ class EpisodeLog:
     edge_traversals: dict[EdgeKey, int] = field(default_factory=dict)
     backlog_by_t: list[int] = field(default_factory=list)  # B_t, every timestep
     blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)  # omega_j(t) summed
+    # The part of blocked_ticks_by_task in which conflict resolution turned the agent's move
+    # into a wait. The rest are waits the agent chose. Only the split is new, the sum is as
+    # before.
+    overridden_blocked_ticks_by_task: dict[TaskId, int] = field(default_factory=dict)
     # The blocked ticks in a row of each task so far, and the longest such run, for the stall
     # count. A tick in which the task's agent moves ends the run.
     blocked_run_by_task: dict[TaskId, int] = field(default_factory=dict)
@@ -308,8 +312,14 @@ class EpisodeLog:
     def record_edge(self, edge: EdgeKey) -> None:
         self.edge_traversals[edge] = self.edge_traversals.get(edge, 0) + 1
 
-    def record_blocked_tick(self, task_id: TaskId) -> None:
+    def record_blocked_tick(self, task_id: TaskId, overridden: bool = False) -> None:
+        """One blocked tick of the task, `overridden` when conflict resolution turned its
+        agent's move into the wait, and a chosen wait otherwise."""
         self.blocked_ticks_by_task[task_id] = self.blocked_ticks_by_task.get(task_id, 0) + 1
+        if overridden:
+            self.overridden_blocked_ticks_by_task[task_id] = (
+                self.overridden_blocked_ticks_by_task.get(task_id, 0) + 1
+            )
         run = self.blocked_run_by_task.get(task_id, 0) + 1
         self.blocked_run_by_task[task_id] = run
         if run > self.longest_blocked_run_by_task.get(task_id, 0):
@@ -648,7 +658,9 @@ class WarehouseMAPDEnv:
         tasks_by_id = {task.task_id: task for task in self.tasks}
         for agent_id, task in active_by_agent.items():
             if before_locations[agent_id] == realised_locations[agent_id]:
-                self.log.record_blocked_tick(task.task_id)  # omega_j(t): realised wait
+                self.log.record_blocked_tick(  # omega_j(t): realised wait
+                    task.task_id, overridden=agent_id in result.overridden
+                )
                 self._record_wait(realised_locations[agent_id], tasks_by_id[task.task_id])
             else:
                 self.log.record_moving_tick(task.task_id)
